@@ -4,6 +4,7 @@
 #   python examples/cmhd_channel_run.py --stage 1 --nx 256            # the reduced-res gate
 #   python examples/cmhd_channel_run.py --stage 2 --nx 64 --ny 64 --nz 64 --t-end 10
 #   python examples/cmhd_channel_run.py --stage 3 --nx 128 --ny 128 --nz 32 --t-end 12
+#   python examples/cmhd_channel_run.py --stage 4 --nx 128 --ny 128 --nz 32 --t-end 15
 #
 # Always run with TARANIS_PRECISION=64. CMHD is dims=3 + z_spectral + single process
 # (taranis/physics/cmhd.py::_check_supported), so there is no MPI path here; on a laptop the
@@ -174,6 +175,46 @@
 # to compare against c_k. Expect ~10%: resonant absorption in the smooth layer and the
 # finite delta both shift it.
 #
+# STAGE 4 (nonlinear 3D) removes the wave entirely and puts a FIELD-ALIGNED SHEARED FLOW
+# across the slab instead, on a lighter, warmer equilibrium: chi = 2, cs0 = 0.5, so
+# B_in^2 = 0.5, v_A,in = 0.5, beta_out = 0.5, beta_in = 2. The flow is
+#
+#     u_z(x) = dU (f(x) - 0.5),   dU = 1.2
+#
+# i.e. the slab streams at +0.6 and the exterior at -0.6 (the symmetric frame is a CFL
+# choice: max|u_z| = dU/2). Because u is ALONG B and depends only on x, u x B = 0,
+# u.grad u = 0, u.grad rho = 0 and div u = 0: it changes no force balance and the state is
+# an exact nonlinear equilibrium, exactly like the static one it is built on.
+#
+# THE EXPERIMENT is the gap between two Kelvin-Helmholtz thresholds for a field-aligned
+# shear. Across a SHARP interface between the two media,
+#
+#     dU_c^2 = (rho_i + rho_e)(B_i^2 + B_e^2)/(rho_i rho_e) = 3*1.5/2 = 2.25 -> dU_c = 1.5
+#
+# while a shear layer lying WHOLLY INSIDE the slab has both sides made of the same medium
+# and its threshold is the ordinary field-aligned one,
+#
+#     dU_c = 2 v_A,in = 1.0.
+#
+# dU = 1.2 sits BETWEEN them: the configuration as launched is stable, and it is unstable
+# to any process that folds a comparable shear into the slab interior. Whether that happens
+# is the run's question -- it is not asserted here.
+#
+# THE SEED is the same random-phase (u_x, u_y) field stages 2-3 use, at rms 2% of unity
+# (seed_amp = 0.02, 1 <= ikx,|iky| <= 8, 0 <= ikz <= 2, seed = 1), and its k_z split is the
+# reason the diagnostics below exist. The k_z = 0 part cannot make a k.U != 0 instability at
+# all; what it does is LIFT-UP, d_t u_z = -u_x d_x U_z, which grows streak energy like t^2
+# with no exponent anywhere. The k_z != 0 part is the only channel a genuine secondary KH
+# can use. So the discriminator between "the shear folds and stays 2D" and "the flow goes
+# 3D" is E_kz, and E_streak/E_vort are there to say what the k_z = 0 field was doing
+# meanwhile. config.json records the seed's k_z = 0 and k_z != 0 rms separately (exactly,
+# by orthogonality of the modes -- _seed_rms_split).
+#
+# A NOTE ON THE CONTROL. With seed_kzmax = 0 the IC is exactly z-independent, and a
+# z-independent 3D CMHD state stays z-independent exactly (CLAUDE.md), so E_kz must sit at
+# round-off for the whole run. That is the check that E_kz is a clean 3D monitor and not a
+# floor set by the IC or by the diagnostic.
+#
 # ---------------------------------------------------------------------------- what is here
 #
 #   make_data(snap_path, stage=1, ...) -> bool    resumable/idempotent, the lugus contract
@@ -235,6 +276,10 @@ BASE = dict(
     bz_wave=False,           # add the eigenfunction's b_z = -B_z'(x) xi_x, which is what
                              # makes the propagating IC EXACTLY solenoidal. Default False
                              # = the IC as briefed; see the div B note in the header.
+    # ---- stage-4 only (the field-aligned shear flow). Unused by stages 1-3.
+    dU=0.0,                  # u_z(x) = dU*(f(x) - 0.5): the slab streams at +dU/2, the
+                             # exterior at -dU/2. 0 disables the flow.
+    streak_fit_t=10.0,       # report(): the A t^2 lift-up fit uses records with t <= this
 )
 
 STAGES = {
@@ -248,6 +293,16 @@ STAGES = {
     # defaulted here so a production launch needs fewer overrides.
     3: dict(nx=256, ny=256, nz=256, a=0.0, hyper=3, diss=5.6e-13, t_end=80.0,
             seed_amp=1e-3, U0=0.1, ky0=2, kink=True, propagating=True, bz_wave=False),
+    # stage 4: a field-aligned SHEARED FLOW across the slab and no wave at all (a = U0 = 0).
+    # chi = 2, cs0 = 0.5 -> B_in^2 = 0.5, v_A,in = 0.5, beta_out = 0.5, beta_in = 2. The
+    # flow u_z(x) = dU (f(x) - 0.5) is along B, so it changes no force balance and the state
+    # is still an exact equilibrium; dU = 1.2 is SUB-critical for the sharp interface
+    # (dU_c = 1.5) and SUPER-critical for a shear layer folded wholly inside the slab
+    # (dU_c = 2 v_A,in = 1.0). The 2% seed carries k_z in {0,1,2}: the k_z = 0 part is the
+    # lift-up/streak channel, the k_z != 0 part is what a secondary KH needs (k.U != 0).
+    4: dict(nx=256, ny=256, nz=256, chi=2.0, cs0=0.5, a=0.0, U0=0.0, dU=1.2,
+            hyper=3, diss=5.6e-13, t_end=60.0,
+            seed_amp=0.02, seed=1, seed_nmax=8, seed_kzmax=2),
 }
 
 # per-stage driver defaults (block size, diagnostic and snapshot cadence). A None entry in
@@ -256,15 +311,29 @@ STAGE_DRIVER = {
     1: dict(nblock=200, diag_every=None, snap_every=None),   # t_half/60, t_half/4
     2: dict(nblock=20, diag_every=0.5, snap_every=10.0),
     3: dict(nblock=20, diag_every=0.5, snap_every=10.0),
+    4: dict(nblock=20, diag_every=0.5, snap_every=10.0),
 }
+
+
+def _fslab(x, cfg, xp=np):
+    """The slab shape function f(x) = 0.5(tanh((x-x1)/delta) - tanh((x-x2)/delta)): 1 inside
+    the middle half of the box, 0 outside, to e^-20 at the box edges."""
+    x1, x2 = cfg["Lx"]/4.0, 3.0*cfg["Lx"]/4.0
+    return 0.5*(xp.tanh((x - x1)/cfg["delta"]) - xp.tanh((x - x2)/cfg["delta"]))
 
 
 def _profile(x, cfg, xp=np):
     """(rho, B_z) of the static equilibrium at coordinate x. Works on numpy or jax arrays."""
-    x1, x2 = cfg["Lx"]/4.0, 3.0*cfg["Lx"]/4.0
-    f = 0.5*(xp.tanh((x - x1)/cfg["delta"]) - xp.tanh((x - x2)/cfg["delta"]))
+    f = _fslab(x, cfg, xp=xp)
     rho = 1.0 + (cfg["chi"] - 1.0)*f
     return rho, xp.sqrt(1.0 - 2.0*cfg["cs0"]**2*(rho - 1.0))
+
+
+def _dfslab(x, cfg, xp=np):
+    """f'(x), analytically -- the shape of the shear S(x) = dU f'(x) at stage 4."""
+    x1, x2 = cfg["Lx"]/4.0, 3.0*cfg["Lx"]/4.0
+    d = cfg["delta"]
+    return 0.5*((1.0/xp.cosh((x - x1)/d))**2 - (1.0/xp.cosh((x - x2)/d))**2)/d
 
 
 def resolve_config(stage, **overrides):
@@ -328,8 +397,33 @@ def resolve_config(stage, **overrides):
     r_out, r_in = (c_k - 1.0)/(c_k + 1.0), (c_k - vA_in)/(c_k + vA_in)
     ky_wave = cfg["ky0"]*2.0*np.pi/cfg["Ly"]
 
-    # the wave amplitude that sets the CFL estimate: U0 at stage 3, a otherwise
-    u_amp = cfg["U0"] if cfg["stage"] == 3 else cfg["a"]
+    # ---- the stage-4 shear-flow numbers (pure functions of chi and cs0 plus dU, so they
+    # are recorded for every stage). Kelvin-Helmholtz thresholds for a FIELD-ALIGNED shear:
+    #   sharp interface between two magnetized half-spaces (Chandrasekhar):
+    #       dU_c^2 = (rho_i + rho_e)(B_i^2 + B_e^2)/(rho_i rho_e)
+    #   a shear layer lying WHOLLY inside the slab (both sides the same medium):
+    #       dU_c   = 2 v_A,in
+    # At chi = 2, cs0 = 0.5 these are 1.5 and 1.0, and the stage-4 default dU = 1.2 sits
+    # between them: sub-critical at the interface, super-critical for shear folded inside.
+    rho_i, rho_e, b2_e = cfg["chi"], 1.0, 1.0
+    dU_c_sheet = float(np.sqrt((rho_i + rho_e)*(bz2_in + b2_e)/(rho_i*rho_e)))
+    dU_c_layer = float(2.0*np.sqrt(bz2_in/cfg["chi"]))
+    cfg.update(dU_c_sheet=dU_c_sheet, dU_c_sheet_sq=float(dU_c_sheet**2),
+               dU_c_layer=dU_c_layer,
+               uz_in=float(0.5*cfg["dU"]), uz_out=float(-0.5*cfg["dU"]))
+    # the seed's k_z = 0 / k_z != 0 rms split, exact by orthogonality (see _seed_rms_split):
+    # the k_z = 0 part drives lift-up streaks, the k_z != 0 part is the 3D channel.
+    rms0, rmsz = _seed_rms_split(cfg)
+    cfg.update(seed_rms_kz0=rms0, seed_rms_kznz=rmsz)
+
+    # the wave amplitude that sets the CFL estimate: U0 at stage 3, max|u_z| + the seed at
+    # stage 4 (there is no wave there), a otherwise
+    if cfg["stage"] == 3:
+        u_amp = cfg["U0"]
+    elif cfg["stage"] == 4:
+        u_amp = 0.5*abs(cfg["dU"]) + cfg["seed_amp"]
+    else:
+        u_amp = cfg["a"]
     cf_max = float(np.max(np.sqrt(cfg["cs0"]**2 + bz_x**2/rho_x)))
     dmin = min(Lx/nx, cfg["Ly"]/cfg["ny"], Lz/cfg["nz"])
     dt_est = cfg["cfl_safety"]*dmin/(cf_max + u_amp)
@@ -380,6 +474,55 @@ def _seed_coeffs(cfg):
     c = rng.normal(size=shape)*np.exp(1j*rng.uniform(0.0, 2.0*np.pi, size=shape))
     c *= cfg["seed_amp"]/np.sqrt(0.5*np.sum(np.abs(c)**2))
     return ikx, iky, ikz, c
+
+
+def _seed_rms_split(cfg):
+    """(rms of the k_z = 0 part, rms of the k_z != 0 part) of the seed, EXACTLY.
+
+    The modes are mutually orthogonal and none sits at k = 0, so the mean square of any
+    sub-set of them is sum |c|^2/2 over that sub-set -- no grid, no transform. The two
+    returned numbers satisfy rms_kz0^2 + rms_kznz^2 = seed_amp^2. They matter at stage 4:
+    the k_z = 0 part is the lift-up channel (it cannot make a k.U != 0 secondary
+    instability), the k_z != 0 part is what E_kz monitors."""
+    if not cfg["seed_amp"] > 0.0:
+        return 0.0, 0.0
+    _, _, _, c = _seed_coeffs(cfg)
+    a2 = np.abs(c)**2
+    return float(np.sqrt(0.5*a2[..., 0].sum())), float(np.sqrt(0.5*a2[..., 1:].sum()))
+
+
+def _seed_profile_x(cfg, kz_part="kz0"):
+    """<u_x^2 + u_y^2>_{y,z}(x) of the seed, restricted to the k_z = 0 modes ("kz0"), the
+    k_z != 0 modes ("kznz") or all of them ("all").
+
+    Host float64. The y and z means are taken on SMALL uniform grids that resolve the seed's
+    harmonics (|iky| <= seed_nmax, ikz <= seed_kzmax): a uniform-grid mean of e^{i k y} is
+    exactly zero unless k is a multiple of the grid's Nyquist wrap, so the result is the
+    exact continuum (y,z) average, not a sampled one. Only the x dependence is kept, and it
+    is evaluated on the run's own x grid. Used by report()'s lift-up sanity number, which
+    weights the shear S(x)^2 by where the seed actually has amplitude."""
+    ikx, iky, ikz, c = _seed_coeffs(cfg)
+    sel = {"kz0": slice(0, 1), "kznz": slice(1, None), "all": slice(None)}[kz_part]
+    c = c[..., sel]
+    ikz = ikz[sel]
+    if c.shape[-1] == 0:
+        return np.zeros(cfg["nx"])
+    nx = cfg["nx"]
+    ny = max(4*int(cfg["seed_nmax"]) + 2, 8)
+    nz = max(4*(int(cfg["seed_kzmax"]) + 1), 8)
+    x = np.linspace(0.0, cfg["Lx"], nx, endpoint=False)
+    y = np.linspace(0.0, cfg["Ly"], ny, endpoint=False)
+    z = np.linspace(0.0, cfg["Lz"], nz, endpoint=False)
+    ex = np.exp(1j*(2*np.pi/cfg["Lx"])*x[:, None]*ikx[None, :])
+    ey = np.exp(1j*(2*np.pi/cfg["Ly"])*y[:, None]*iky[None, :])
+    ez = np.exp(1j*(2*np.pi/cfg["Lz"])*z[:, None]*ikz[None, :])
+    w = np.zeros(nx)
+    for comp in range(2):
+        t1 = np.einsum("abc,zc->abz", c[comp], ez)
+        t2 = np.einsum("abz,yb->azy", t1, ey)
+        f = np.real(np.einsum("azy,xa->zxy", t2, ex))
+        w += np.mean(f*f, axis=(0, 2))
+    return w
 
 
 def _seed_field(x, y, z, cfg):
@@ -494,11 +637,45 @@ def _make_ic_stage3(cfg):
     return ic
 
 
+def _make_ic_stage4(cfg):
+    """The stage-4 IC: a FIELD-ALIGNED sheared flow on the same static slab equilibrium.
+
+        u_z(x) = dU (f(x) - 0.5),   u_x, u_y = the seed,   B_perp = 0
+
+    with f the slab shape function, so the slab streams at +dU/2 and the exterior at -dU/2
+    (the symmetric frame keeps max|u_z| = dU/2 for the CFL). This is an EXACT nonlinear
+    equilibrium of the continuum equations, on top of the pressure-balanced profile: u is
+    along z and depends only on x, so u.grad u = u_z d_z u = 0, u.grad rho = 0, div u = 0
+    and u x B = 0 (both vectors are along z hat) -- the induction and continuity sources
+    vanish identically and the force balance is the unchanged static one. The only thing
+    that touches it is dissipation, which acts on u_z like every other field.
+
+    No wave: a = U0 = 0. The seed is the same random-phase (u_x, u_y) field stages 2-3 use,
+    at rms seed_amp = 2% and with k_z in {0, ..., seed_kzmax} -- the k_z = 0 part feeds
+    lift-up (d_t u_z = -u_x d_x U_z), the k_z != 0 part is the only channel a secondary
+    KH with k.U != 0 can grow in."""
+    dU = cfg["dU"]
+
+    def ic(x, y, z):
+        one = jnp.ones(jnp.broadcast_shapes(x.shape, y.shape, z.shape))
+        rho, bz = _profile(x, cfg, xp=jnp)
+        uz = dU*(_fslab(x, cfg, xp=jnp) - 0.5)
+        ux, uy = _seed_field(x, y, z, cfg)
+        if ux is None:
+            ux, uy = 0.0*one, 0.0*one
+        zero = 0.0*one
+        return jnp.stack([rho*one, ux*one, uy*one, uz*one, zero, zero, bz*one])
+
+    return ic
+
+
 def make_ic(cfg):
     """The IC callable for run.initialize (which hands it x (1,nx,1), y (1,1,ny), z (nz,1,1)
     and applies the 2/3 dealias mask to the result)."""
     if cfg["stage"] == 3:
         return _make_ic_stage3(cfg)
+    if cfg["stage"] == 4:
+        return _make_ic_stage4(cfg)
     a, kz = cfg["a"], cfg["kz"]
 
     def ic(x, y, z):
@@ -533,12 +710,20 @@ _SPECTRA = ("spec_kin", "spec_mag", "spec_rho")
 # interface column u_x(x_1, y=0, z) the phase-speed fit reads.
 _SCALARS3 = ("E_zp", "E_zm", "E_minor_frac", "E_ky_other", "divu_max", "divu_max_clear")
 _PROFILES3 = ("e_zp_x", "e_zm_x", "ux_iface")
+# stage 4 only: the k_z != 0 monitor (the 3D discriminator), the lift-up streak and in-plane
+# vortex energies, E_ky_other (kept from stage 3 -- nothing is driven at ky0 here, so it is
+# just E_ky minus its |iky| = ky0 band), the mean z-momentum conservation check, and the two
+# 1-D profiles of the mean shear.
+_SCALARS4 = ("E_kz", "E_kzu", "E_streak", "E_vort", "E_ky_other", "Pz_mean")
+_PROFILES4 = ("Uz_mean", "Sloc")
 
 
 def _empty_trace(stage):
-    cols = list(_SCALARS) + list(_PROFILES) + (list(_SPECTRA) if stage in (2, 3) else [])
+    cols = list(_SCALARS) + list(_PROFILES) + (list(_SPECTRA) if stage in (2, 3, 4) else [])
     if stage == 3:
         cols += list(_SCALARS3) + list(_PROFILES3)
+    if stage == 4:
+        cols += list(_SCALARS4) + list(_PROFILES4)
     return {c: [] for c in cols}
 
 
@@ -663,6 +848,9 @@ def record(state, kgrid, params, cfg, trace, diag, static=None, verbose=True):
     Pkx = np.fft.fftshift(np.abs(np.asarray(state.fields[2][int(cfg["mz"]), :, 0]))**2/nrm)
 
     # 0.5<|u|^2> split by ky == 0 / ky != 0 (Parseval with the rfft2 y-doubling factor).
+    # Under z_spectral, axis 0 of a field is k_z (both signs, full fftfreq) and axis 2 is
+    # the half k_y axis, which is what yfac doubles -- so q[ikz, ikx, iky] is the mode's
+    # contribution to 0.5<|u|^2> and any sub-set sum below is on the same convention.
     uk = np.asarray(state.fields[1:4])
     q = 0.5*(np.abs(uk)**2).sum(0)*np.asarray(kgrid.yfac)/nrm
     row = dict(t=float(state.t), E_kin=float(ek), E_mag=float(em), E_int=float(ei),
@@ -696,7 +884,31 @@ def record(state, kgrid, params, cfg, trace, diag, static=None, verbose=True):
                    divu_max=dmax, divu_max_clear=dclear,
                    ux_iface=np.array(ux[:, ix1, 0]))
 
-    if stage in (2, 3):
+    if stage == 4:
+        # The mode-set energies. Axis 0 of a z_spectral field is k_z (index 0 IS k_z = 0,
+        # every other index is k_z != 0) and axis 2 is the half k_y axis (index 0 is
+        # k_y = 0). All four are 0.5<|.|^2> on the same convention as E_u / E_ky above.
+        qz = 0.5*(np.abs(uk[2])**2)*np.asarray(kgrid.yfac)/nrm          # u_z alone
+        qxy = 0.5*(np.abs(uk[0])**2 + np.abs(uk[1])**2)*np.asarray(kgrid.yfac)/nrm
+        keep = np.ones(q.shape[-1], dtype=bool)
+        keep[0] = False
+        if int(cfg["ky0"]) < q.shape[-1]:
+            keep[int(cfg["ky0"])] = False
+        ux, uz = real(1), real(3)
+        # Uz_mean(x) = <u_z>_{y,z}: the folding and broadening of the mean shear.
+        # Sloc(x) = <(d_x u_z)^2>_{y,z}^{1/2}, from ONE inverse transform of the spectral
+        # d/dx (kgrid.kx is (nkx,1) and broadcasts onto the (nkz,nkx,nky) field).
+        dxuz = np.asarray(jr.grids.ifft(1j*kgrid.kx*state.fields[3], params))
+        row.update(E_kz=float(q[1:].sum()),           # k_z != 0, all three components
+                   E_kzu=float(qz[1:].sum()),         # k_z != 0, u_z only
+                   E_streak=float(qz[0, :, 1:].sum()),    # k_z = 0, k_y != 0, u_z
+                   E_vort=float(qxy[0, :, 1:].sum()),     # k_z = 0, k_y != 0, u_x and u_y
+                   E_ky_other=float(q[:, :, keep].sum()),
+                   Pz_mean=float(np.mean(rho*uz)),
+                   Uz_mean=np.mean(uz, axis=(0, 2)),
+                   Sloc=np.sqrt(np.mean(dxuz*dxuz, axis=(0, 2))))
+
+    if stage in (2, 3, 4):
         kb, sk, sm, sd = dcmhd.spectra(state, kgrid, params)
         row.update(spec_kin=np.asarray(sk), spec_mag=np.asarray(sm), spec_rho=np.asarray(sd))
         if static is not None and "kbins" not in static:
@@ -707,6 +919,8 @@ def record(state, kgrid, params, cfg, trace, diag, static=None, verbose=True):
         planes = [("rho", rho), ("u_x", ux), ("u_y", uy), ("B_y", by)]
         if stage == 3:
             planes.append(("B_x", bx))           # the wave is x-polarised at stage 3
+        if stage == 4:
+            planes.append(("u_z", uz))           # the sheared component is u_z at stage 4
         np.savez(os.path.join(diag, f"slices_{idx:04d}.npz"), t=np.float64(state.t),
                  # [x,y] plane at z index 0 and [x,z] plane at y index 0, float32
                  **{f"{n}_xy": f[0].astype(np.float32) for n, f in planes},
@@ -722,6 +936,9 @@ def record(state, kgrid, params, cfg, trace, diag, static=None, verbose=True):
             msg += ("\n            E_zp={E_zp:.6e} E_zm={E_zm:.6e} "
                     "minor={E_minor_frac:.5f} E_ky_other={E_ky_other:.4e} "
                     "divu={divu_max:.3e}")
+        if stage == 4:
+            msg += ("\n            E_vort={E_vort:.6e} E_streak={E_streak:.6e} "
+                    "E_kz={E_kz:.6e} E_kzu={E_kzu:.6e} <rho u_z>={Pz_mean:.8e}")
         print(msg.format(**row), flush=True)
     return row
 
@@ -742,6 +959,8 @@ _CONFIG_LOCKED = ("stage", "nx", "ny", "nz", "a", "chi", "cs0", "delta", "hyper"
 # version of this file (which has no U0/ky0/kink/propagating record) still resumes at
 # stages 1-2 instead of tripping the "<absent>" comparison.
 _CONFIG_LOCKED_3 = ("U0", "ky0", "kink", "propagating", "bz_wave")
+# stage-4-only IC key, locked for the same reason (dU is the whole initial condition).
+_CONFIG_LOCKED_4 = ("dU",)
 
 
 def _check_config(diag, cfg):
@@ -751,7 +970,8 @@ def _check_config(diag, cfg):
     if os.path.exists(path):
         with open(path) as f:
             old = json.load(f)
-        locked = _CONFIG_LOCKED + (_CONFIG_LOCKED_3 if cfg["stage"] == 3 else ())
+        locked = _CONFIG_LOCKED + (_CONFIG_LOCKED_3 if cfg["stage"] == 3 else ()) \
+                                + (_CONFIG_LOCKED_4 if cfg["stage"] == 4 else ())
         diffs = {k: (old.get(k, "<absent>"), cfg[k]) for k in locked
                  if old.get(k, "<absent>") != cfg[k]}
         if diffs:
@@ -820,6 +1040,21 @@ def make_data(snap_path, stage=1, wall_budget=3300.0, nblock=None, diag_every=No
         print(f"  c_k={cfg['c_k']:.6f} (between v_A,in={cfg['vA_in']:.4f} and 1); "
               f"period 2pi/(k_z c_k)={cfg['kink_period']:.4f}; minor/major amplitude ratio "
               f"{cfg['minor_ratio_out']:+.4f} out, {cfg['minor_ratio_in']:+.4f} in")
+    if cfg["stage"] == 4:
+        print(f"  shear flow: u_z(x) = dU*(f(x)-0.5) with dU={cfg['dU']} -> slab at "
+              f"{cfg['uz_in']:+.4f}, exterior at {cfg['uz_out']:+.4f}; no wave (a=0, U0=0)")
+        print(f"  KH thresholds: sharp interface dU_c = sqrt((rho_i+rho_e)(B_i^2+B_e^2)/"
+              f"(rho_i rho_e)) = {cfg['dU_c_sheet']:.4f} (dU_c^2 = "
+              f"{cfg['dU_c_sheet_sq']:.4f});  layer inside the slab dU_c = 2 v_A,in = "
+              f"{cfg['dU_c_layer']:.4f}")
+        print(f"                 dU = {cfg['dU']} is "
+              f"{'SUB' if cfg['dU'] < cfg['dU_c_sheet'] else 'SUPER'}-critical at the "
+              f"interface and "
+              f"{'SUPER' if cfg['dU'] > cfg['dU_c_layer'] else 'SUB'}-critical for shear "
+              f"folded wholly inside the slab -- that gap is the experiment")
+        print(f"  seed: rms={cfg['seed_amp']} over 1<=ikx,|iky|<={cfg['seed_nmax']}, "
+              f"0<=ikz<={cfg['seed_kzmax']}, seed={cfg['seed']}; rms(k_z=0)="
+              f"{cfg['seed_rms_kz0']:.6e}, rms(k_z!=0)={cfg['seed_rms_kznz']:.6e}")
     print(f"  dt_est={cfg['dt_est']:.6g} -> ~{cfg['nsteps_est']} steps; nblock={nblk}"
           + (f" (capped from {nblock} by diag_every={diag_every:.4g})" if nblk != nblock else "")
           + f", diag_every={diag_every:.4g}, snap_every={snap_every:.4g}, nsnap={nsnap}")
@@ -839,7 +1074,7 @@ def make_data(snap_path, stage=1, wall_budget=3300.0, nblock=None, diag_every=No
 
     trace, static = _load_trace(diag, cfg["stage"], float(state.t))
     static = {**_static_arrays(cfg), **static}
-    if cfg["stage"] in (2, 3):
+    if cfg["stage"] in (2, 3, 4):
         _prune_slices(diag, len(trace["t"]))
 
     mngr = jr.snapshot_manager_setup(params=params, snap_path=snap_path, nsnap=nsnap)
@@ -1041,6 +1276,14 @@ def report(snap_path):
               "E_kin, not E_kin itself:\n   "
               f"mean_x e_kin_x/E_kin runs over [{frac.min():.6f}, {frac.max():.6f}] "
               f"(the deficit is u_z)")
+    elif cfg["stage"] == 4:
+        frac = ew_kin/np.maximum(tr["E_kin"], 1e-300)
+        print("\n-- normalization: at stage 4 the flow is ALONG z, so e_kin_x (which is the "
+              "u_y\n   integrand only) is a small fraction of E_kin by construction -- the "
+              "identity\n   mean_x e_kin_x == E_kin holds only when u_y is the sole velocity "
+              "component:\n   "
+              f"mean_x e_kin_x/E_kin runs over [{frac.min():.6e}, {frac.max():.6e}] "
+              f"(the deficit is u_z and u_x)")
     else:
         rel = np.abs(ew_kin - tr["E_kin"])/np.maximum(tr["E_kin"], 1e-300)
         print(f"\n-- normalization: max |mean_x e_kin_x - E_kin|/E_kin = {rel.max():.3e} "
@@ -1054,6 +1297,8 @@ def report(snap_path):
         _report_stage1(cfg, tr, diag, ew_kin, ew_mag)
     elif cfg["stage"] == 3:
         _report_stage3(cfg, tr, diag, ew_kin, ew_mag)
+    elif cfg["stage"] == 4:
+        _report_stage4(cfg, tr, diag)
     else:
         _report_stage2(cfg, tr, diag)
     _plots(cfg, tr, diag)
@@ -1303,6 +1548,144 @@ def _report_stage3(cfg, tr, diag, ew_kin, ew_mag):
           f"({len(tr['kbins'])} bins to the grid corner; diagnostics.cmhd.spectra)")
 
 
+def _fit_t2(t, y, t_max):
+    """Least-squares A in y = A t^2 over the records with 0 < t <= t_max (one parameter, no
+    intercept -- lift-up predicts exactly A t^2 out of a zero-streak start). Returns
+    (A, npts, t_lo, t_hi, rel_resid) or None. rel_resid is max|y - A t^2|/max(y) over the
+    window, i.e. how well a pure t^2 actually describes it -- print it, do not hide it."""
+    m = (t > 0) & (t <= t_max + 1e-12) & np.isfinite(y) & (y > 0)
+    if m.sum() < 3:
+        return None
+    tt, yy = t[m], y[m]
+    A = float(np.sum(tt**2*yy)/np.sum(tt**4))
+    resid = float(np.max(np.abs(yy - A*tt**2))/max(yy.max(), 1e-300))
+    return A, int(m.sum()), float(tt[0]), float(tt[-1]), resid
+
+
+def _report_stage4(cfg, tr, diag):
+    """Stage 4: the sub-critical field-aligned shear flow. The question the run asks is
+    whether shear FOLDED into the slab (where the local threshold 2 v_A,in is lower than the
+    interface one) can break a flow that is stable as a sharp interface -- so the headline
+    monitors are E_kz (any k_z != 0 content at all: a secondary KH needs k.U != 0),
+    E_streak (the k_z = 0 lift-up channel, which is NOT an instability) and E_vort (the
+    in-plane seed, which should sit still early)."""
+    t, x = tr["t"], tr["x"]
+    dU = cfg["dU"]
+
+    print("\n== stage 4: field-aligned shear flow across the slab ==")
+    print(f"  profile: chi={cfg['chi']} cs0={cfg['cs0']} -> rho_in={cfg['rho_in']:.4f} "
+          f"B_z,in={cfg['bz_in']:.6f} v_A,in={cfg['vA_in']:.6f} "
+          f"beta_out={cfg['beta_out']:.4f} beta_in={cfg['beta_in']:.4f}")
+    print(f"  flow: u_z(x) = dU (f(x) - 0.5), dU = {dU} -> slab {cfg['uz_in']:+.4f}, "
+          f"exterior {cfg['uz_out']:+.4f}")
+    print(f"  KH thresholds: sharp interface dU_c = {cfg['dU_c_sheet']:.6f} "
+          f"(dU_c^2 = (rho_i+rho_e)(B_i^2+B_e^2)/(rho_i rho_e) = "
+          f"{cfg['dU_c_sheet_sq']:.6f});")
+    print(f"                 layer wholly inside the slab dU_c = 2 v_A,in = "
+          f"{cfg['dU_c_layer']:.6f}")
+    print(f"                 dU/dU_c(interface) = {dU/cfg['dU_c_sheet']:.4f} "
+          f"({'SUB' if dU < cfg['dU_c_sheet'] else 'SUPER'}-critical), "
+          f"dU/dU_c(inside) = {dU/cfg['dU_c_layer']:.4f} "
+          f"({'SUPER' if dU > cfg['dU_c_layer'] else 'SUB'}-critical)")
+    print(f"  seed: rms {cfg['seed_amp']} (1<=ikx,|iky|<={cfg['seed_nmax']}, "
+          f"0<=ikz<={cfg['seed_kzmax']}, seed={cfg['seed']}); "
+          f"rms(k_z=0) = {cfg.get('seed_rms_kz0', float('nan')):.6e}, "
+          f"rms(k_z!=0) = {cfg.get('seed_rms_kznz', float('nan')):.6e}")
+
+    print("\n-- the mode-set energies (all 0.5<|.|^2>, volume averages) --")
+    print("   E_vort  : k_z = 0, k_y != 0, u_x and u_y   (the in-plane seed vortices)")
+    print("   E_streak: k_z = 0, k_y != 0, u_z           (lift-up; the k_y=k_z=0 mean is out)")
+    print("   E_kz    : k_z != 0, all three components   (the 3D discriminator)")
+    print("   E_kzu   : k_z != 0, u_z only")
+    for i in range(len(t)):
+        print(f"  t={t[i]:9.4f}  E_vort={tr['E_vort'][i]:.6e}  "
+              f"E_streak={tr['E_streak'][i]:.6e}  E_kz={tr['E_kz'][i]:.6e}  "
+              f"E_kzu={tr['E_kzu'][i]:.6e}  E_ky={tr['E_ky'][i]:.6e}  "
+              f"E_ky_other={tr['E_ky_other'][i]:.6e}")
+
+    print(f"\n-- E_vort (should be ~flat while nothing is unstable): "
+          f"[{tr['E_vort'].min():.6e}, {tr['E_vort'].max():.6e}], "
+          f"end/start = {tr['E_vort'][-1]/max(tr['E_vort'][0], 1e-300):.6f}")
+
+    tfit = float(cfg.get("streak_fit_t", 10.0))
+    print(f"\n-- lift-up: E_streak fitted to A t^2 over t <= {tfit:g} --")
+    f2 = _fit_t2(t, tr["E_streak"], tfit)
+    if f2 is None:
+        print("  too few records in the window for a fit")
+    else:
+        A, npts, t0, t1, resid = f2
+        print(f"  A = {A:.6e} over t in [{t0:.4f}, {t1:.4f}] ({npts} records); "
+              f"max|E_streak - A t^2|/max(E_streak) = {resid:.4f}")
+        try:
+            w = _seed_profile_x(cfg, "kz0")
+            S = dU*_dfslab(x, cfg, xp=np)
+            wsum = max(w.sum(), 1e-300)
+            S2 = float(np.sum(w*S*S)/wsum)
+            eps0 = float(cfg.get("seed_rms_kz0") or np.sqrt(np.mean(w)))
+            print(f"  cf. eps_kz0^2 * <S^2>_seed = {eps0**2:.6e} * {S2:.6f} = "
+                  f"{eps0**2*S2:.6e}   (ratio A/that = {A/max(eps0**2*S2, 1e-300):.4f})")
+            print(f"     <S^2>_seed is mean(S^2) over x weighted by the seed's own "
+                  f"<u_x^2+u_y^2>_{{y,z}}(x)\n     for its k_z = 0 modes (_seed_profile_x); "
+                  f"max|S| = {np.max(np.abs(S)):.6f} at the layers.")
+            print("     WHAT THIS NUMBER IS: a dimensional sanity check, not a prediction. "
+                  "Lift-up\n     gives d_t u_z = -u_x d_x U_z, so E_streak = "
+                  "0.5<u_x^2 S^2> t^2; eps_kz0^2 is the\n     rms of BOTH in-plane "
+                  "components together and the 0.5 is dropped, so the\n     printed number "
+                  "over-counts by about 4 even before the k_y != 0 restriction,\n     the "
+                  "x-y correlation of u_x with S, and the shear's own evolution. Expect the\n"
+                  "     ratio to land somewhere around 0.1-0.5, and read only its ORDER.")
+        except Exception as exc:
+            print(f"  (no lift-up comparison: {exc})")
+
+    print("\n-- E_kz: the 3D monitor (an exponential window here is the transition) --")
+    f4 = _fit_exponential_window(t, tr["E_kz"])
+    if f4 is None:
+        print("  no clean exponential window (R^2 >= 0.99 over >= 4 records with a positive "
+              "slope) -- report the E_kz trace above as it is, not a growth rate")
+    else:
+        i, j, slope, r2 = f4
+        print(f"  exponential window t in [{t[i]:.4f}, {t[j-1]:.4f}] ({j-i} records): "
+              f"d ln E_kz/dt = {slope:.5f} (R^2 = {r2:.5f}) -> amplitude growth rate "
+              f"gamma = {slope/2:.5f}")
+        print(f"  cf. a KH on the folded layer, gamma ~ dU/2 * k = {dU/2:.4f} * k")
+    print(f"  E_kz: start {tr['E_kz'][0]:.6e}, end {tr['E_kz'][-1]:.6e}, max "
+          f"{tr['E_kz'].max():.6e} (end/start = "
+          f"{tr['E_kz'][-1]/max(tr['E_kz'][0], 1e-300):.6e})")
+    print(f"  E_kz/E_u: start {tr['E_kz'][0]/max(tr['E_u'][0], 1e-300):.6e}, end "
+          f"{tr['E_kz'][-1]/max(tr['E_u'][-1], 1e-300):.6e}")
+
+    print("\n-- <rho u_z>: conserved by the continuum equations, and by this scheme only to "
+          "scheme order\n   (the pressure and Lorentz forces have no net z component here, "
+          "but dissipation acts on\n   u_z and rho, and the ln-free rho form's products are "
+          "not exactly dealiased) --")
+    pz = tr["Pz_mean"]
+    d = pz - pz[0]
+    scale = max(abs(float(pz[0])), 1e-300)
+    print(f"  <rho u_z>(0) = {pz[0]:.10e}, end {pz[-1]:.10e}")
+    print(f"  drift: max|delta| = {np.abs(d).max():.4e} ({np.abs(d).max()/scale:.4e} "
+          f"relative), final delta = {d[-1]:+.4e}")
+
+    print("\n-- Uz_mean(x) = <u_z>_{y,z}: the folding/broadening of the mean shear --")
+    xi = np.unique(np.linspace(0, len(x) - 1, 9).astype(int))
+    print("       t   " + "".join(f"  x={x[j]:6.3f}" for j in xi)
+          + "   max|Uz|   max Sloc")
+    for i in np.unique(np.linspace(0, len(t) - 1, 6).astype(int)):
+        print(f"  {t[i]:8.3f} " + "".join(f"  {tr['Uz_mean'][i][j]:+8.4f}" for j in xi)
+              + f"  {np.abs(tr['Uz_mean'][i]).max():8.4f}  {tr['Sloc'][i].max():9.4f}")
+    print(f"  Sloc(x) = <(d_x u_z)^2>_{{y,z}}^{{1/2}}; at t=0 it is |dU f'(x)|, max = "
+          f"{np.max(np.abs(dU*_dfslab(x, cfg, xp=np))):.4f} analytically vs "
+          f"{tr['Sloc'][0].max():.4f} measured")
+
+    print(f"\n-- rho_min over the run: {tr['rho_min'].min():.6f} "
+          f"({'POSITIVE' if tr['rho_min'].min() > 0 else 'NON-POSITIVE -- rarefaction'})")
+    print(f"-- max |div B| metric: {tr['divB_max'].max():.3e}")
+    ns = len([n for n in os.listdir(diag) if n.startswith("slices_")])
+    print(f"-- {ns} slice files in {diag} (slices_NNNN.npz: rho/u_x/u_y/u_z/B_y as float32 "
+          f"[x,y] planes at z index 0 and [x,z] planes at y index 0)")
+    print(f"-- spectra: trace.npz carries spec_kin/spec_mag/spec_rho on kbins "
+          f"({len(tr['kbins'])} bins to the grid corner; diagnostics.cmhd.spectra)")
+
+
 def _plots(cfg, tr, diag):
     try:
         import matplotlib
@@ -1314,6 +1697,9 @@ def _plots(cfg, tr, diag):
     t = tr["t"]
     if cfg["stage"] == 3:
         _plots_stage3(cfg, tr, diag, plt)
+        return
+    if cfg["stage"] == 4:
+        _plots_stage4(cfg, tr, diag, plt)
         return
     fig, ax = plt.subplots(2, 2, figsize=(12, 8))
     a = ax[0, 0]
@@ -1423,6 +1809,73 @@ def _plots_stage3(cfg, tr, diag, plt):
     print(f"\n(plots written to {out})")
 
 
+def _plots_stage4(cfg, tr, diag, plt):
+    """The stage-4 2x3: the mode-set energies, the lift-up t^2 fit, Uz_mean(x), Sloc(x),
+    the kinetic spectrum, and the two conservation monitors (rho_min, <rho u_z> drift)."""
+    t, x = tr["t"], tr["x"]
+    fig, ax = plt.subplots(2, 3, figsize=(16, 8))
+
+    a = ax[0, 0]
+    for k, lab in (("E_vort", "E_vort (kz=0, ky!=0, u_perp)"),
+                   ("E_streak", "E_streak (kz=0, ky!=0, u_z)"),
+                   ("E_kz", "E_kz (kz!=0)"), ("E_kzu", "E_kzu (kz!=0, u_z)")):
+        a.semilogy(t, np.maximum(tr[k], 1e-300), label=lab)
+    a.set_xlabel("t")
+    a.legend(fontsize=6)
+    a.set_title(f"stage 4 mode-set energies (dU={cfg['dU']})")
+
+    a = ax[0, 1]
+    a.plot(t, tr["E_streak"], "o-", ms=3, label="E_streak")
+    f2 = _fit_t2(t, tr["E_streak"], float(cfg.get("streak_fit_t", 10.0)))
+    if f2 is not None:
+        a.plot(t, f2[0]*t**2, "--", label=f"A t^2, A={f2[0]:.3e}")
+    a.set_xlabel("t")
+    a.set_yscale("log")
+    a.legend(fontsize=7)
+    a.set_title("lift-up: E_streak vs A t^2")
+
+    a = ax[0, 2]
+    for i in np.unique(np.linspace(0, len(t)-1, 5).astype(int)):
+        a.plot(x, tr["Uz_mean"][i], label=f"t={t[i]:.1f}")
+    for xi, _ in _interfaces(cfg):
+        a.axvline(xi, color="0.7", lw=0.8)
+    a.set_xlabel("x")
+    a.set_ylabel("<u_z>_{y,z}")
+    a.legend(fontsize=6)
+    a.set_title("mean shear profile")
+
+    a = ax[1, 0]
+    for i in np.unique(np.linspace(0, len(t)-1, 5).astype(int)):
+        a.plot(x, tr["Sloc"][i], label=f"t={t[i]:.1f}")
+    a.set_xlabel("x")
+    a.set_ylabel("<(d_x u_z)^2>^{1/2}")
+    a.legend(fontsize=6)
+    a.set_title("local shear")
+
+    a = ax[1, 1]
+    for i in np.unique(np.linspace(0, len(t)-1, 4).astype(int)):
+        a.loglog(tr["kbins"], np.maximum(tr["spec_kin"][i], 1e-40), label=f"t={t[i]:.1f}")
+    a.set_xlabel("k_perp")
+    a.legend(fontsize=7)
+    a.set_title("kinetic spectrum")
+
+    a = ax[1, 2]
+    a.plot(t, tr["rho_min"], label="rho_min")
+    a.set_xlabel("t")
+    a.set_ylabel("rho_min")
+    a.legend(fontsize=7, loc="lower left")
+    a2 = a.twinx()
+    a2.plot(t, tr["Pz_mean"] - tr["Pz_mean"][0], "k--", lw=1)
+    a2.set_ylabel("<rho u_z> - <rho u_z>(0)")
+    a.set_title("rho_min and the z-momentum drift")
+
+    fig.tight_layout()
+    out = os.path.join(diag, "stage4_summary.png")
+    fig.savefig(out, dpi=110)
+    plt.close(fig)
+    print(f"\n(plots written to {out})")
+
+
 # ------------------------------------------------------------------------------- __main__
 
 def main():
@@ -1439,6 +1892,14 @@ def main():
     p.add_argument("--seed-amp", type=float, default=None)
     p.add_argument("--hyper", type=int, default=None)
     p.add_argument("--U0", type=float, default=None, help="stage-3 wave amplitude")
+    p.add_argument("--dU", type=float, default=None,
+                   help="stage-4 shear amplitude: u_z = dU*(f(x)-0.5)")
+    p.add_argument("--chi", type=float, default=None, help="density contrast rho_in/rho_out")
+    p.add_argument("--cs0", type=float, default=None, help="sound speed at rho = 1")
+    p.add_argument("--seed-nmax", type=int, default=None)
+    p.add_argument("--seed-kzmax", type=int, default=None,
+                   help="seed ikz range 0..seed_kzmax; 0 gives a k_z-independent seed")
+    p.add_argument("--seed", type=int, default=None)
     p.add_argument("--ky0", type=int, default=None,
                    help="stage-3 perpendicular mode number (k_y = ky0*2pi/Ly)")
     p.add_argument("--sausage", action="store_true",
@@ -1456,7 +1917,9 @@ def main():
     snap_path = args.snap_path or f"examples/data/cmhd-channel-s{args.stage}/checkpoints"
     ov = {k: v for k, v in dict(nx=args.nx, ny=args.ny, nz=args.nz, a=args.a,
                                 diss=args.diss, t_end=args.t_end, hyper=args.hyper,
-                                U0=args.U0, ky0=args.ky0,
+                                U0=args.U0, ky0=args.ky0, dU=args.dU,
+                                chi=args.chi, cs0=args.cs0, seed=args.seed,
+                                seed_nmax=args.seed_nmax, seed_kzmax=args.seed_kzmax,
                                 seed_amp=args.seed_amp).items() if v is not None}
     if args.sausage:
         ov["kink"] = False
