@@ -1,202 +1,239 @@
-# Autodiff plan — forward-mode sensitivities: growth rates, saturation, statistics
+# Autodiff plan — linear stability by autodiff: eigenvalues, their sensitivities, and beyond
 
-**Status: DRAFT** (written 2026-08-15; nothing started). Three rungs; rung 1 needs no
-repo changes at all. Each rung that touches `taranis/` lands via the usual
-implement → adversarial-review flow.
+**Status: DRAFT v2** (v1 2026-08-15; rewritten 2026-09-27 around an eigenvalue harness —
+Alfred's decision: the old rung 1, a growth rate fitted from a nonlinear run and
+differentiated through the stepper, is REPLACED by the eigenvalue version below).
+Each rung that touches `taranis/` lands via the standing flow (implementer subagent →
+fresh adversarial review with mutation testing).
 
 ## Goal
 
-Make physically interesting sensitivities computable by autodiff, in increasing order of
-invasiveness and difficulty:
+Show that taranis's autodiff does physics a hand-written code cannot easily do:
 
-1. **Rung 1 — IC/equilibrium parameters** (e.g. current-sheet width a), target = linear
-   growth rate. Pure notebook work.
-2. **Rung 2 — physics parameters** (η first; in principle anything in `eqpars`), target =
-   growth rate. Introduces the one repo change: an `overrides` seam.
-3. **Rung 3 — beyond the linear phase**: (3a) saturated island amplitude (deterministic
-   steady state), (3b) statistical steady-state amplitudes in forced/chaotic runs.
+1. **Rung 0 — the eigen-harness.** The exact Jacobian of the discrete RHS, J = L + N′(x₀),
+   from `jax.jvp` / `jax.jacfwd`, and its spectrum. No linearized code is ever written.
+2. **Rung 1 — validation.** Classical tearing, then shear-flow tearing (Mallet, Eriksson,
+   Swisdak & Juno, JPP 91, E146 (2025) — "the paper" below) against an independent
+   eigencode.
+3. **Rung 1b — eigenvalue sensitivities.** dγ/dp from first-order perturbation theory
+   (left and right eigenvectors, mixed jvp); marginal curves by Newton on the eigenvalue.
+4. **Rung 2 — physics parameters and k** through an overrides seam.
+5. **Rung 2b — new science** the paper's 1D eigencode cannot reach.
+6. **Rung 3 — beyond the linear phase** (saturated islands; statistical steady states).
 
-The long-range motivation is fusion-relevant instabilities, where the quantities that
-matter are growth rates *and* saturated amplitudes as functions of equilibrium and
-physics parameters.
+## Why forward mode, mostly (decision, unchanged from v1)
 
-## Why forward mode (decision)
+Objectives are scalars with O(1)–O(5) parameters; `jax.jvp` costs ~2–3× an RHS and O(1)
+memory. `simulate`'s `lax.while_loop` is not reverse-differentiable; `block_of_steps` is a
+fixed-length `lax.scan` and is. **The one reverse-mode use** is Jᵀ·u (left eigenvectors,
+rung 1b): a `vjp` / `jax.linear_transpose` of ONE RHS evaluation — no trajectory storage.
+Reverse mode through time stays rejected (rung 3 notes).
 
-- Objectives are scalars; parameter counts are O(1)–O(5). `jax.jvp` costs ~2× a primal
-  run per tangent with O(1) memory (one tangent copy of the state pytree). Reverse-mode
-  cost scales with the number of *outputs* (= 1) — it buys nothing here.
-- `run.py`'s snapshot driver uses `lax.while_loop`: forward-differentiable, NOT
-  reverse-differentiable in JAX. Reverse would force a scan rewrite plus trajectory
-  storage (128×1024, ~2e4 steps: ~200 GB naive, ~300 MB with sqrt-T remat — possible,
-  pointless).
-- The linear phase is non-chaotic: tangents grow with the mode, not with a Lyapunov
-  exponent, so dγ/dp is well-conditioned. (Rung 3b is where this breaks; see below.)
+## Core identity (read before implementing anything)
 
-**Rejected: reverse mode / adjoints** (above). **Rejected: full traced-Parameters
-redesign** — see rung 2 for the override design that replaces it.
+`physics.construct_rhs` returns N(f) ONLY: the k-local linear part lives in `kgrid.lin`
+and the steppers apply it (`dt f = L f + N(f)`). So the Jacobian at an equilibrium x₀ is
 
-## What is already AD-friendly (audited 2026-08-15)
+    J v = kgrid.lin.apply_L(v) + jvp(N, (x₀,), (v,))[1]
 
-- The integrating factor is evaluated *inside* the traced region: propagators store L
-  (array data on `kgrid`, built once in `grids.setup_kgrids`) and compute exp(L·τ) at
-  call time with τ = dt traced (Putzer 2×2 and the sinh(z)/z Taylor branch are smooth
-  jnp code). Adaptive dt forced this design; AD inherits it for free.
-- LSRK stage loops and step blocks are `lax.scan` — forward-differentiates.
-- `kgrid` is a pytree of arrays (not static config), so L can carry tangents today.
-- The IC path (`run.py::initialize`) is user jnp code + a constant dealias-mask multiply.
+— forgetting the first term silently drops all dissipation. Use the operator's
+`apply_L` method, never `kgrid.lin`'s arrays (CLAUDE.md rule). Under `z_spectral`,
+`apply_L` also carries the ±i·kz Alfvén term, which is correct here (it IS part of J).
 
-Things that are static and must stay static (never in the differentiable surface):
-grid shapes, dims/flags, the integer `hyper` exponent, `cfl_every`.
+For a 1D-in-x equilibrium (every bracket of two functions of x vanishes, so any
+φ₀(x), ψ₀(x) is an exact ideal steady state), J is block-diagonal in ky. For ky ≠ 0 the
+block acting on one ky column (kx two-sided, inside the 2/3 mask) is **complex-linear** —
+no reality constraint couples it to anything — so it is an ordinary complex matrix of
+size 2·n_kx,kept. Box: Ly = 2π/k, `ny = 8` (the mode survives the 2/3 cut).
+Dealias-masked modes are spurious zero eigenvalues: restrict to the kept set.
 
-## Common experimental protocol (all rungs)
+Frozen-equilibrium assumption: resistive decay of x₀ is ignored (standard; the paper's
+eigencode makes the same assumption). N(x₀) ≠ 0 at O(η) — irrelevant to J.
 
-- `RMHD_PRECISION=64`. Seeds are 1e-7 and tangents ride on top; fp32 is not enough.
-- **Fixed dt** (`adaptive_timestep` off) inside anything differentiated: removes the
-  dt(fields) derivative path and its kinks. Choose dt from a primal reconnaissance run.
-- **Frozen windows**: no data-dependent window/threshold selection inside the
-  differentiated function. Pick fit windows from the primal run, then freeze.
-- **FD gate** (acceptance criterion, every rung): central finite differences at ≥2 step
-  sizes must match the jvp with the expected convergence order before any derivative is
-  believed or used downstream. Record the comparison in the notebook.
-- Rungs 1–2 run unforced (no RNG in the differentiated path). Rung 3b is forced: fix
-  `forcing_key` (common random numbers) so the derivative is pathwise at a frozen noise
-  realization. Repo rule applies: record the RNG reference before any forcing-adjacent
-  change.
+## Common protocol (all rungs)
 
-## Rung 1 — equilibrium width via the IC (no repo changes)
+- `TARANIS_PRECISION=64`. `dims=2` unless a rung says otherwise. Unforced.
+- **FD gate** (acceptance, every rung): J·v against the central difference
+  [N(x₀+εv) − N(x₀−εv)]/2ε (+ `apply_L`) at ≥2 ε, showing the expected O(ε²) convergence,
+  for random v and for the computed eigenvector.
+- Residual gate on every reported eigenpair: ‖Jv − λv‖/‖λv‖ printed alongside λ.
+- Grid convergence of every reported γ (nx doubling), since the periodic box is uniform.
 
-**Equilibrium family:** B_y(x; a) = tanh(sin x / a) / tanh(1/a) (normalization pins
-B_y(π/2) = 1). Exactly 2π-periodic; odd under x → x+π so the mean flux is zero and ψ
-stays periodic; near each null it is locally a Harris sheet of width exactly a
-(B ≈ tanh(x/a)); a ~ 1 sits near the cos(x) baseline. ψ is obtained spectrally,
-ψ̂ = B̂_y/(i k_x) (k_x ≠ 0, zero mean) — all jnp, differentiable in a. Seed modes and
-box as in `tearing-growth-vs-k.ipynb` (long-box trick: k stepped over box harmonics).
+## Rung 0 — the eigen-harness (repo change: new module + gate tests)
 
-**Objective:** γ(a) = [ln A(t₂) − ln A(t₁)] / (t₂ − t₁) with A = |ψ̂(k_x=0, k_seed)|,
-window frozen in the clean exponential phase, with the same equilibrium-decay
-correction the existing tearing notebooks use (the decaying background is itself
-differentiable, so the correction goes through the jvp).
+Module `taranis/stability.py` (name open; plain functions, no Parameters mutation, no
+new state fields; imports physics, never imported by the solver). Contents:
 
-**Targets, in order:**
+- `jvp_operator(x0, kgrid, params)` → the matrix-free `v ↦ J v` above (jitted).
+- `ky_block_matrix(x0, kgrid, params, iky)` → dense J restricted to one ky column, by
+  `jacfwd`/vmapped jvp over the kept-mode basis. Valid only for a ky-independent x₀
+  (assert it: x₀'s ky≠0 content is zero).
+- `eig_dense(Jblock)` → full spectrum + left/right eigenvectors (numpy/scipy `eig`,
+  host side; this is what validates "fastest mode" claims, see rung 1).
+- `shift_invert(J, sigma, k)` → a few eigenvalues nearest σ: dense LU for mid-size blocks
+  (up to the measured memory envelope), matrix-free GMRES inner solves for 2D equilibria.
+- `transpose_operator(...)` → u ↦ Jᴴu via `vjp` (for rung 1b and non-normal checks).
 
-1. dγ/da via `jax.jvp`, FD-gated.
-2. Local logarithmic derivative a·dlnγ/da against layer theory through the chain rule
-   on Harris Δ′(k,a): Δ′a = 2(1/ka − ka), FKR regime γ ∝ η^{3/5} Δ′^{4/5}. Compare in
-   the small-Δ′ part of the band where FKR holds.
-3. **Marginal curve:** Newton on γ(a) = 0 at fixed k, using forward-over-forward
-   (jvp-of-jvp) for the second derivative. Expected answer: the boundary lands on
-   ka = 1 (Δ′ = 0). An AD-computed marginal curve reproducing Δ′ = 0 is the headline
-   validation of the whole approach.
+Gates, `tests/test_stability.py` (both bootstrap/footer conventions; fp64):
 
-Cost: 128×1024 primal run is minutes on a laptop; jvp ≈ 2×; Newton needs a handful of
-iterations. Deliverable: `examples/tearing-sensitivity-2D.ipynb` alongside the
-existing tearing pair.
+1. FD gate above, 1D and 2D x₀.
+2. **Exact operator, no equilibrium:** x₀ = 0 ⇒ J = L exactly; eigenvalues −η k², −ν k²
+   (and hyper variants) to round-off. 3D `z_spectral` too, where L carries ±i·kz: the
+   eigenvalues are the damped Alfvén waves ±i kz − ηk² (ν = η) exactly.
+3. **Independent Fourier transcription (the differential cross-check):** for
+   ψ₀ = A cos(qx), φ₀ = αA cos(qx) (q a box harmonic), the ky-column block of J is
+   banded — it couples kx only to kx ± q — with entries written down by hand from the
+   linearized RMHD equations in Fourier space (a test-local transcription sharing
+   nothing with `NonlinearTerm` but the sign conventions of CLAUDE.md "Test particles").
+   Assert the dense `ky_block_matrix` equals it entrywise at round-off (away from the
+   dealias edge, where the harness's truncation is the defined behaviour). This is the
+   gate with teeth against factor/sign errors in the linearization. (A uniform in-plane
+   field is not available: ψ linear in x is not periodic.)
+4. `ky_block_matrix` against the full `jvp_operator` on a random ky-column vector.
+5. `transpose_operator` against the conjugate transpose of the dense block.
+6. The mutation-testing review ([[mutation-testing-gate-suites]]): one-line mutations to
+   `NonlinearTerm` / `linear_matrix` signs and factors must each fail a gate.
 
-## Rung 2 — physics parameters via an overrides seam
+## Rung 1 — validation (notebooks, no repo changes beyond rung 0)
 
-**Design decision: params keeps everything; differentiability is per-experiment.**
-`Parameters` stays the single static, hashable, self-documenting record it is now. A
-new optional `overrides` pytree (fixed key structure at trace time, traced values) is
-threaded `simulate → stepper → rhs / linear_matrix_func`. Which parameters are
-differentiable is a property of the *call* (the override pytree's structure), mirroring
-JAX's own argnums philosophy — not a global property of the config model.
+### 1a. Classical tearing
 
-Rules:
+cos x equilibrium and the Harris-like periodic family B_y = tanh(sin x/a)/tanh(1/a)
+(v1's rung-1 family: exactly periodic, locally Harris of width a). Targets: FKR
+γ ∝ η^{3/5}Δ′^{4/5}, Coppi γ ∝ η^{1/3}k^{2/3}, γ_max ∝ η^{1/2} at k_max ∝ η^{1/4};
+cross-check γ(η), γ(k) against `examples/tearing-mode-2D.ipynb` and
+`examples/tearing-growth-vs-k.ipynb` (time-domain measurements of the same solver — the
+eigenvalue must agree to their fit error). Double tearing appears automatically at
+low k (two sheets per period): report the mode pair.
 
-- `overrides=None` is a **Python-level branch**: the compiled graph must be literally
-  today's. **GATE: bitwise regression on the three reference configs** (same harness as
-  PRECISION_PLAN A5).
-- All parameter reads funnel through one helper (`getp(params, overrides, key)`), at the
-  *read sites*, not patched into derived arrays — η enters through L *and* through the
-  CFL dt estimate; a read-site seam catches every use, ad-hoc L patching silently
-  misses secondary reads. The refactor's real content is grepping down every
-  `params.eqpars` read once.
-- `params.save` stamps active override values into the run directory (the
-  self-documenting-run-dir invariant survives).
-- Static/structural parameters are excluded from the override space by construction.
+### 1b. Shear-flow tearing against the paper's eigencode
 
-Side benefit, AD aside: traced values mean η sweeps reuse the compiled step instead of
-retracing per value — dispersion-style scans get this for free.
+Setup exactly as the paper §7: a = v_Ay = 1, ν = 0 (`diss=(0, η)`, `hyper=1`),
+Ψ₀ = sech²x (so f = ∂xΨ₀ = −2 tanh sech², n = 2, Δ′a ≈ 15/(ka)²), Φ₀ = αΨ₀, S = 1/η.
+Also f = tanh (n = 1) via the periodic family above.
 
-**Targets:** dγ/dη FD-gated and cross-checked against the `tearing-mode-2D` γ(η) sweep;
-then the one-run local exponent dlnγ/dlnη (FKR 3/5 → Coppi 1/3 crossover along the
-dispersion curve, no parameter sweep).
+**Reference: Alfred's Julia eigencode**
+`/Users/alfy/Documents/current_projects/sheartearing/sheet_instabilities.jl`
+(Alfred: "several years old, I don't think it is very good"). What it is (read
+2026-09-27): 2nd-order 3-point FD on a geometrically stretched grid (`vargrid(dxmin,
+xlim, eps)`), outer boundary a Robin condition imitating e^{−K|x|}, generalized problem
+A v = γ B v in (ψ, ∇²φ), solved by shift-invert Arnoldi (KrylovKit) about a theory
+`goodguess`, selecting `:SR` of 1/(γ−σ) — i.e. **the eigenvalue just below the guess,
+not provably the fastest mode**. `scan_ar` and `scan_S` are broken (undefined `ik`,
+`whichf`, wrong arity); `eigenmode`, `scan_K`, `scan_K_ar`, `scan_S_K` look usable.
+Its strength is the stretched grid: S to 1e16 cheaply, which a uniform periodic grid
+cannot match.
 
-## Rung 3a — saturated island amplitude (deterministic steady state)
+Protocol:
+- Vendor a trimmed copy (eigenmode + vargrid + f/ddf + goodguess, provenance header) as
+  `tests/reference/shear_tearing_eigen.jl`; a generator `tests/_gen_shear_tearing_reference.py`
+  drives julia and writes `tests/data/shear_tearing_reference.npz` (force-added), with
+  the Julia code's OWN convergence study (dxmin, eps, xlim halved/doubled) recorded
+  alongside each point. Never regenerate to make a comparison pass.
+- Overlap window (the uniform-grid envelope is MEASURED in rung 0, not assumed; first
+  guess): S ∈ {1e3, 1e4, 1e5}, ka ∈ [0.1, 1], α ∈ {0, 0.3, 0.6, 0.8, 0.95}. Box
+  Lx ≥ 15/k so periodic images move Δ′ by < e^{−15}; nx resolving δ_in (paper eq 5.15)
+  by ≥ 10 points.
+- Acceptance: agreement to the larger of the two codes' measured convergence errors.
+  Where they disagree, the convergence studies decide which is wrong. The full dense
+  spectrum settles whether the Julia `:SR`-below-guess selection ever missed the
+  fastest mode — report it either way.
+- Science checks inside the window: the paper's figs 2 and 3 trends (γ suppressed with α,
+  k_max increasing with α), eigenfunction δ_in (paper's Ψ″ = max/4 width) vs eq 5.15.
+  The asymptotic S = 1e12 scalings are the eigencode's job, not ours.
 
-The saturated island is a stable fixed point (up to the slow resistive decay of the
-equilibrium, timescale ~1/η — quasi-static relative to saturation at t ~ few hundred;
-carry the usual decay caveat). Two routes, same machinery:
+Deliverable: `examples/tearing-eigen.ipynb` (1a + 1b).
 
-- **Converged tangent:** integrate the jvp past saturation; the tangent's transients
-  decay at the island's own stability rate and the tangent converges to dx*/dp. Read
-  dW_sat/dp (or d of any island functional) off the converged tangent. No new code.
-- **Implicit differentiation** (sharper, optional): at the fixed point solve
-  (∂F/∂x)·δx = −∂F/∂p matrix-free (GMRES with jvps of the RHS).
+## Rung 1b — eigenvalue sensitivities and marginal curves
 
-Validation target: saturation theory W_sat ∝ Δ′ (White/POEM-type), so dW_sat/da checks
-against the same Harris Δ′(k,a) as rung 1.
+For a simple eigenvalue λ with right v and left w (Jᴴw = λ̄w):
 
-## Rung 3b — statistical steady state (the honest frontier)
+    dλ/dp = wᴴ (∂J/∂p) v / (wᴴ v)
 
-**Step zero — measure λ₁ with the machinery we already have.** A jvp with zero
-parameter-tangent and a random state tangent *is* the tangent-linear model: Benettin
-renormalization of its norm gives λ₁, and extra orthonormalized tangents count the
-positive exponents m. This is the decision point, and it is nearly free.
+(∂J/∂p)·v is a mixed second derivative: jvp in p of the jvp in x. Any parameter that
+enters through x₀ is free — for shear tearing that is **α** (tangent ∂x₀/∂α = (Ψ₀, 0)),
+and the sheet width a. Targets:
 
-**If λ₁ ≈ 0** (steady or periodic saturated state): a time-averaged scalar amplitude
-⟨A⟩_T over a frozen window is a fine objective — accumulate the average (and its
-tangent) online inside the scan, O(1) memory, differentiate directly. Done.
+- **Running exponents** d lnγ / d ln(1−α²) against the paper's 1/2 (constant-Ψ),
+  2/3 (nonconstant-Ψ), and 4/7 at the maximum (fig 3), as smooth curves instead of fitted
+  slopes. FD-gated (dγ/dα vs [γ(α+h) − γ(α−h)]/2h).
+- **Marginal curve**: Newton on Re λ(a) = 0 at fixed k (second derivative by
+  forward-over-forward) for the classical family — must land on ka = 1 (Δ′ = 0 for
+  Harris). The headline validation of the sensitivity machinery.
+- Non-normality diagnostic: |wᴴv| (the eigenvalue condition number) vs α — shear makes J
+  strongly non-normal; report where the eigenvalue becomes ill-conditioned.
 
-**If λ₁ > 0** (chaotic): the naive estimator fails, and fails *counterintuitively*:
-d⟨A⟩_T/dp of a single trajectory does not converge to d⟨A⟩_∞/dp — the tangent grows
-like e^{λ₁t}, so the derivative estimate diverges as the averaging window grows.
-Longer averaging makes it worse, not better (Lea–Allen–Haine). Options, ranked by
-implementation cost on top of rungs 1–2:
+## Rung 2 — physics parameters and k via an overrides seam (unchanged design + k)
 
-1. **Ensemble of short-window tangents:** vmap the jvp over N independent ICs, window
-   T_seg ~ a few 1/λ₁; variance ~ e^{2λ₁ T_seg}/N. Embarrassingly parallel, zero new
-   machinery, logarithmically slow convergence — but plausibly sufficient at 2D-RMHD λ₁.
-2. **Forward NILSS:** m+1 tangent trajectories, segmented QR + a small least-squares
-   problem; forward-mode-only, no adjoint needed for O(1) parameters. Cost scales with
-   m — which step zero measures. The serious tool if (1) is too noisy.
-3. **Linear-response/FDT estimate** from correlation functions of a single run: cheap,
-   uncontrolled bias; cross-check only, never primary.
+`Parameters` stays static; an optional `overrides` pytree (fixed structure, traced values)
+reaches the read sites through one `getp(params, overrides, key)` helper. `overrides=None`
+is a Python branch — the compiled graph must be literally today's (standing refactor
+reference gate). `params.save` stamps active overrides. Static/structural parameters are
+excluded by construction.
 
-**State of the art in fusion (checked 2026-08-15).** Differentiable gyrokinetics now
-exists: iGENE (differentiable flux-tube GENE in TensorFlow, Phys. Plasmas 33, 083901
-(2026), arXiv:2605.03086) reverse-mode-differentiates *nonlinear time-averaged fluxes*
-and does profile-matching optimization with the results — but handles chaos by
-truncation: gradients computed over short windows from a saturated state, empirically
-divergent beyond ~512 steps (≈ the flux autocorrelation time, i.e. a few 1/λ₁ — exactly
-the bias-variance wall above), landing at 15–50% of the FD reference, "directionally
-correct". No shadowing, no ensembles. gyaradax (JAX flux-tube GK on the GKW model,
-arXiv:2604.06085) has AD for inverse problems/sensitivities. So the *gap* is not
-differentiable plasma codes — it is a *controlled* statistical-sensitivity estimator
-(shadowing or quantified-bias ensemble) in any plasma turbulence code. RMHD is a far
-cheaper place to build that than gyrokinetics. This rung is a paper-scale project, not
-a notebook.
+New in v2: **k as an override.** k enters through `kgrid.ky` (a pytree array built from
+the static `Ly`); the seam must let `setup_kgrids`-equivalent arrays be rebuilt from a
+traced Ly for the stability harness only (`ksq`, `inv_ksq`, the `lin` operator). The
+implementer decides between a traced-Ly kgrid builder and a documented notebook-local
+construction; the solver path is untouched either way.
 
-**Task (Alfred): reading list before committing to a 3b approach.**
+Targets: dγ/dη → the local exponent dlnγ/dlnS along the dispersion curve (FKR 3/5 →
+Coppi 1/3 crossover without a sweep); **k_max by Newton on ∂γ/∂k = 0** — smooth
+k_max(α), k_max(S) curves replacing the paper's grid-scanned (jagged) figs 3–4, and the
+S^{−3/7}, S^{−1/7} scalings (eq 8.1, 5.13) inside our S window.
 
-- [ ] Lea, Allen & Haine, Tellus A 52, 523 (2000) — the phenomenon on Lorenz '63;
-      ensemble-of-short-windows fix. Read first.
-- [ ] Ruelle, Commun. Math. Phys. 187, 227 (1997) + his Nonlinearity 22, 855 (2009)
-      review — why ⟨A⟩(p) is differentiable yet the naive tangent diverges
-      (stable/unstable split of the response formula).
-- [ ] Eyink, Haine & Lea, Nonlinearity 17, 1867 (2004) — heavy tails / diverging
-      variance of ensemble gradient estimators (caveat on option (i)).
-- [ ] Wang, Hu & Blonigan, JCP 267, 210 (2014) — least-squares shadowing; then
-      Ni & Wang, JCP 347, 56 (2017) — NILSS (the forward-mode-friendly version).
-- [ ] Baladi, ICM proceedings (2014), "Linear response, or else" — when linear
-      response genuinely fails; why noise/chaotic hypothesis rescues physics.
-- [ ] iGENE paper (arXiv:2605.03086) — what truncated-window gradients buy in practice
-      in GK, and where they stop; gyaradax (arXiv:2604.06085) for the JAX-GK landscape.
+## Rung 2b — new science (each its own notebook; order open)
+
+1. **Viscosity** (the paper's stated future work): γ(Pm, α, k), `diss=(ν, η)`.
+2. **Non-proportional profiles**: u₀(x) ≠ αb₀(x) (e.g. different widths, offset shear
+   layer). Still 1D, still the dense per-ky path.
+3. **2D equilibria** — where the harness beats any 1D code. ky blocks couple; matrix-free
+   shift-invert Arnoldi at ~1e5 unknowns, preconditioned by the dense per-ky blocks of
+   the y-averaged equilibrium. Candidates: Fadeev/Kelvin–Stuart island chain
+   ψ₀ = ln(cosh y + ε cos x) (coalescence instability; J₀ = F(ψ₀) exactly steady), finite
+   sheets with ends, shear + field-aligned flow (φ₀ = G(ψ₀) is steady).
+4. **3D oblique tearing with shear** (FD-z or `z_spectral`): resonance
+   k_y B_y(x) + k_z = 0 at k-dependent surfaces; per-(ky,kz) blocks for 1D equilibria.
+
+## Rung 3a — saturated island amplitude (unchanged from v1)
+
+Converged tangent through `block_of_steps` past saturation (dx*/dp), or implicit
+differentiation at the fixed point with GMRES on `jvp_operator` (rung 0 provides it).
+Validation: W_sat ∝ Δ′. Frozen-equilibrium caveat: needs an equilibrium-sustaining source
+term (E₀ = ηJ₀ as a `physics.Term` with an `active` predicate) for anything run to
+saturation — design it here, not before.
+
+## Rung 3b — statistical steady state, and the paper's turbulence claim
+
+Step zero (v1): λ₁ by Benettin renormalization of a state tangent through
+`block_of_steps`; count positive exponents m. Then the v1 options (ensemble of
+short-window tangents; forward NILSS; FDT cross-check) — unchanged, reading list below.
+
+**Science target (new in v2):** the paper's §8 argument that imbalance puts α near 1
+(1−α² ~ δz⁻/δz⁺) so γ_tr τ_nl ∝ (1−α²)^{−1/2}. Take current sheets from imbalanced RMHD
+turbulence (elsasser forcing with unequal `forcing_power_elsasser`), linearize around
+them (finite-time tangent growth — the base is not steady), and measure tearing onset
+against the local α. No 1D eigencode can do this.
+
+**State of the art (checked 2026-08-15):** iGENE (Phys. Plasmas 33, 083901 (2026),
+arXiv:2605.03086) reverse-differentiates time-averaged GK fluxes with truncated windows
+(15–50% of FD, "directionally correct"); gyaradax (arXiv:2604.06085). The gap is a
+controlled statistical-sensitivity estimator in plasma turbulence.
+
+**Reading list (Alfred) before committing to a 3b approach:**
+
+- [ ] Lea, Allen & Haine, Tellus A 52, 523 (2000).
+- [ ] Ruelle, Commun. Math. Phys. 187, 227 (1997); Nonlinearity 22, 855 (2009).
+- [ ] Eyink, Haine & Lea, Nonlinearity 17, 1867 (2004).
+- [ ] Wang, Hu & Blonigan, JCP 267, 210 (2014); Ni & Wang, JCP 347, 56 (2017).
+- [ ] Baladi, ICM proceedings (2014).
+- [ ] iGENE (arXiv:2605.03086); gyaradax (arXiv:2604.06085).
 
 ## Order of work
 
-1. Rung 1 notebook (no repo changes) — includes the FD gate and the marginal-curve
-   Newton demo.
-2. Overrides seam + bitwise gate; then rung 2 targets.
-3. λ₁/m diagnostic notebook (step zero of 3b, also validates 3a's stability-rate
-   assumption); then 3a; 3b as its own planned project once m is known.
+1. Rung 0 module + gates (implementer), adversarial review with mutations.
+2. Julia reference generator + convergence study (can run in parallel with 1: disjoint
+   files — `tests/reference/`, `tests/_gen_shear_tearing_reference.py`, the npz).
+3. Rung 1 notebook (1a then 1b), then rung 1b sensitivities.
+4. Overrides seam + reference gate; rung 2 targets.
+5. Rung 2b items; λ₁/m notebook; 3a; 3b.
