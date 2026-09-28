@@ -62,7 +62,10 @@ eigencode makes the same assumption). N(x₀) ≠ 0 at O(η) — irrelevant to J
 - **FD gate** (acceptance, every rung): J·v against the central difference
   [N(x₀+εv) − N(x₀−εv)]/2ε (+ `apply_L`) at ≥2 ε, showing the expected O(ε²) convergence,
   for random v and for the computed eigenvector.
-- Residual gate on every reported eigenpair: ‖Jv − λv‖/‖λv‖ printed alongside λ.
+- Residual gate on every reported eigenpair: ‖Jv − λv‖/(max(|λ|, scale)·‖v‖) printed
+  alongside λ (`scale` ≳ ‖J‖₂, `EigResult.scale`; a bare /|λ| is meaningless for the
+  ν = 0 null eigenvalue). `shift_invert` raises on a near-singular J − σI and on any
+  returned pair failing this — it never returns garbage silently.
 - Grid convergence of every reported γ (nx doubling), since the periodic box is uniform.
 
 ## Rung 0 — the eigen-harness (repo change: new module + gate tests)

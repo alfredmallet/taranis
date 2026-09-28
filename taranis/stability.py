@@ -18,6 +18,8 @@
 #                is a real matrix (real_matrix / real_operator).
 # Dealias-masked modes are left out of every block: there J is L alone (N is masked), which
 # only adds spurious damped eigenvalues.
+import functools
+import warnings
 from typing import NamedTuple, Optional
 
 import jax
@@ -95,11 +97,17 @@ def _adjoint_action(params):
     return jhu
 
 
+@functools.lru_cache(maxsize=16)
+def _jitted(params, adjoint):
+    # one compiled J v (or J^H u) per Parameters (identity-hashed; x0, kgrid are traced args)
+    return jax.jit(_adjoint_action(params) if adjoint else _jacobian_action(params))
+
+
 def jvp_operator(x0, kgrid, params):
     # matrix-free v -> J v on the fields array (jitted; x0 a fields array or a state)
     _check_supported(params)
     x0 = _fields(x0, params)
-    jv = jax.jit(_jacobian_action(params))
+    jv = _jitted(params, False)
     return lambda v: jv(x0, jnp.asarray(v, dtype=_precision.ctype), kgrid)
 
 
@@ -109,7 +117,7 @@ def transpose_operator(x0, kgrid, params):
     # that is the conjugate transpose.
     _check_supported(params)
     x0 = _fields(x0, params)
-    jhu = jax.jit(_adjoint_action(params))
+    jhu = _jitted(params, True)
     return lambda u: jhu(x0, jnp.asarray(u, dtype=_precision.ctype), kgrid)
 
 
@@ -228,9 +236,8 @@ def ky_block_operator(x0, kgrid, params, iky):
 
 class RealCoords(NamedTuple):
     # (Re, Im) coordinates of the dealias-kept modes of a real field, one entry per conjugate
-    # pair on the self-conjugate rows (ky = 0, and Nyquist for even ny; mirror kx -> -kx, and
-    # kz -> -kz under z_spectral), no Im at a self-conjugate mode. All index arrays are into
-    # the flattened fields array.
+    # pair on the ky = 0 row (mirror kx -> -kx, and kz -> -kz under z_spectral), no Im at a
+    # self-conjugate mode. All index arrays are into the flattened fields array.
     shape: tuple
     re: np.ndarray           # entries carrying a Re coordinate
     im: np.ndarray           # entries carrying an Im coordinate
@@ -257,11 +264,14 @@ class RealCoords(NamedTuple):
 def real_coords(kgrid, params):
     nf, nz, nkx, nky = params.nfields, params.nz, params.nx, params.ny//2 + 1
     iz, ix, iy = np.meshgrid(np.arange(nz), np.arange(nkx), np.arange(nky), indexing="ij")
-    self_row = (iy == 0) | ((params.ny % 2 == 0) & (iy == nky - 1))
+    kept = _kept(kgrid, params)
+    # ky = 0 is the only kept self-conjugate row: the 2/3 mask always drops the Nyquist row
+    if params.ny % 2 == 0 and kept[..., nky - 1].any():
+        raise AssertionError("stability.real_coords: the ky Nyquist row is dealias-kept")
+    self_row = iy == 0
     mz = (-iz) % nz if params.z_spectral else iz
     flat = np.ravel_multi_index((iz, ix, iy), (nz, nkx, nky))
     mflat = np.ravel_multi_index((mz, (-ix) % nkx, iy), (nz, nkx, nky))
-    kept = _kept(kgrid, params)
     canon = kept & (~self_row | (flat <= mflat))
     selfconj = self_row & (flat == mflat)
     paired = canon & self_row & ~selfconj
@@ -328,18 +338,44 @@ def real_matrix(x0, kgrid, params, coords=None, chunk=None):
 
 # ---------------------------------------------------------------- eigensolvers
 
+# shift_invert raises when a pivot of the LU of J - sigma I is below this fraction of
+# ||J|| + |sigma|: sigma is then (numerically) an eigenvalue, or deep in the pseudospectrum,
+# and the solves carry no digits in the directions ARPACK needs for the other pairs
+_PIVOT_TOL = 1e-12
+# shift_invert's default residual_tol, in units of max(tol, eps)
+_RESIDUAL_FACTOR = 1e3
+_NORM_PROBES = 4
+
+
 class EigResult(NamedTuple):
     values: np.ndarray                # eigenvalues
     right: np.ndarray                 # right eigenvectors, one per column
     left: Optional[np.ndarray]        # left eigenvectors w (J^H w = conj(lambda) w), or None
-    residuals: np.ndarray             # ||J v - lambda v|| / ||lambda v|| per pair
+    residuals: np.ndarray             # ||J v - lambda v|| / (max(|lambda|, scale) ||v||)
+    scale: float                      # the ||J|| scale the residuals are measured against
 
 
-def _residuals(apply, values, V):
+def _dense_norm(J):
+    # sqrt(||J||_1 ||J||_inf), an O(n^2) upper bound on ||J||_2
+    return float(np.sqrt(np.linalg.norm(J, 1)*np.linalg.norm(J, np.inf)))
+
+
+def _probe_norm(mv, n):
+    # max ||J r|| / ||r|| over a few seeded random complex r: a lower estimate of ||J||_2
+    rng = np.random.default_rng(0)
+    best = 0.0
+    for _ in range(_NORM_PROBES):
+        r = rng.standard_normal(n) + 1j*rng.standard_normal(n)
+        best = max(best, float(np.linalg.norm(mv(r))/np.linalg.norm(r)))
+    return best
+
+
+def _residuals(apply, values, V, scale):
+    # backward error: relative to max(|lambda|, ||J||), so a zero eigenvalue is measured
+    # against the operator, not against itself
     R = apply(V) - V*values[None, :]
-    den = np.abs(values)*np.linalg.norm(V, axis=0)
+    den = np.maximum(np.abs(values), scale)*np.linalg.norm(V, axis=0)
     num = np.linalg.norm(R, axis=0)
-    # a zero eigenvalue has no relative residual: report the absolute one
     return np.where(den > 0, num/np.where(den > 0, den, 1.0), num)
 
 
@@ -350,7 +386,8 @@ def eig_dense(J):
     w, vl, vr = scipy.linalg.eig(J, left=True, right=True)
     order = np.argsort(-w.real, kind="stable")
     w, vl, vr = w[order], vl[:, order], vr[:, order]
-    return EigResult(w, vr, vl, _residuals(lambda V: J @ V, w, vr))
+    scale = _dense_norm(J)
+    return EigResult(w, vr, vl, _residuals(lambda V: J @ V, w, vr, scale), scale)
 
 
 def _complexify(op):
@@ -365,40 +402,64 @@ def _complexify(op):
 
 
 def shift_invert(J, sigma, k=6, *, tol=1e-12, arpack_maxiter=300, ncv=None, v0=None,
-                 gmres_rtol=1e-12, restart=None, maxiter=100, M=None):
-    # the k eigenvalues nearest sigma, by ARPACK on (J - sigma I)^-1. J is either a dense
-    # array (one LU factorisation) or a scipy LinearOperator -- real (real_operator) or
-    # complex (ky_block_operator) -- whose shifted solves are GMRES to gmres_rtol, optionally
-    # preconditioned by M ~ (J - sigma I)^-1, in at most maxiter GMRES restarts. ARPACK runs
-    # to tol in at most arpack_maxiter restarts. Both raise rather than spin: k must not cut
-    # through a near-degenerate cluster (e.g. the pile of ~0 eigenvalues of an undamped,
-    # nu = 0, field), which ARPACK cannot converge. Returns an EigResult (left=None), sorted
-    # by distance from sigma.
+                 gmres_rtol=1e-12, restart=None, maxiter=100, M=None, residual_tol=None):
+    """The k eigenvalues nearest sigma, by ARPACK on (J - sigma I)^-1.
+
+    J is a dense array (one LU factorisation) or a scipy LinearOperator -- real
+    (real_operator) or complex (ky_block_operator) -- whose shifted solves are GMRES to
+    gmres_rtol, optionally preconditioned by M ~ (J - sigma I)^-1, in at most maxiter
+    restarts. ARPACK runs to tol in at most arpack_maxiter restarts.
+
+    Guaranteed on return: every pair satisfies
+        ||J v - lambda v|| <= residual_tol * max(|lambda|, scale) * ||v||,
+    residual_tol defaulting to 1e3*max(tol, eps), with scale = sqrt(||J||_1 ||J||_inf)
+    (dense, >= ||J||_2) or the largest ||J r||/||r|| over a few random r (operator). The
+    values are sorted by |lambda - sigma|. Not guaranteed: that ARPACK found the k NEAREST
+    eigenvalues (compare against eig_dense where the block fits).
+
+    Raises RuntimeError instead of returning otherwise: a dense J - sigma I with a pivot
+    below 1e-12 (||J|| + |sigma|) (sigma is numerically an eigenvalue: move it), a GMRES
+    solve short of gmres_rtol or non-finite, ARPACK non-convergence (typically k cutting
+    through a near-degenerate cluster, e.g. the ~0 eigenvalues of an undamped nu = 0
+    field), or any pair over the residual bound. Returns an EigResult (left=None).
+    """
     sigma = complex(sigma)
+    n = J.shape[0]
     if isinstance(J, np.ndarray):
-        n = J.shape[0]
+        scale = _dense_norm(J)
         A = J.astype(np.complex128)             # the one n x n working copy
         A[np.diag_indices(n)] -= sigma
-        lu = scipy.linalg.lu_factor(A, overwrite_a=True, check_finite=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", scipy.linalg.LinAlgWarning)
+            lu = scipy.linalg.lu_factor(A, overwrite_a=True, check_finite=False)
+        pivot = float(np.abs(np.diag(lu[0])).min())
+        if not pivot > _PIVOT_TOL*(scale + abs(sigma)):
+            raise RuntimeError(
+                f"stability.shift_invert: J - sigma I is numerically singular at sigma="
+                f"{sigma} (smallest LU pivot {pivot:.3e} against ||J|| + |sigma| = "
+                f"{scale + abs(sigma):.3e}): sigma is (numerically) an eigenvalue; move it")
         solve = lambda b: scipy.linalg.lu_solve(lu, np.asarray(b).reshape(-1))
         apply = lambda V: J @ V
     else:
-        n = J.shape[0]
         mv = _complexify(J)
+        scale = _probe_norm(mv, n)
         shifted = spla.LinearOperator((n, n), matvec=lambda z: mv(z) - sigma*np.asarray(z).reshape(-1),
                                       dtype=np.complex128)
 
         def solve(b):
             x, info = spla.gmres(shifted, np.asarray(b).reshape(-1), rtol=gmres_rtol, atol=0.0,
                                  restart=restart, maxiter=maxiter, M=M)
-            if info != 0:
+            if info != 0 or not np.all(np.isfinite(x)):
                 raise RuntimeError(f"stability.shift_invert: GMRES did not reach rtol="
                                    f"{gmres_rtol:g} (info={info}); loosen gmres_rtol, raise "
-                                   f"maxiter/restart, or pass a preconditioner M")
+                                   f"maxiter/restart, or pass a preconditioner M -- or sigma "
+                                   f"is (numerically) an eigenvalue: move it")
             return x
 
         def apply(V):
             return np.stack([mv(V[:, i]) for i in range(V.shape[1])], axis=1)
+    if residual_tol is None:
+        residual_tol = _RESIDUAL_FACTOR*max(tol, np.finfo(np.float64).eps)
     inv = spla.LinearOperator((n, n), matvec=solve, dtype=np.complex128)
     try:
         mu, V = spla.eigs(inv, k=k, which="LM", tol=tol, v0=v0, ncv=ncv, maxiter=arpack_maxiter)
@@ -412,4 +473,11 @@ def shift_invert(J, sigma, k=6, *, tol=1e-12, arpack_maxiter=300, ncv=None, v0=N
     values = sigma + 1.0/mu
     order = np.argsort(np.abs(values - sigma), kind="stable")
     values, V = values[order], V[:, order]
-    return EigResult(values, V, None, _residuals(apply, values, V))
+    res = _residuals(apply, values, V, scale)
+    if not np.all(res <= residual_tol):
+        raise RuntimeError(
+            f"stability.shift_invert: {int(np.sum(~(res <= residual_tol)))} of {k} returned "
+            f"pairs are not eigenpairs to residual_tol={residual_tol:.1e} (residuals {res}, "
+            f"values {values}, ||J|| scale {scale:.3e}). sigma={sigma} is likely too close to "
+            f"an eigenvalue (move it), or the GMRES solves are too loose (tighten gmres_rtol)")
+    return EigResult(values, V, None, res, scale)

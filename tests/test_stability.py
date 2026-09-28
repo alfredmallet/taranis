@@ -1,12 +1,14 @@
 # taranis.stability (plans/AUTODIFF_PLAN.md rung 0): the Jacobian J = L + N'(x0) of the
 # discrete RMHD RHS by autodiff, its ky blocks, real-coordinate form, adjoint and eigensolvers.
 # Gates (the plan's numbering):
-#   1. FD gate: J v against [N(x0+e v) - N(x0-e v)]/2e + L v, for a 1D and a 2D x0, random v
-#      and a computed eigenvector. RMHD's N is exactly quadratic in 2D, so the central
-#      difference is EXACT up to round-off (no O(e^2) term to observe) and the one-sided
-#      difference's error is exactly e*N(v): both are asserted, plus the O(e) slope.
-#   2. x0 = 0 => J = L: ky-block eigenvalues -nu k^2h, -eta k^2h in 2D; +-i kz - eta k_perp^2
-#      under z_spectral; the 4th-order FD-z Alfven stencil (+ its d4/dz4 filter) under FD-z.
+#   1. FD gate: J v against [N(x0+e v) - N(x0-e v)]/2e + L v, for a 1D and a 2D x0 in 2D and
+#      a z-dependent x0 under FD-z and z_spectral, random v and a computed eigenvector. RMHD's
+#      N is linear + quadratic, so the central difference is EXACT up to round-off (no O(e^2)
+#      term to observe) and the one-sided difference's error is exactly e*Q(v), Q the
+#      quadratic part: both are asserted, plus the O(e) slope.
+#   2. x0 = 0 => J = L: in 2D the ky block is diagonal -nu k^2h, -eta k^2h; in 3D it equals
+#      the analytic L ENTRYWISE -- z_spectral separable (nu == eta), putzer2 (nu != eta),
+#      z_diss_k != 0, and FD-z's periodic 4th-order Alfven stencil plus its d4/dz4 filter.
 #   3. independent Fourier transcription of the linearized RMHD block about
 #      psi0 = A cos(qx), phi0 = alpha A cos(qx) (derivation in the test's docstring).
 #   4. ky_block_matrix against the full jvp_operator on a random ky-column vector (2D, 3D
@@ -14,11 +16,13 @@
 #      full fields space), and the matrix-free ky_block_operator.
 #   5. transpose_operator against the conjugate transpose of the dense block; the real
 #      inner-product adjoint identity on the full space; real_operator's rmatvec against M^T.
-# Plus: RealCoords round trips, eig_dense's left/right pairs, shift_invert's dense-LU and
-# GMRES paths (ky block and real coordinates) against the dense spectrum.
+# Plus: RealCoords round trips, eig_dense's left/right pairs (residuals measured against
+# ||J||, so a nu = 0 null vector is gated too), shift_invert's dense-LU and GMRES paths (ky
+# block and real coordinates) against the dense spectrum, and shift_invert raising rather
+# than returning a wrong pair (sigma on an eigenvalue, loose solves, ARPACK non-convergence).
 # fp64 only (round-off tolerances), except test_zero_state_smoke_both_precisions.
 # pytest: `pytest tests/test_stability.py`. Script: `python tests/test_stability.py`.
-from _rmhd_testing import bootstrap, checks, ctx, fit_order, make_state
+from _rmhd_testing import bootstrap, checks, ctx, fit_order, fresh_params, make_state
 
 bootstrap()
 
@@ -63,6 +67,12 @@ def _twod_ic(x, y):
     return jnp.stack([phi, psi])
 
 
+def _ic3(x, y, z):
+    # ky-independent, z-dependent
+    return jnp.stack([0.3*jnp.sin(x)*(1 + 0.2*jnp.cos(z)) + 0*y,
+                      jnp.cos(x)*(1 + 0.3*jnp.sin(z)) + 0*y])
+
+
 def _rand(shape, rng):
     return rng.standard_normal(shape) + 1j*rng.standard_normal(shape)
 
@@ -102,8 +112,12 @@ def _relerr(a, b):
 @pytest.mark.fp64
 def test_fd_gate():
     rng = np.random.default_rng(_RNG_SEED)
+    box3 = dict(dims=3, nx=12, ny=8, nz=8, Lx=2*np.pi, Ly=4*np.pi, Lz=2*np.pi,
+                diss=(0.01, 0.02), hyper=1)
     cases = [("1D x0", _p2d(), _tearing_ic, "block"),
-             ("2D x0", _p2d(nx=12, ny=12, Ly=2*np.pi), _twod_ic, "real")]
+             ("2D x0", _p2d(nx=12, ny=12, Ly=2*np.pi), _twod_ic, "real"),
+             ("3D FD-z x0(x,z)", _params(comm_backend="serial", z_diss=0.5, **box3), _ic3, "block"),
+             ("3D z_spectral x0(x,z)", _params(z_spectral=True, **box3), _ic3, "block")]
     with checks() as c:
         for name, params, ic, eigpath in cases:
             kgrid = jr.setup_kgrids(params)
@@ -127,13 +141,14 @@ def test_fd_gate():
                     e = _relerr(fd, Jv)
                     c.check(f"{name}, {vname}: central FD matches J v at eps={eps:g} "
                             f"(rel {e:.2e})", e < 1e-9, f"rel {e:.3e}")
-                N0, Nv, Jn = N(x0), N(v), Jv - Lv(v)
+                # Q(v): the quadratic part of N (FD-z carries a linear part in N too)
+                N0, Nv, Jn = N(x0), (N(v) + N(-v))/2, Jv - Lv(v)
                 errs = []
                 for eps in (1e-2, 1e-3, 1e-4):
                     fwd = (N(x0 + eps*v) - N0)/eps - Jn
                     errs.append(np.linalg.norm(fwd))
                     e = np.linalg.norm(fwd - eps*Nv)/np.linalg.norm(Jn)
-                    c.check(f"{name}, {vname}: one-sided FD error is exactly eps*N(v) at "
+                    c.check(f"{name}, {vname}: one-sided FD error is exactly eps*Q(v) at "
                             f"eps={eps:g} (rel {e:.2e})", e < 1e-8, f"rel {e:.3e}")
                 order = fit_order([1e-2, 1e-3, 1e-4], errs)
                 c.check(f"{name}, {vname}: one-sided FD converges at O(eps) (order "
@@ -166,41 +181,49 @@ def test_zero_state_is_L():
                 c.check(f"2D hyper={hyper} iky={iky}: eigenvalues -nu k^2h, -eta k^2h",
                         err < 1e-14, f"rel {err:.3e}")
 
-        # z_spectral, nu == eta: damped Alfven waves +-i kz - eta k_perp^2 exactly
-        eta = 0.02
-        params = _params(dims=3, nx=12, ny=8, nz=8, Lx=2*np.pi, Ly=4*np.pi, Lz=3.0,
-                     z_spectral=True, diss=(eta, eta), hyper=1)
-        kgrid = jr.setup_kgrids(params)
-        x0 = np.zeros((2, params.nz, params.nx, params.ny//2 + 1), dtype=complex)
-        B, idx = stability.ky_block_matrix(x0, kgrid, params, 1)
-        kx = np.fft.fftfreq(params.nx)*params.nx*2*np.pi/params.Lx
-        kz = np.fft.fftfreq(params.nz)*params.nz*2*np.pi/params.Lz
-        one = idx[idx[:, 0] == 0]            # one (kz, kx) per mode; the pair gives +-
-        kperp2 = kx[one[:, 2]]**2 + (2*np.pi/params.Ly)**2
-        want = np.concatenate([1j*kz[one[:, 1]] - eta*kperp2, -1j*kz[one[:, 1]] - eta*kperp2])
-        err = _match(stability.eig_dense(B).values, want)/np.abs(want).max()
-        c.check(f"z_spectral: eigenvalues +-i kz - eta k_perp^2 (rel {err:.1e})", err < 1e-13,
-                f"rel {err:.3e}")
+        # 3D: the block against the analytic L entrywise. z_spectral: diagonal
+        # -diss_f k_perp^2h - z_diss_k kz^4, phi <-> psi coupling +i kz. FD-z: the periodic
+        # stencil (8 (f[iz+1] - f[iz-1]) - (f[iz+2] - f[iz-2]))/(12 dz) of the OTHER field, and
+        # the filter -z_diss (dz/2)^4 (1, -4, 6, -4, 1)/dz^4 on the same field.
+        box3 = dict(dims=3, nx=12, ny=8, nz=8, Lx=2*np.pi, Ly=4*np.pi, Lz=3.0)
+        for name, diss, hyper, kw in (
+                ("z_spectral separable", (0.02, 0.02), 1, dict(z_spectral=True)),
+                ("z_spectral putzer2", (0.03, 0.01), 1, dict(z_spectral=True)),
+                ("z_spectral separable z_diss_k", (0.02, 0.02), 2,
+                 dict(z_spectral=True, eqpars=dict(z_diss_k=0.4))),
+                ("z_spectral putzer2 z_diss_k", (0.03, 0.01), 1,
+                 dict(z_spectral=True, eqpars=dict(z_diss_k=0.4))),
+                ("FD-z", (0.03, 0.01), 1, dict(comm_backend="serial", z_diss=0.7))):
+            params = fresh_params(diss=diss, hyper=hyper, **box3, **kw)
+            kgrid = jr.setup_kgrids(params)
+            x0 = np.zeros((2, params.nz, params.nx, params.ny//2 + 1), dtype=complex)
+            for iky in (1, 2):
+                B, idx = stability.ky_block_matrix(x0, kgrid, params, iky)
+                H = _analytic_L_block(idx, params, iky, diss, hyper)
+                err = np.abs(B - H).max()/np.abs(H).max()
+                c.check(f"{name} iky={iky}: zero-state block == analytic L entrywise "
+                        f"(rel {err:.1e}, n={len(idx)})", err < 1e-13, f"rel {err:.3e}")
 
-        # FD-z: the 4th-order stencil i(8 sin t - sin 2t)/(6 dz) couples phi <-> psi, the
-        # filter adds -z_diss (dz/2)^4 (6 - 8 cos t + 2 cos 2t)/dz^4, t = kz dz
-        params = _params(dims=3, nx=12, ny=8, nz=8, Lx=2*np.pi, Ly=4*np.pi, Lz=3.0,
-                     comm_backend="serial", z_diss=0.7, diss=(eta, eta), hyper=1)
-        kgrid = jr.setup_kgrids(params)
-        B, idx = stability.ky_block_matrix(x0, kgrid, params, 1)
-        dz = params.dz
-        kxs = sorted(set(idx[:, 2]))
-        th = 2*np.pi*np.arange(params.nz)/params.nz
-        D1 = (8*np.sin(th) - np.sin(2*th))/(6*dz)
-        D4 = (6 - 8*np.cos(th) + 2*np.cos(2*th))/dz**4
-        want = []
-        for ix in kxs:
-            base = -eta*(kx[ix]**2 + (2*np.pi/params.Ly)**2) - 0.7*(dz/2)**4*D4
-            want.extend(base + 1j*D1)
-            want.extend(base - 1j*D1)
-        err = _match(stability.eig_dense(B).values, np.array(want))/np.abs(want).max()
-        c.check(f"FD-z: eigenvalues are the stencil's +-i D1(kz) - eta k^2 - filter "
-                f"(rel {err:.1e})", err < 1e-13, f"rel {err:.3e}")
+
+def _analytic_L_block(idx, params, iky, diss, hyper):
+    kx = np.fft.fftfreq(params.nx)*params.nx*2*np.pi/params.Lx
+    kz = np.fft.fftfreq(params.nz)*params.nz*2*np.pi/params.Lz
+    ky = iky*2*np.pi/params.Ly
+    zdk = params.eqpars.get("z_diss_k", 0.0)
+    pos = {(int(f), int(iz), int(ix)): r for r, (f, iz, ix) in enumerate(idx)}
+    H = np.zeros((len(idx), len(idx)), dtype=complex)
+    for r, (f, iz, ix) in enumerate(idx):
+        H[r, r] = -diss[f]*(kx[ix]**2 + ky**2)**hyper
+        if params.z_spectral:
+            H[r, r] += -zdk*kz[iz]**4
+            H[r, pos[(1 - f, iz, ix)]] += 1j*kz[iz]
+        else:
+            for s, w in ((1, 8.0), (-1, -8.0), (2, -1.0), (-2, 1.0)):
+                H[r, pos[(1 - f, (iz + s) % params.nz, ix)]] += w/(12*params.dz)
+            for s, w in ((0, 6.0), (1, -4.0), (-1, -4.0), (2, 1.0), (-2, 1.0)):
+                H[r, pos[(f, (iz + s) % params.nz, ix)]] += \
+                    -params.z_diss*(params.dz/2)**4*w/params.dz**4
+    return H
 
 
 def test_zero_state_smoke_both_precisions():
@@ -292,14 +315,11 @@ def test_fourier_transcription():
 # ------------------------------------------------------------------------------ gate 4
 
 def _gate4_cases():
-    def ic3(x, y, z):
-        return jnp.stack([0.3*jnp.sin(x)*(1 + 0.2*jnp.cos(z)) + 0*y,
-                          jnp.cos(x)*(1 + 0.3*jnp.sin(z)) + 0*y])
     box3 = dict(dims=3, nx=12, ny=8, nz=8, Lx=2*np.pi, Ly=4*np.pi, Lz=2*np.pi,
                 diss=(0.01, 0.02), hyper=1)
     return [("2D", _p2d(), _tearing_ic),
-            ("3D FD-z", _params(comm_backend="serial", z_diss=0.5, **box3), ic3),
-            ("3D z_spectral", _params(z_spectral=True, **box3), ic3)]
+            ("3D FD-z", _params(comm_backend="serial", z_diss=0.5, **box3), _ic3),
+            ("3D z_spectral", _params(z_spectral=True, **box3), _ic3)]
 
 
 @pytest.mark.fp64
@@ -344,6 +364,11 @@ def test_block_matches_full_operator():
         with pytest.raises(ValueError, match="ky-independent"):
             stability.ky_block_matrix(x0, kgrid, params, 1)
         c.check("ky_block_matrix rejects a 2D x0", True)
+        ky1 = np.zeros(x0.shape, dtype=complex)
+        ky1[1, 0, 1, 1] = 1e-6
+        with pytest.raises(ValueError, match="ky-independent"):
+            stability.ky_block_matrix(ky1, kgrid, params, 1)
+        c.check("ky_block_matrix rejects an x0 whose only ky != 0 content is at ky = 1", True)
         for bad in (0, params.ny//2):
             with pytest.raises(ValueError, match="iky"):
                 stability.ky_block_index(kgrid, params, bad)
@@ -447,7 +472,7 @@ def test_eig_dense_and_shift_invert():
         c.check(f"eig_dense: right residuals (max {r.residuals.max():.1e})",
                 r.residuals.max() < 1e-10, f"{r.residuals.max():.3e}")
         lres = np.linalg.norm(r.left.conj().T @ B - r.values[:, None]*r.left.conj().T, axis=1)
-        lres = lres/np.maximum(np.abs(r.values), 1e-300)
+        lres = lres/np.maximum(np.abs(r.values), r.scale)
         c.check(f"eig_dense: left pairs w^H J = lambda w^H (max {lres.max():.1e})",
                 lres.max() < 1e-10, f"{lres.max():.3e}")
         lead = r.values[0]
@@ -456,12 +481,14 @@ def test_eig_dense_and_shift_invert():
         sigma = lead + 0.01 + 0.01j
         want = r.values[np.argsort(np.abs(r.values - sigma))[:2]]
         dense = stability.shift_invert(B, sigma, k=2)
+        _check_sorted(c, "shift_invert dense LU", dense, sigma)
         e = np.abs(dense.values - want).max()/abs(lead)
         c.check(f"shift_invert dense LU: 2 nearest eigenvalues (rel {e:.1e}, residual "
                 f"{dense.residuals.max():.1e})", e < 1e-10 and dense.residuals.max() < 1e-10,
                 f"rel {e:.3e}, residual {dense.residuals.max():.3e}")
         op, _ = stability.ky_block_operator(x0, kgrid, params, 1)
         mf = stability.shift_invert(op, sigma, k=2, tol=1e-12, restart=len(idx))
+        _check_sorted(c, "shift_invert GMRES ky block", mf, sigma)
         e = np.abs(mf.values - want).max()/abs(lead)
         c.check(f"shift_invert GMRES on the ky block: same eigenvalues (rel {e:.1e}, "
                 f"residual {mf.residuals.max():.1e})", e < 1e-9 and mf.residuals.max() < 1e-9,
@@ -484,11 +511,119 @@ def test_eig_dense_and_shift_invert():
         want = ev[np.argsort(np.abs(ev - sigma))[:2]]
         rop, _ = stability.real_operator(x0, kgrid, params, coords)
         mf = stability.shift_invert(rop, sigma, k=2, tol=1e-12, restart=coords.n)
+        _check_sorted(c, "shift_invert GMRES real coords", mf, sigma)
         e = _match(mf.values, want)/abs(top)
         c.check(f"shift_invert GMRES, real coords, 2D x0: 2 eigenvalues nearest sigma (rel "
                 f"{e:.1e}, residual {mf.residuals.max():.1e}, n={coords.n})",
                 e < 1e-9 and mf.residuals.max() < 1e-9,
                 f"rel {e:.3e}, residual {mf.residuals.max():.3e}")
+
+
+def _check_sorted(c, name, res, sigma):
+    d = np.abs(res.values - sigma)
+    c.check(f"{name}: values sorted by |lambda - sigma|", np.all(np.diff(d) >= 0), f"{d}")
+
+
+def _nu0_block():
+    # nu = 0 cos x current sheet: the ky block has exactly one lambda ~ 0 (a null vector)
+    params = _params(dims=2, nx=64, ny=8, Lx=2*np.pi, Ly=4*np.pi, diss=(0.0, 0.01), hyper=1)
+    kgrid = jr.setup_kgrids(params)
+    x0 = _x0(params, lambda x, y: jnp.stack([0*x + 0*y, jnp.cos(x) + 0*y]))
+    B, idx = stability.ky_block_matrix(x0, kgrid, params, 1)
+    return B, idx, x0, kgrid, params
+
+
+@pytest.mark.fp64
+def test_nu0_residuals_and_sigma_on_an_eigenvalue():
+    B, idx, x0, kgrid, params = _nu0_block()
+    norm2 = np.linalg.norm(B, 2)
+
+    def absres(res):
+        V = res.right
+        return np.linalg.norm(B @ V - V*res.values[None, :], axis=0)/np.linalg.norm(V, axis=0)
+    with checks() as c:
+        r = stability.eig_dense(B)
+        i0 = int(np.argmin(np.abs(r.values)))
+        c.check(f"nu = 0 block has a null vector (|lambda| = {abs(r.values[i0]):.1e})",
+                abs(r.values[i0]) < 1e-12, f"{abs(r.values[i0]):.3e}")
+        c.check(f"eig_dense scale bounds ||J||_2 ({r.scale:.3f} >= {norm2:.3f})",
+                norm2 <= r.scale*(1 + 1e-12) and r.scale < 2*norm2, f"{r.scale}")
+        c.check(f"eig_dense, nu = 0: every right residual is small, the null vector's too (max "
+                f"{r.residuals.max():.1e}, null {r.residuals[i0]:.1e})",
+                r.residuals.max() < 1e-12, f"{r.residuals}")
+
+        # sigma exactly on / within round-off of the zero eigenvalue: the dense LU is singular
+        for sigma in (0.0, r.values[i0], 1e-14):
+            with pytest.raises(RuntimeError, match="numerically singular"):
+                stability.shift_invert(B, sigma, k=6)
+        c.check("dense shift_invert raises at sigma on the null eigenvalue", True)
+        with pytest.raises(RuntimeError, match="numerically singular"):
+            stability.shift_invert(np.diag(np.arange(1.0, 30.0)), 3.0, k=3)
+        c.check("dense shift_invert raises at sigma exactly on an eigenvalue", True)
+
+        # near it: either a RuntimeError, or pairs that are eigenpairs by an independent check
+        for sigma in (1e-12, 1e-11, 1e-10, 1e-8, 1e-6):
+            try:
+                res = stability.shift_invert(B, sigma, k=6)
+            except RuntimeError as err:
+                c.check(f"sigma={sigma:g}: raised ({str(err)[:60]}...)", True)
+                continue
+            a = absres(res).max()
+            want = r.values[np.argsort(np.abs(r.values - sigma))[:6]]
+            e = np.abs(res.values - want).max()
+            c.check(f"sigma={sigma:g}: returned pairs are eigenpairs (|Jv - lambda v|/|v| "
+                    f"{a:.1e}, values off by {e:.1e})", a < 1e-8*norm2 and e < 1e-8,
+                    f"abs residual {a:.3e}, values {e:.3e}")
+            _check_sorted(c, f"sigma={sigma:g}", res, sigma)
+        res = stability.shift_invert(B, 1e-6, k=6)
+        c.check(f"sigma=1e-6 returns the null vector (max residual {res.residuals.max():.1e})",
+                abs(res.values[0]) < 1e-12 and res.residuals.max() < 1e-12,
+                f"{res.values}, {res.residuals}")
+
+        # the matrix-free path at sigma = 0: raises
+        op, _ = stability.ky_block_operator(x0, kgrid, params, 1)
+        with pytest.raises(RuntimeError):
+            stability.shift_invert(op, 0.0, k=6, restart=len(idx))
+        c.check("GMRES shift_invert raises at sigma on the null eigenvalue", True)
+
+        # the residual guard itself: GMRES solves looser than tol cannot pass
+        gamma = r.values[0].real
+        with pytest.raises(RuntimeError, match="not eigenpairs"):
+            stability.shift_invert(op, gamma + 1e-3, k=6, restart=len(idx), gmres_rtol=1e-5)
+        c.check("GMRES shift_invert raises when its solves are looser than tol", True)
+        with pytest.raises(RuntimeError, match="not eigenpairs"):
+            stability.shift_invert(B, gamma + 1e-3, k=6, residual_tol=1e-20)
+        c.check("dense shift_invert raises over residual_tol", True)
+        res = stability.shift_invert(B, gamma + 1e-3, k=6)
+        c.check(f"sigma = gamma + 1e-3: residuals small (max {res.residuals.max():.1e}), the "
+                f"~0 eigenvalue's included", res.residuals.max() < 1e-12, f"{res.residuals}")
+
+
+def test_shift_invert_sorts_by_distance():
+    # random dense matrices, where ARPACK's own order is NOT by |lambda - sigma|
+    import scipy.linalg
+    import scipy.sparse.linalg as spla
+    rng = np.random.default_rng(_RNG_SEED)
+    n, k = 60, 8
+    raw_unsorted = 0
+    with checks() as c:
+        for trial in range(6):
+            A = rng.standard_normal((n, n)) + 1j*rng.standard_normal((n, n))
+            sigma = complex(rng.standard_normal(), rng.standard_normal())
+            lu = scipy.linalg.lu_factor(A - sigma*np.eye(n))
+            inv = spla.LinearOperator((n, n), dtype=complex,
+                                      matvec=lambda b, lu=lu: scipy.linalg.lu_solve(lu, b))
+            mu = spla.eigs(inv, k=k, which="LM", tol=1e-12, v0=np.ones(n))[0]
+            raw_unsorted += bool(np.any(np.diff(np.abs(1/mu)) < 0))
+            res = stability.shift_invert(A, sigma, k=k, v0=np.ones(n))
+            _check_sorted(c, f"trial {trial}", res, sigma)
+            ev = np.linalg.eigvals(A)
+            want = ev[np.argsort(np.abs(ev - sigma))[:k]]
+            e = np.abs(res.values - want).max()
+            c.check(f"trial {trial}: the {k} nearest eigenvalues, in order (err {e:.1e})",
+                    e < 1e-8, f"{e:.3e}")
+        c.check(f"discriminating: ARPACK's raw order was unsorted in {raw_unsorted}/6 trials",
+                raw_unsorted > 0)
 
 
 def test_shift_invert_fails_loudly():
@@ -506,6 +641,9 @@ def test_shift_invert_fails_loudly():
         with pytest.raises(RuntimeError, match="GMRES did not reach"):
             stability.shift_invert(op, 0.1, k=1, restart=2, maxiter=1)
         c.check("shift_invert raises on GMRES non-convergence", True)
+        with pytest.raises(RuntimeError, match="GMRES did not reach"):
+            stability.shift_invert(aslinearoperator(np.diag(np.arange(1.0, 30.0))), 3.0, k=3)
+        c.check("GMRES shift_invert raises at sigma exactly on an eigenvalue", True)
 
 
 def test_rejects_unsupported():
