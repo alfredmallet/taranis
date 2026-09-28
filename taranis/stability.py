@@ -1,24 +1,36 @@
-# Linear stability about a frozen state x0, by autodiff (plans/AUTODIFF_PLAN.md, rung 0).
+# Linear stability about a frozen state x0, by autodiff (plans/AUTODIFF_PLAN.md, rungs 0/0b).
 # construct_rhs returns N(f) only -- the k-local linear part L lives in kgrid.lin -- so the
 # Jacobian of dt f = L f + N(f) is
 #       J v = kgrid.lin.apply_L(v) + jvp(N, (x0,), (v,))[1]
 # N' is jax's derivative of the solver's own RHS; no linearized equations are written.
-# Read-only: nothing here mutates Parameters, the kgrid or a state, and the solver never
-# imports this module. Unforced, single-process, non-sharded backends only.
+# Equation-agnostic: any registered recipe (RMHD, GDI, CMHD in both density variables) in any
+# geometry it supports (2D, FD-z, z_spectral). Read-only: nothing here mutates Parameters,
+# the kgrid or a state, and the solver never imports this module. Unforced, single-process,
+# non-sharded backends only; the CMHD expanding box is rejected (its RHS depends on t, so
+# there is no autonomous J).
 #
 # Three vector spaces:
 #   fields       the solver's (nfields, nz, nkx, nky) complex array. J is only REAL-linear on
 #                it: irfft2 discards the anti-Hermitian part of the self-conjugate rows
 #                (ky = 0 and Nyquist).
-#   ky column    for a ky-independent x0 and 0 < iky < ny/2, J maps the dealias-kept
-#                (field, z, kx) entries of one ky column to themselves complex-linearly:
-#                ky_block_matrix / ky_block_operator, an ordinary complex matrix.
+#   mode block   for an x0 invariant along y (and optionally x, and z under z_spectral), J is
+#                block-diagonal in the wavevector along the invariant directions. For
+#                0 < iky < ny/2 the block of one ky column -- or of one (kx, ky) or
+#                (kx, ky, kz) mode when ikx / iz are fixed too -- maps its dealias-kept
+#                entries to themselves complex-linearly: ky_block_matrix / ky_block_operator,
+#                an ordinary complex matrix. The invariance is asserted, never assumed.
 #   real coords  the dealias-kept modes of a REAL field, each conjugate pair counted once,
 #                as (Re, Im) coordinates (RealCoords): the space for a general x0, where J
 #                is a real matrix (real_matrix / real_operator).
 # Dealias-masked modes are left out of every block: there J is L alone (N is masked), which
 # only adds spurious damped eigenvalues.
+#
+# Eigensolvers: eig_dense (a dense block), shift_invert (eigenvalues nearest sigma; dense LU,
+# or GMRES with an optional preconditioner factory -- diagonal_preconditioner,
+# ky_averaged_preconditioner), and propagator_eigs, the default for the FASTEST-GROWING modes
+# of a general x0: ARPACK on v -> exp(J T) v, integrated by the solver's own stepper.
 import functools
+import time
 import warnings
 from typing import NamedTuple, Optional
 
@@ -28,7 +40,7 @@ import numpy as np
 import scipy.linalg
 import scipy.sparse.linalg as spla
 
-from . import _precision
+from . import _precision, timestepping
 from .physics import construct_rhs, equation_registry
 from .types import SimulationState
 
@@ -50,6 +62,11 @@ def _check_supported(params):
         raise ValueError("stability: finite-difference z needs comm_backend='serial' (mpi4jax's "
                          "sendrecv halo cannot be differentiated); at size 1 it is the same "
                          "operator")
+    if params.eqtype == "CMHD" and "expansion" in params.eqpars:
+        # the EBM RHS reads a(t): J depends on t and exp(J T) is not a semigroup
+        raise ValueError("stability: the CMHD expanding box is time-dependent (a(t) enters the "
+                         "RHS), so there is no autonomous Jacobian to linearize; drop "
+                         "eqpars['expansion']")
 
 
 def _fields(x0, params):
@@ -61,18 +78,22 @@ def _fields(x0, params):
     return f
 
 
+def _state(params, fields):
+    # a throwaway unforced state at t = 0 carrying `fields`
+    nkx, nky = params.nx, params.ny//2 + 1
+    return SimulationState(
+        t=jnp.float64(0.0), fields=fields,
+        forcing_state=jnp.zeros((params.n_ou, 2, nkx, nky), dtype=_precision.ctype),
+        forcing_key=jax.random.key(0),
+        forcing_scale=jnp.zeros((params.n_ou,), dtype=_precision.ftype))
+
+
 def _nonlinear(params):
     # N(fields, kgrid): the RHS terms construct_rhs sums, on a throwaway unforced state
     rhs = construct_rhs(equation_registry[params.eqtype])
-    nkx, nky = params.nx, params.ny//2 + 1
 
     def N(fields, kgrid):
-        state = SimulationState(
-            t=jnp.float64(0.0), fields=fields,
-            forcing_state=jnp.zeros((params.n_ou, 2, nkx, nky), dtype=_precision.ctype),
-            forcing_key=jax.random.key(0),
-            forcing_scale=jnp.zeros((params.n_ou,), dtype=_precision.ftype))
-        return rhs(state, kgrid, params)[0]
+        return rhs(_state(params, fields), kgrid, params)[0]
     return N
 
 
@@ -128,41 +149,79 @@ def _kept(kgrid, params):
     return np.broadcast_to(np.asarray(kgrid.dealias), (params.nz, params.nx, params.ny//2 + 1))
 
 
-def ky_block_index(kgrid, params, iky):
-    # (n, 3) int array of the (field, iz, ikx) entries of ky column iky that the dealias
-    # mask keeps, in C order: the row/column order of every ky block
+def _check_block_args(params, iky, ikx, iz):
     if not (isinstance(iky, (int, np.integer)) and 0 < iky < params.ny/2):
         raise ValueError(f"stability: iky must be an int with 0 < iky < ny/2 = {params.ny/2} "
                          f"(ky = 0 and Nyquist are self-conjugate rows, where J is not "
                          f"complex-linear); got {iky!r}")
-    col = _kept(kgrid, params)[..., iky]
+    if ikx is not None and not (isinstance(ikx, (int, np.integer)) and 0 <= ikx < params.nx):
+        raise ValueError(f"stability: ikx must be an int index in [0, nx); got {ikx!r}")
+    if iz is not None:
+        if not (params.spatial_dimensions == 3 and params.z_spectral):
+            # under finite-difference z (or in 2D) axis 1 is real-space z: a z-invariant x0
+            # commutes with z shifts but does not decouple the z points
+            raise ValueError("stability: a fixed iz (a kz mode) needs dims=3 with "
+                             "z_spectral=True, where axis 1 is kz")
+        if not (isinstance(iz, (int, np.integer)) and 0 <= iz < params.nz):
+            raise ValueError(f"stability: iz must be an int index in [0, nz); got {iz!r}")
+
+
+def ky_block_index(kgrid, params, iky, *, ikx=None, iz=None):
+    # (n, 3) int array of the (field, iz, ikx) entries of ky column iky that the dealias
+    # mask keeps, in C order: the row/column order of every block. ikx and/or iz (z_spectral:
+    # a kz index) restrict it to one wavevector along those axes too.
+    _check_block_args(params, iky, ikx, iz)
+    col = np.array(_kept(kgrid, params)[..., iky])
+    if ikx is not None:
+        col[:, np.arange(params.nx) != ikx] = False
+    if iz is not None:
+        col[np.arange(params.nz) != iz, :] = False
     if not col.any():
-        raise ValueError(f"stability: ky column {iky} is entirely dealias-masked")
+        raise ValueError(f"stability: block (iky={iky}, ikx={ikx}, iz={iz}) is entirely "
+                         f"dealias-masked")
     return np.argwhere(np.broadcast_to(col, (params.nfields,) + col.shape))
 
 
-def _assert_ky_independent(x0):
+def _assert_invariant(x0, ikx=None, iz=None):
+    # a block needs x0 invariant along y, plus x when ikx is fixed and z (kz axis) when iz is:
+    # x0 may then carry only the zero wavenumber along each of those axes
     a = np.asarray(x0)
     scale = float(np.max(np.abs(a))) if a.size else 0.0
     tol = 1e3*np.finfo(a.real.dtype).eps*scale
-    worst = float(np.max(np.abs(a[..., 1:]))) if a.shape[-1] > 1 else 0.0
-    if worst > tol:
-        raise ValueError(f"stability: a ky block needs a ky-independent x0 (J is then "
-                         f"block-diagonal in ky); x0's ky != 0 content is {worst:.3e} against "
-                         f"max |x0| = {scale:.3e}")
+    for name, axis, fixed in (("ky", 3, True), ("kx", 2, ikx is not None),
+                              ("kz", 1, iz is not None)):
+        if not fixed or a.shape[axis] == 1:
+            continue
+        worst = float(np.max(np.abs(np.take(a, np.arange(1, a.shape[axis]), axis=axis))))
+        if worst > tol:
+            raise ValueError(f"stability: this block needs a {name}-independent x0 (J is "
+                             f"then block-diagonal in {name}); x0's {name} != 0 content is "
+                             f"{worst:.3e} against max |x0| = {scale:.3e}")
 
 
-def _column_maps(params, idx, iky):
-    # embed: (..., n) block vector -> fields array;  gather: fields array -> (n,) block vector
-    shape = (params.nfields, params.nz, params.nx, params.ny//2 + 1)
-    f, z, x = (jnp.asarray(idx[:, i]) for i in range(3))
+# Index arrays ride into the compiled functions as TRACED arguments, so one compile per
+# (Parameters, space kind, block size) serves every block and sigma.
 
-    def embed(u):
-        return jnp.zeros(shape, dtype=_precision.ctype).at[f, z, x, iky].set(u)
+def _block_args(idx, iky):
+    # traced index arrays (field, iz, ikx, iky) of a block's entries
+    return tuple(jnp.asarray(a) for a in (idx[:, 0], idx[:, 1], idx[:, 2],
+                                          np.full(len(idx), iky)))
 
-    def gather(g):
-        return g[f, z, x, iky]
-    return embed, gather
+
+def _fields_shape(params):
+    return (params.nfields, params.nz, params.nx, params.ny//2 + 1)
+
+
+def _block_embed(params):
+    shape = _fields_shape(params)
+
+    def embed(u, args):
+        return jnp.zeros(shape, dtype=_precision.ctype).at[args].set(u)
+    return embed
+
+
+def _block_gather(g, args):
+    return g[args]
 
 
 def _probe_chunk(params, chunk):
@@ -185,54 +244,112 @@ def _dense_from_probes(probe, n, chunk, dtype):
     return M
 
 
-def ky_block_matrix(x0, kgrid, params, iky, chunk=None):
+class _Fns(NamedTuple):
+    # the compiled maps of one (Parameters, space kind); every one takes (..., x0, kgrid, args)
+    embed: object            # (u, args) -> fields (not jitted)
+    gather: object           # (g, args) -> (n,) (not jitted)
+    mv: object               # J
+    rmv: object              # J^H (block) / J^T (real coords)
+    probe: object            # (cols, ...) -> images of the unit vectors e_cols
+    batch: object            # (U (b, n), ...) -> images of the rows of U
+    dtype: object            # the space's jax dtype
+
+
+@functools.lru_cache(maxsize=32)
+def _space_fns(params, kind):
+    # kind "block": complex (field, iz, ikx) entries of one ky column; "real": RealCoords
+    jv = _jacobian_action(params)
+    if kind == "block":
+        embed, gather, dt = _block_embed(params), _block_gather, _precision.ctype
+    else:
+        embed, gather, dt = _real_unpack(params), _real_pack, _precision.ftype
+
+    def act(u, x0, kgrid, args):
+        return gather(jv(x0, embed(u, args), kgrid), args)
+
+    if kind == "block":
+        jhu = _adjoint_action(params)
+
+        def ract(u, x0, kgrid, args):
+            return gather(jhu(x0, embed(u, args), kgrid), args)
+    else:
+        def ract(w, x0, kgrid, args):
+            _, pullback = jax.vjp(lambda u: act(u, x0, kgrid, args), jnp.zeros_like(w))
+            return pullback(w)[0]
+
+    def probe(cols, x0, kgrid, args):
+        n = _space_size(kind, args)
+        return jax.vmap(lambda j: act(jax.nn.one_hot(j, n, dtype=dt), x0, kgrid, args))(cols)
+
+    batch = jax.vmap(act, in_axes=(0, None, None, None))
+    return _Fns(embed, gather, jax.jit(act), jax.jit(ract), jax.jit(probe), jax.jit(batch), dt)
+
+
+def _space_size(kind, args):
+    return args[0].shape[0] if kind == "block" else args[0].shape[0] + args[1].shape[0]
+
+
+def ky_block_matrix(x0, kgrid, params, iky, chunk=None, *, ikx=None, iz=None):
     # dense J restricted to the kept entries of ky column iky (order: ky_block_index), for a
-    # ky-independent x0: one jvp per basis vector, vmapped in chunks. Returns
-    # (J_block complex128 (n, n), idx).
+    # ky-independent x0 -- or of one (kx, ky[, kz]) mode for an x0 independent of x [and z]:
+    # one jvp per basis vector, vmapped in chunks. Returns (J_block complex128 (n, n), idx).
     _check_supported(params)
     x0 = _fields(x0, params)
-    _assert_ky_independent(x0)
-    idx = ky_block_index(kgrid, params, iky)
-    n = len(idx)
-    embed, gather = _column_maps(params, idx, iky)
-    jv = _jacobian_action(params)
-
-    @jax.jit
-    def probe(cols, x0, kgrid):
-        def one(j):
-            return gather(jv(x0, embed(jax.nn.one_hot(j, n, dtype=_precision.ctype)), kgrid))
-        return jax.vmap(one)(cols)
-
-    B = _dense_from_probes(lambda cols: probe(cols, x0, kgrid), n,
-                           min(_probe_chunk(params, chunk), n), np.complex128)
+    idx = ky_block_index(kgrid, params, iky, ikx=ikx, iz=iz)
+    _assert_invariant(x0, ikx, iz)
+    args = _block_args(idx, iky)
+    fns = _space_fns(params, "block")
+    B = _dense_from_probes(lambda cols: fns.probe(cols, x0, kgrid, args), len(idx),
+                           min(_probe_chunk(params, chunk), len(idx)), np.complex128)
     return B, idx
 
 
-def ky_block_operator(x0, kgrid, params, iky):
-    # matrix-free form of ky_block_matrix: a complex scipy LinearOperator (matvec J,
-    # rmatvec J^H) on the kept entries of ky column iky. Returns (op, idx).
-    _check_supported(params)
-    x0 = _fields(x0, params)
-    _assert_ky_independent(x0)
-    idx = ky_block_index(kgrid, params, iky)
-    n = len(idx)
-    embed, gather = _column_maps(params, idx, iky)
-    jv = _jacobian_action(params)
-    jhu = _adjoint_action(params)
-    mv = jax.jit(lambda u, x0, kgrid: gather(jv(x0, embed(u), kgrid)))
-    rmv = jax.jit(lambda u, x0, kgrid: gather(jhu(x0, embed(u), kgrid)))
-
+def _host_op(fns, n, np_dtype, x0, kgrid, args, adjoint=True):
+    # scipy LinearOperator over the compiled maps (matvec J, rmatvec J^H / J^T)
     def wrap(fn):
         def apply(u):
             u = np.asarray(u).reshape(-1)
-            return np.asarray(fn(jnp.asarray(u, dtype=_precision.ctype), x0, kgrid),
-                              dtype=np.complex128)
+            return np.array(fn(jnp.asarray(u, dtype=fns.dtype), x0, kgrid, args), dtype=np_dtype)
         return apply
-    op = spla.LinearOperator((n, n), matvec=wrap(mv), rmatvec=wrap(rmv), dtype=np.complex128)
+    return spla.LinearOperator((n, n), matvec=wrap(fns.mv),
+                               rmatvec=wrap(fns.rmv) if adjoint else None, dtype=np_dtype)
+
+
+def ky_block_operator(x0, kgrid, params, iky, *, ikx=None, iz=None):
+    # matrix-free form of ky_block_matrix: a complex scipy LinearOperator (matvec J,
+    # rmatvec J^H) on the kept entries of the block. Returns (op, idx).
+    _check_supported(params)
+    x0 = _fields(x0, params)
+    idx = ky_block_index(kgrid, params, iky, ikx=ikx, iz=iz)
+    _assert_invariant(x0, ikx, iz)
+    op = _host_op(_space_fns(params, "block"), len(idx), np.complex128, x0, kgrid,
+                  _block_args(idx, iky))
     return op, idx
 
 
 # ---------------------------------------------------------------- real coordinates
+
+def _real_unpack(params):
+    # (u, (re, im, mirror_src, mirror_dst)) -> the fields array of the real field u
+    shape = _fields_shape(params)
+    size = int(np.prod(shape))
+
+    def unpack(u, args):
+        re, im, msrc, mdst = args
+        nre = re.shape[0]
+        g = jnp.zeros(size, dtype=_precision.ctype)
+        g = g.at[re].set(u[:nre].astype(_precision.ftype))
+        g = g.at[im].add(1j*u[nre:].astype(_precision.ftype))
+        g = g.at[mdst].set(jnp.conj(g[msrc]))
+        return jnp.reshape(g, shape)
+    return unpack
+
+
+def _real_pack(fields, args):
+    re, im = args[0], args[1]
+    g = jnp.reshape(fields, (-1,))
+    return jnp.concatenate([jnp.real(g[re]), jnp.imag(g[im])])
+
 
 class RealCoords(NamedTuple):
     # (Re, Im) coordinates of the dealias-kept modes of a real field, one entry per conjugate
@@ -248,13 +365,19 @@ class RealCoords(NamedTuple):
     def n(self):
         return len(self.re) + len(self.im)
 
+    @property
+    def args(self):
+        # the index arrays as traced arguments of the compiled maps
+        return tuple(jnp.asarray(a) for a in (self.re, self.im, self.mirror_src,
+                                              self.mirror_dst))
+
     def pack(self, fields):
-        g = jnp.reshape(fields, (-1,))
-        return jnp.concatenate([jnp.real(g[self.re]), jnp.imag(g[self.im])])
+        return _real_pack(fields, (self.re, self.im))
 
     def unpack(self, u):
+        size = int(np.prod(self.shape))
         nre = len(self.re)
-        g = jnp.zeros(int(np.prod(self.shape)), dtype=_precision.ctype)
+        g = jnp.zeros(size, dtype=_precision.ctype)
         g = g.at[self.re].set(u[:nre].astype(_precision.ftype))
         g = g.at[self.im].add(1j*u[nre:].astype(_precision.ftype))
         g = g.at[self.mirror_dst].set(jnp.conj(g[self.mirror_src]))
@@ -285,36 +408,13 @@ def real_coords(kgrid, params):
                       mirror_dst=(offs + mflat[paired][None, :]).reshape(-1))
 
 
-def _real_action(x0, kgrid, params, coords):
-    jv = _jacobian_action(params)
-
-    def ju(u, x0, kgrid):
-        return coords.pack(jv(x0, coords.unpack(u), kgrid))
-    return ju
-
-
 def real_operator(x0, kgrid, params, coords=None):
     # matrix-free J in real coordinates, for any x0: a real scipy LinearOperator (matvec J,
     # rmatvec J^T by vjp). Returns (op, coords).
     _check_supported(params)
     x0 = _fields(x0, params)
     coords = real_coords(kgrid, params) if coords is None else coords
-    ju = _real_action(x0, kgrid, params, coords)
-    mv = jax.jit(ju)
-
-    @jax.jit
-    def rmv(w, x0, kgrid):
-        _, pullback = jax.vjp(lambda u: ju(u, x0, kgrid), jnp.zeros_like(w))
-        return pullback(w)[0]
-
-    def wrap(fn):
-        def apply(u):
-            u = np.asarray(u, dtype=np.float64).reshape(-1)
-            return np.asarray(fn(jnp.asarray(u, dtype=_precision.ftype), x0, kgrid),
-                              dtype=np.float64)
-        return apply
-    op = spla.LinearOperator((coords.n, coords.n), matvec=wrap(mv), rmatvec=wrap(rmv),
-                             dtype=np.float64)
+    op = _host_op(_space_fns(params, "real"), coords.n, np.float64, x0, kgrid, coords.args)
     return op, coords
 
 
@@ -323,16 +423,9 @@ def real_matrix(x0, kgrid, params, coords=None, chunk=None):
     _check_supported(params)
     x0 = _fields(x0, params)
     coords = real_coords(kgrid, params) if coords is None else coords
-    ju = _real_action(x0, kgrid, params, coords)
-    n = coords.n
-
-    @jax.jit
-    def probe(cols, x0, kgrid):
-        return jax.vmap(lambda j: ju(jax.nn.one_hot(j, n, dtype=_precision.ftype),
-                                     x0, kgrid))(cols)
-
-    M = _dense_from_probes(lambda cols: probe(cols, x0, kgrid), n,
-                           min(_probe_chunk(params, chunk), n), np.float64)
+    fns, args = _space_fns(params, "real"), coords.args
+    M = _dense_from_probes(lambda cols: fns.probe(cols, x0, kgrid, args), coords.n,
+                           min(_probe_chunk(params, chunk), coords.n), np.float64)
     return M, coords
 
 
@@ -353,6 +446,7 @@ class EigResult(NamedTuple):
     left: Optional[np.ndarray]        # left eigenvectors w (J^H w = conj(lambda) w), or None
     residuals: np.ndarray             # ||J v - lambda v|| / (max(|lambda|, scale) ||v||)
     scale: float                      # the ||J|| scale the residuals are measured against
+    stats: Optional[dict] = None      # shift_invert's solve counts (GMRES iterations)
 
 
 def _dense_norm(J):
@@ -408,7 +502,9 @@ def shift_invert(J, sigma, k=6, *, tol=1e-12, arpack_maxiter=300, ncv=None, v0=N
     J is a dense array (one LU factorisation) or a scipy LinearOperator -- real
     (real_operator) or complex (ky_block_operator) -- whose shifted solves are GMRES to
     gmres_rtol, optionally preconditioned by M ~ (J - sigma I)^-1, in at most maxiter
-    restarts. ARPACK runs to tol in at most arpack_maxiter restarts.
+    restarts. M is a LinearOperator, or a factory M(sigma) -> LinearOperator
+    (diagonal_preconditioner, ky_averaged_preconditioner). ARPACK runs to tol in at most
+    arpack_maxiter restarts. result.stats counts the solves and the GMRES inner iterations.
 
     Guaranteed on return: every pair satisfies
         ||J v - lambda v|| <= residual_tol * max(|lambda|, scale) * ||v||,
@@ -425,6 +521,7 @@ def shift_invert(J, sigma, k=6, *, tol=1e-12, arpack_maxiter=300, ncv=None, v0=N
     """
     sigma = complex(sigma)
     n = J.shape[0]
+    stats = dict(solves=0, gmres_iters=0)
     if isinstance(J, np.ndarray):
         scale = _dense_norm(J)
         A = J.astype(np.complex128)             # the one n x n working copy
@@ -438,17 +535,26 @@ def shift_invert(J, sigma, k=6, *, tol=1e-12, arpack_maxiter=300, ncv=None, v0=N
                 f"stability.shift_invert: J - sigma I is numerically singular at sigma="
                 f"{sigma} (smallest LU pivot {pivot:.3e} against ||J|| + |sigma| = "
                 f"{scale + abs(sigma):.3e}): sigma is (numerically) an eigenvalue; move it")
-        solve = lambda b: scipy.linalg.lu_solve(lu, np.asarray(b).reshape(-1))
+        def solve(b):
+            stats["solves"] += 1
+            return scipy.linalg.lu_solve(lu, np.asarray(b).reshape(-1))
         apply = lambda V: J @ V
     else:
         mv = _complexify(J)
         scale = _probe_norm(mv, n)
         shifted = spla.LinearOperator((n, n), matvec=lambda z: mv(z) - sigma*np.asarray(z).reshape(-1),
                                       dtype=np.complex128)
+        if M is not None and not isinstance(M, (spla.LinearOperator, np.ndarray)):
+            M = M(sigma)
+
+        def count(_):
+            stats["gmres_iters"] += 1
 
         def solve(b):
+            stats["solves"] += 1
             x, info = spla.gmres(shifted, np.asarray(b).reshape(-1), rtol=gmres_rtol, atol=0.0,
-                                 restart=restart, maxiter=maxiter, M=M)
+                                 restart=restart, maxiter=maxiter, M=M, callback=count,
+                                 callback_type="pr_norm")
             if info != 0 or not np.all(np.isfinite(x)):
                 raise RuntimeError(f"stability.shift_invert: GMRES did not reach rtol="
                                    f"{gmres_rtol:g} (info={info}); loosen gmres_rtol, raise "
@@ -480,4 +586,351 @@ def shift_invert(J, sigma, k=6, *, tol=1e-12, arpack_maxiter=300, ncv=None, v0=N
             f"pairs are not eigenpairs to residual_tol={residual_tol:.1e} (residuals {res}, "
             f"values {values}, ||J|| scale {scale:.3e}). sigma={sigma} is likely too close to "
             f"an eigenvalue (move it), or the GMRES solves are too loose (tighten gmres_rtol)")
-    return EigResult(values, V, None, res, scale)
+    return EigResult(values, V, None, res, scale, stats)
+
+
+# ---------------------------------------------------------------- spaces
+
+class _Space(NamedTuple):
+    # a coordinate space for J: a mode block or the real coordinates
+    n: int
+    kind: str                # "block" or "real"
+    np_dtype: type           # np.complex128 (block) or np.float64 (real coords)
+    args: tuple              # the traced index arrays
+    index: object            # the block's idx array, or the RealCoords
+
+
+def _space(x0, kgrid, params, iky, ikx, iz, coords):
+    # the mode block (iky given; asserts x0's invariance when x0 is given) or real coordinates
+    if iky is None:
+        if ikx is not None or iz is not None:
+            raise ValueError("stability: ikx / iz select a mode block and need iky too")
+        coords = real_coords(kgrid, params) if coords is None else coords
+        return _Space(coords.n, "real", np.float64, coords.args, coords)
+    idx = ky_block_index(kgrid, params, iky, ikx=ikx, iz=iz)
+    if x0 is not None:
+        _assert_invariant(x0, ikx, iz)
+    return _Space(len(idx), "block", np.complex128, _block_args(idx, iky), idx)
+
+
+# ---------------------------------------------------------------- propagator Arnoldi
+
+# convergence order of each IF-LSRK/RK scheme (the IMEX tableaux carry their own .order)
+_SCHEME_ORDER = {"rk44": 4, "lsrk33": 3, "lsrk54": 4}
+
+
+def _scheme_order(name):
+    _, scheme = timestepping.get_scheme(name)
+    return int(getattr(scheme, "order", None) or _SCHEME_ORDER[name])
+
+
+class PropagatorInfo(NamedTuple):
+    T: float                 # integration time: exp(J T) is approximated
+    dt: float                # the fixed step actually used, T/nsteps
+    nsteps: int
+    scheme: str
+    order: int               # the scheme's order p: lambda carries an O(dt^p) error
+
+
+def _propagator_info(T, dt, scheme):
+    if not (T > 0 and dt > 0):
+        raise ValueError(f"stability: T and dt must be > 0, got T={T!r}, dt={dt!r}")
+    nsteps = max(1, int(np.ceil(T/dt - 1e-9)))
+    return PropagatorInfo(float(T), float(T)/nsteps, nsteps, scheme, _scheme_order(scheme))
+
+
+@functools.lru_cache(maxsize=32)
+def _flow_fn(params, kind, info):
+    # compiled (u, x0, kgrid, args) -> exp(J T) u: the solver's stepper run info.nsteps times
+    # at the fixed info.dt on the linearized system df/dt = L f + N'(x0) f. The stepper's rhs
+    # is the frozen tangent map of N (one jax.linearize, outside the step scan); the stepper
+    # applies L itself, exactly as in a solver run (hoisted exp ops when the backend is).
+    stepper, scheme = timestepping.get_scheme(info.scheme)
+    N = _nonlinear(params)
+    fns = _space_fns(params, kind)
+    dt = info.dt
+
+    def flow(u, x0, kgrid, args):
+        _, dN = jax.linearize(lambda g: N(g, kgrid), x0)
+
+        def rhs(state, kgrid_, params_):
+            return dN(state.fields).astype(_precision.ctype), None
+        exp_ops = timestepping.stage_exp_ops(kgrid, params, scheme, stepper, dt)
+
+        def body(s, _):
+            return stepper(s, kgrid, params, rhs, None, scheme, dt_override=dt,
+                           exp_ops=exp_ops), None
+        s, _ = jax.lax.scan(body, _state(params, fns.embed(u, args)), None, length=info.nsteps)
+        return fns.gather(s.fields, args)
+    return jax.jit(flow)
+
+
+def propagator_operator(x0, kgrid, params, *, T, dt, scheme="lsrk54", iky=None, ikx=None,
+                        iz=None, coords=None):
+    """exp(J T) as a scipy LinearOperator, integrated by the solver's own stepper.
+
+    The space is the mode block (iky [, ikx, iz]) or, with iky None, the real coordinates.
+    dt is rounded down so that nsteps*dt = T exactly. Forcing is off and there are no
+    particles (the harness rejects both). Returns (op, info, index) with info a
+    PropagatorInfo and index the block's idx or the RealCoords.
+    """
+    _check_supported(params)
+    x0 = _fields(x0, params)
+    sp = _space(x0, kgrid, params, iky, ikx, iz, coords)
+    info = _propagator_info(T, dt, scheme)
+    flow = _flow_fn(params, sp.kind, info)
+    jdt = _space_fns(params, sp.kind).dtype
+
+    def apply(u):
+        u = np.asarray(u).reshape(-1)
+        return np.array(flow(jnp.asarray(u, dtype=jdt), x0, kgrid, sp.args), dtype=sp.np_dtype)
+    op = spla.LinearOperator((sp.n, sp.n), matvec=apply, dtype=sp.np_dtype)
+    return op, info, sp.index
+
+
+class PropagatorEigResult(NamedTuple):
+    values: np.ndarray       # lambda = log(mu)/T, branch fixed by the Rayleigh quotient
+    right: np.ndarray        # eigenvectors (columns), in the block / real-coordinate space
+    left: Optional[np.ndarray]    # always None
+    residuals: np.ndarray    # ||J v - lambda v|| / (max(|lambda|, scale) ||v||), on J itself
+    scale: float             # the ||J|| estimate the residuals are relative to
+    mu: np.ndarray           # the eigenvalues of exp(J T) the values come from
+    rayleigh: np.ndarray     # v^H J v / v^H v
+    aliased: np.ndarray      # bool: |Im lambda| T within branch_margin*pi of pi, or past it
+    info: PropagatorInfo
+    applications: int        # exp(J T) applications (each one is info.nsteps linear steps)
+    seconds: float           # wall time of the eigensolve (compile included)
+    index: object            # the block's idx or the RealCoords
+
+
+def propagator_eigs(x0, kgrid, params, *, T, dt, k=6, scheme="lsrk54", iky=None, ikx=None,
+                    iz=None, coords=None, tol=1e-10, ncv=None, maxiter=300, v0=None,
+                    branch_margin=0.1, residual_tol=None):
+    """The k fastest-growing eigenvalues of J (largest Re lambda), by ARPACK on exp(J T).
+
+    The default solver for the fastest modes of a general x0. exp(J T) is nsteps = T/dt
+    fixed steps of the solver's stepper `scheme` on the linearized system
+    (propagator_operator): no linear solve, and the stiffness of L never enters an IF scheme.
+    The largest |mu| of exp(J T) are the largest Re lambda, lambda = log(mu)/T.
+
+    Accuracy: the one-step map is R(dt) = exp(J dt) + O(dt^(p+1)), so lambda carries an
+    O(dt^p) error (p = info.order) that does not depend on T; the residuals are measured on
+    J itself and ARE that error (for a normal J they bound it), not round-off. At x0 with
+    N' = 0 an IF scheme is exact. T sets the separation |mu_k/mu_(k+1)| ARPACK works with,
+    and the branch: arg(mu) = Im(lambda) T mod 2 pi. The branch is chosen by the Rayleigh
+    quotient v^H J v / v^H v; `aliased` flags |Im lambda| T within branch_margin*pi of pi or
+    beyond (shorten T). When k >= n - 1 (ARPACK's limit) exp(J T) is formed on the n basis
+    vectors and diagonalised densely.
+
+    Krylov limitation: a single start vector spans ONE direction of a semisimple multiple
+    eigenvalue, so an exactly repeated mu (e.g. the k = 0 means, all at lambda = 0) is
+    returned once and the next distinct eigenvalue takes the other slot.
+
+    Raises RuntimeError on ARPACK non-convergence, and on any residual over residual_tol when
+    that is given. Sorted by decreasing Re lambda.
+    """
+    t0 = time.perf_counter()
+    op, info, index = propagator_operator(x0, kgrid, params, T=T, dt=dt, scheme=scheme,
+                                          iky=iky, ikx=ikx, iz=iz, coords=coords)
+    x0 = _fields(x0, params)
+    sp = _space(None, kgrid, params, iky, ikx, iz, index if iky is None else None)
+    n = sp.n
+    if k >= n - 1:
+        E = np.stack([op.matvec(e) for e in np.eye(n, dtype=sp.np_dtype)], axis=1)
+        mu, V = np.linalg.eig(E)
+        keep = np.argsort(-np.abs(mu), kind="stable")[:k]
+        mu, V = mu[keep], V[:, keep]
+        apps = n
+    else:
+        if v0 is None:
+            rng = np.random.default_rng(0)
+            v0 = rng.standard_normal(n)
+            if sp.np_dtype == np.complex128:
+                v0 = v0 + 1j*rng.standard_normal(n)
+        counter = [0]
+
+        def mv(u):
+            counter[0] += 1
+            return op.matvec(u)
+        cop = spla.LinearOperator((n, n), matvec=mv, dtype=sp.np_dtype)
+        try:
+            mu, V = spla.eigs(cop, k=k, which="LM", tol=tol, v0=v0, ncv=ncv, maxiter=maxiter)
+        except spla.ArpackNoConvergence as err:
+            raise RuntimeError(
+                f"stability.propagator_eigs: ARPACK did not converge {k} eigenvalues of "
+                f"exp(J T) to tol={tol:g} in {maxiter} restarts ({len(err.eigenvalues)} "
+                f"converged). Most likely k cuts through a cluster of equal |mu| -- change k, "
+                f"lengthen T to separate the moduli, or raise ncv") from err
+        apps = counter[0]
+    Jc = _complexify(_host_op(_space_fns(params, sp.kind), n, sp.np_dtype, x0, kgrid, sp.args,
+                              adjoint=False))
+    JV = np.stack([Jc(V[:, i]) for i in range(V.shape[1])], axis=1)
+    ray = np.einsum("ij,ij->j", V.conj(), JV)/np.einsum("ij,ij->j", V.conj(), V)
+    with np.errstate(divide="ignore"):
+        lam = np.log(mu.astype(np.complex128))/info.T
+    wrap = np.round((ray.imag - lam.imag)*info.T/(2*np.pi))
+    lam = lam + 2j*np.pi*wrap/info.T
+    aliased = np.abs(lam.imag)*info.T > np.pi*(1.0 - branch_margin)
+    scale = _probe_norm(Jc, n)
+    den = np.maximum(np.abs(lam), scale)*np.linalg.norm(V, axis=0)
+    res = np.linalg.norm(JV - V*lam[None, :], axis=0)/den
+    order = np.argsort(-lam.real, kind="stable")
+    out = PropagatorEigResult(lam[order], V[:, order], None, res[order], scale, mu[order],
+                              ray[order], aliased[order], info, apps,
+                              time.perf_counter() - t0, index)
+    if residual_tol is not None and not np.all(out.residuals <= residual_tol):
+        raise RuntimeError(
+            f"stability.propagator_eigs: residuals {out.residuals} exceed residual_tol="
+            f"{residual_tol:.1e} (values {out.values}); the O(dt^{info.order}) time error "
+            f"dominates -- reduce dt")
+    return out
+
+
+# ---------------------------------------------------------------- preconditioners
+# Factories sigma -> LinearOperator ~ (J - sigma I)^-1 in a space, for shift_invert's M.
+# On real coordinates J is a real matrix acting on complex vectors z = a + i b. For a map
+# that acts on each canonical entry f as f -> A f (complex-linear: L, and a ky > 0 column),
+# the complexification is diagonal in f+ = z_re + i z_im, f- = z_re - i z_im, acting as A
+# on f+ and conj(A) on f-; so (. - sigma)^-1 is (A - sigma)^-1 on f+ and
+# conj((A - conj(sigma))^-1 conj(.)) on f-, and z_re = (F+ + F-)/2, z_im = (F+ - F-)/(2i).
+
+
+@functools.lru_cache(maxsize=32)
+def _diag_fn(params, kind):
+    # compiled (z, sigma, lin, args) -> (L - sigma)^-1 z in the space, z complex
+    shape = _fields_shape(params)
+    size = int(np.prod(shape))
+
+    def solve(lin, f, sigma):
+        # (L - sigma)^-1 = -(1/sigma) (I - L/sigma)^-1
+        return -lin.solve_shifted(f, 1.0/sigma)/sigma
+
+    if kind == "block":
+        def fn(z, sigma, lin, args):
+            f = jnp.zeros(shape, dtype=_precision.ctype).at[args].set(z)
+            return solve(lin, f, sigma)[args]
+        return jax.jit(fn)
+
+    def place(re, im, zr, zi):
+        g = jnp.zeros(size, dtype=_precision.ctype).at[re].set(zr)
+        return jnp.reshape(g.at[im].add(1j*zi), shape)
+
+    def fn(z, sigma, lin, args):
+        re, im = args[0], args[1]
+        nre = re.shape[0]
+        zr, zi = z[:nre], z[nre:]
+        fp = solve(lin, place(re, im, zr, zi), sigma).reshape(-1)
+        fm = jnp.conj(solve(lin, jnp.conj(place(re, im, zr, -zi)), jnp.conj(sigma))).reshape(-1)
+        return jnp.concatenate([(fp[re] + fm[re])/2, (fp[im] - fm[im])/2j])
+    return jax.jit(fn)
+
+
+def diagonal_preconditioner(kgrid, params, *, iky=None, ikx=None, iz=None, coords=None):
+    """Factory sigma -> (L - sigma I)^-1 (L = kgrid.lin, k-local) in the block (iky [, ikx,
+    iz]) or the real coordinates, through the operator's solve_shifted. Exact where N' is
+    small against L - sigma; no help where L ~ 0 (nu = 0) or N' dominates."""
+    sp = _space(None, kgrid, params, iky, ikx, iz, coords)
+    fn = _diag_fn(params, sp.kind)
+
+    def factory(sigma):
+        sigma = complex(sigma)
+        if sigma == 0:
+            raise ValueError("stability.diagonal_preconditioner: sigma = 0 (L is singular at "
+                             "k = 0)")
+        s = jnp.asarray(sigma, dtype=_precision.ctype)
+
+        def apply(z):
+            z = np.asarray(z).reshape(-1)
+            return np.array(fn(jnp.asarray(z, dtype=_precision.ctype), s, kgrid.lin, sp.args),
+                            dtype=np.complex128)
+        return spla.LinearOperator((sp.n, sp.n), matvec=apply, dtype=np.complex128)
+    return factory
+
+
+class KyAveragedPreconditioner:
+    """Factory sigma -> (J(xbar) - sigma I)^-1 on the real coordinates, xbar the y-average
+    (ky = 0 part) of x0. J(xbar) is block-diagonal in ky: a dense complex block per ky > 0
+    column and one dense real block for the ky = 0 row, all found together by probing the
+    j-th entry of every block at once (max block size probes, not their sum). Exact for a
+    ky-independent x0; for a 2D x0 it drops the ky coupling. Each sigma costs one LU per
+    block (two per ky > 0 column: sigma and conj(sigma)).
+    """
+
+    def __init__(self, x0, kgrid, params, coords=None, chunk=None):
+        _check_supported(params)
+        x0 = _fields(x0, params)
+        xbar = x0.at[..., 1:].set(0.0)
+        coords = real_coords(kgrid, params) if coords is None else coords
+        self.coords, self.n = coords, coords.n
+        size, nre = int(np.prod(coords.shape)), len(coords.re)
+        pos = np.full(size, -1)
+        pos[coords.re] = np.arange(nre)
+        pos_im = np.full(size, -1)
+        pos_im[coords.im] = nre + np.arange(len(coords.im))
+        self.cols = []
+        kept = _kept(kgrid, params)
+        for iky in range(1, params.ny//2 + 1):
+            if iky < params.ny/2 and kept[..., iky].any():
+                idx = ky_block_index(kgrid, params, iky)
+                flat = np.ravel_multi_index((idx[:, 0], idx[:, 1], idx[:, 2],
+                                             np.full(len(idx), iky)), coords.shape)
+                re_c, im_c = pos[flat], pos_im[flat]
+                if (re_c < 0).any() or (im_c < 0).any():
+                    raise AssertionError("stability: a ky > 0 entry lacks a real coordinate")
+                self.cols.append((re_c, im_c))
+        iy_re = np.unravel_index(coords.re, coords.shape)[3]
+        iy_im = np.unravel_index(coords.im, coords.shape)[3]
+        self.row0 = np.concatenate([np.flatnonzero(iy_re == 0),
+                                    nre + np.flatnonzero(iy_im == 0)])
+        covered = len(self.row0) + 2*sum(len(r) for r, _ in self.cols)
+        if covered != self.n:
+            raise AssertionError(f"stability: blocks cover {covered} of {self.n} coordinates")
+        nprobe = max([len(self.row0)] + [len(r) for r, _ in self.cols])
+        fns, args = _space_fns(params, "real"), coords.args
+        chunk = min(_probe_chunk(params, chunk), nprobe)
+        self.blocks = [np.empty((len(r), len(r)), dtype=np.complex128) for r, _ in self.cols]
+        self.M0 = np.empty((len(self.row0), len(self.row0)))
+        for j0 in range(0, nprobe, chunk):
+            js = np.arange(j0, j0 + chunk)
+            U = np.zeros((chunk, self.n))
+            for re_c, _ in self.cols:
+                ok = js < len(re_c)
+                U[np.flatnonzero(ok), re_c[js[ok]]] = 1.0
+            ok = js < len(self.row0)
+            U[np.flatnonzero(ok), self.row0[js[ok]]] = 1.0
+            out = np.asarray(fns.batch(jnp.asarray(U, dtype=_precision.ftype), xbar, kgrid,
+                                       args), dtype=np.float64)
+            for b, (re_c, im_c) in enumerate(self.cols):
+                for i, j in enumerate(js):
+                    if j < len(re_c):
+                        self.blocks[b][:, j] = out[i, re_c] + 1j*out[i, im_c]
+            for i, j in enumerate(js):
+                if j < len(self.row0):
+                    self.M0[:, j] = out[i, self.row0]
+
+    def __call__(self, sigma):
+        sigma = complex(sigma)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", scipy.linalg.LinAlgWarning)
+            eye = lambda m: np.eye(m.shape[0])
+            lu0 = scipy.linalg.lu_factor(self.M0 - sigma*eye(self.M0))
+            lus = [(scipy.linalg.lu_factor(B - sigma*eye(B)),
+                    scipy.linalg.lu_factor(B - np.conj(sigma)*eye(B))) for B in self.blocks]
+
+        def apply(z):
+            z = np.asarray(z, dtype=np.complex128).reshape(-1)
+            out = np.empty(self.n, dtype=np.complex128)
+            out[self.row0] = scipy.linalg.lu_solve(lu0, z[self.row0])
+            for (re_c, im_c), (lu, lub) in zip(self.cols, lus):
+                zr, zi = z[re_c], z[im_c]
+                Fp = scipy.linalg.lu_solve(lu, zr + 1j*zi)
+                Fm = np.conj(scipy.linalg.lu_solve(lub, np.conj(zr - 1j*zi)))
+                out[re_c] = (Fp + Fm)/2
+                out[im_c] = (Fp - Fm)/2j
+            return out
+        return spla.LinearOperator((self.n, self.n), matvec=apply, dtype=np.complex128)
+
+
+def ky_averaged_preconditioner(x0, kgrid, params, coords=None, chunk=None):
+    # KyAveragedPreconditioner(x0, ...): the factory, blocks built once for every sigma
+    return KyAveragedPreconditioner(x0, kgrid, params, coords=coords, chunk=chunk)
