@@ -6,6 +6,12 @@ differentiated through the stepper, is REPLACED by the eigenvalue version below)
 Each rung that touches `taranis/` lands via the standing flow (implementer subagent →
 fresh adversarial review with mutation testing).
 
+**Ordering decision (Alfred, 2026-09-28):** general machinery FIRST (rung 0 + 0b: any
+equation set, any equilibrium, a robust eigensolver), validated against EXACT theory —
+no-shear tearing with an analytic Δ′ and the analytic inner-layer dispersion relation
+(rung 1a) — and only then the shear case against the Julia eigencode (rung 1b-ref) and
+the more complex equilibria. The Julia reference (committed 2597c78) waits for that.
+
 ## Goal
 
 Show that taranis's autodiff does physics a hand-written code cannot easily do:
@@ -94,17 +100,64 @@ Gates, `tests/test_stability.py` (both bootstrap/footer conventions; fp64):
 6. The mutation-testing review ([[mutation-testing-gate-suites]]): one-line mutations to
    `NonlinearTerm` / `linear_matrix` signs and factors must each fail a gate.
 
-## Rung 1 — validation (notebooks, no repo changes beyond rung 0)
+## Rung 0b — general machinery (before any science)
 
-### 1a. Classical tearing
+Rung 0 as first landed is RMHD/ky-block-centric. 0b makes it equation- and
+geometry-agnostic, and makes the eigensolver robust:
 
-cos x equilibrium and the Harris-like periodic family B_y = tanh(sin x/a)/tanh(1/a)
-(v1's rung-1 family: exactly periodic, locally Harris of width a). Targets: FKR
-γ ∝ η^{3/5}Δ′^{4/5}, Coppi γ ∝ η^{1/3}k^{2/3}, γ_max ∝ η^{1/2} at k_max ∝ η^{1/4};
-cross-check γ(η), γ(k) against `examples/tearing-mode-2D.ipynb` and
-`examples/tearing-growth-vs-k.ipynb` (time-domain measurements of the same solver — the
-eigenvalue must agree to their fit error). Double tearing appears automatically at
-low k (two sheets per period): report the mode pair.
+- `jvp_operator` works for ANY registered recipe (RMHD, GDI, CMHD: same J = apply_L +
+  jvp(N) identity) and any x₀ (1D, 2D, 3D; FD-z and `z_spectral`). Real-vs-complex
+  linearity stated per case: the full operator on rfft2 state is only R-linear; the
+  complex-linear reduction is a property of a symmetry (a ky-independent x₀), never
+  assumed.
+- **Two eigensolver families, both matrix-free**, chosen per problem:
+  (i) **propagator Arnoldi**: Arnoldi on v ↦ e^{JT}v, where e^{JT} is integrated with the
+  solver's own IF steppers on the linearized system (L exact through `apply_exp`, N′ by
+  jvp) — the largest-|μ| eigenvalues ARE the fastest-growing modes, stiffness never
+  enters, needs no linear solve; cost ~ (Krylov dim) × (T/dt) linear steps, measured;
+  (ii) **shift-invert** (dense LU where the block fits, GMRES otherwise, with (L−σ)⁻¹ —
+  diagonal in k — as the preconditioner). Every solver has maxiter/tol and RAISES on
+  non-convergence (rung 0's first shift-invert hung for 7h47m at n≈5000 — never again).
+- The dense ky-block path stays as the fast special case for 1D equilibria.
+- **Generality gates with exact answers, one per equation set:** RMHD tearing (rung 1a,
+  below); CMHD about a uniform state (the fast/slow/Alfvén dispersion relation the CMHD
+  linear gates already use); GDI's analytic linear growth (GDI_PLAN theory). Each run
+  through the matrix-free path, not a hand-built matrix.
+
+## Rung 1 — validation (notebooks, no repo changes beyond rung 0/0b)
+
+### 1a. No-shear tearing against EXACT theory
+
+Equilibrium Ψ₀ = sech²x (f = −2 tanh sech², the paper's profile at α = 0), localized so
+the periodic box is harmless for Lx ≫ 1/k. Its outer equation
+ψ″ = (k² + 4 − 12 sech²x)ψ is Pöschl–Teller ℓ = 3, solved in closed form by ladder
+operators (ψ = A₃A₂A₁e^{−κx}, Aℓ = −d/dx + ℓ tanh x, κ² = k² + 4; checked 2026-09-28,
+ODE residual 4e-15):
+
+    Δ′a = 2(5 − k²a²)(k²a² + 3) / (k²a² √(k²a² + 4))     → 15/(ka)² + 1/8 as ka → 0,
+
+marginal at exactly ka = √5. Note f′(0) = −2 (not 1): every layer formula uses |f′(0)|.
+For the finite box, also derive the periodic-image correction or show it is below the
+tolerance at the chosen Lx.
+
+Targets (ν = 0, `hyper=1`):
+1. The **analytic inner-layer dispersion relation** (Coppi et al. 1976 / Ara et al.
+   1978 form, Γ-function ratio in Λ = γ/(k|f′(0)|)^{2/3}η^{1/3}): the implementer
+   transcribes it from the literature WITH citation and verifies numerically that it
+   reproduces both limits — FKR γ = [Γ(1/4)/(2πΓ(3/4))]^{4/5} Δ′^{4/5} η^{3/5}
+   (k|f′(0)|)^{2/5} and Coppi γ = η^{1/3}(k|f′(0)|)^{2/3} — before any comparison.
+2. γ_eig(k, S) → γ_theory(k, S) as S grows: the RATIO → 1 with a measured finite-S
+   correction exponent (it is an asymptotic theory — agreement is a trend, not a
+   tolerance at fixed S). Report where the uniform grid runs out.
+3. γ_max ∝ S^{−1/2}, k_max ∝ S^{−1/4}, with the prefactors the dispersion relation gives.
+4. The ideal marginal point: Re λ changes sign near ka = √5 with a finite-S shift that
+   shrinks with S.
+5. Cross-check γ(η), γ(k) against `examples/tearing-mode-2D.ipynb` /
+   `tearing-growth-vs-k.ipynb` (time-domain measurements of the same solver, their
+   equilibrium) — the eigenvalue must agree to their fit error.
+Also the Harris-like periodic family B_y = tanh(sin x/a)/tanh(1/a) (locally Harris,
+Δ′a = 2(1/ka − ka)) as a second exact-Δ′ case (two sheets per period: double tearing at
+low k — report the mode pair).
 
 ### 1b. Shear-flow tearing against the paper's eigencode
 
@@ -232,8 +285,12 @@ controlled statistical-sensitivity estimator in plasma turbulence.
 ## Order of work
 
 1. Rung 0 module + gates (implementer), adversarial review with mutations.
-2. Julia reference generator + convergence study (can run in parallel with 1: disjoint
-   files — `tests/reference/`, `tests/_gen_shear_tearing_reference.py`, the npz).
-3. Rung 1 notebook (1a then 1b), then rung 1b sensitivities.
+2. Julia reference generator + convergence study — DONE (2597c78; 126 points, all
+   converged; finding: at S=1e12, ka ≲ 1e-2 the stretched-grid code has a spurious
+   eps-proportional mode above tearing — irrelevant in our window, never read a dense
+   spectrum of it as "fastest mode" there).
+3. Rung 0b (general machinery + generality gates), review.
+4. Rung 1a notebook (no-shear tearing vs exact theory), then 1b (shear vs Julia
+   reference), then rung 1b sensitivities.
 4. Overrides seam + reference gate; rung 2 targets.
 5. Rung 2b items; λ₁/m notebook; 3a; 3b.
