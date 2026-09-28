@@ -748,6 +748,41 @@ Derivation and conventions: docs/numerics.md "Test particles". Rules:
 - Not yet: the 3D production run, and z-decomposed (multi-rank) particles — designs for the
   latter are in plans/TESTPART_PLAN.md §4, neither is built.
 
+### Linear stability harness (`taranis/stability.py`, plans/AUTODIFF_PLAN.md — rungs 0/0b landed 2026-09-28)
+
+Read-only consumer of the solver (imports physics; nothing imports it). Rules:
+
+- **`construct_rhs` returns N only**, so J v = `kgrid.lin.apply_L(v)` + jvp(N)(x₀)(v).
+  Forgetting `apply_L` silently drops all dissipation (and z_spectral's ±i·kz). Operator
+  methods only, as everywhere. Any recipe (RMHD, GDI, CMHD rho/lnrho) and geometry;
+  unforced, size 1, non-sharded; FD-z needs `comm_backend="serial"` (mpi4jax sendrecv has
+  no jvp); the CMHD expanding box is rejected (t-dependent RHS, no autonomous J).
+- Spaces: mode blocks `ky_block_*(..., iky, *, ikx=None, iz=None)` are complex-linear
+  ONLY because x₀'s invariance along the fixed axes is asserted (iz = kz index, z_spectral
+  only); `real_coords` for any x₀ — on the rfft2 fields array J is only REAL-linear.
+- **Solvers never return wrong pairs silently** (both reviews found that failure; keep it
+  that way for anything added): `shift_invert` raises on a near-singular J − σI and on any
+  pair failing ‖Jv−λv‖ ≤ tol·max(|λ|, scale)·‖v‖; `propagator_eigs` (the default
+  fastest-modes solver: ARPACK on e^{JT} stepped by the solver's own IF steppers, λ = log μ/T,
+  error O(dt^p) independent of T) raises above `residual_tol` = 1e-4 by default
+  (`np.inf` is the explicit opt-out). Residuals are always scale-relative — a bare /|λ| is
+  meaningless for the ν = 0 null eigenvalue. N′ is stepped explicitly: dt obeys the
+  stepper's limit on N′ (for CMHD the fast-wave CFL). IMEX is rejected unless L is
+  identity/real-diagonal (the standing no-IMEX-on-a-wave-L rule).
+- With ν = 0 RMHD has a cluster of ~0 eigenvalues: shift-invert with small k and σ just
+  above the leading mode. Preconditioners: `diagonal_preconditioner` (L−σ)⁻¹ is useless at
+  ν = 0; `ky_averaged_preconditioner` is exact for a 1D x₀ and fails near the slow-mode
+  cluster of strongly 2D x₀ — there use `propagator_eigs`.
+- Single-start Krylov lists an exactly degenerate eigenvalue once (the two k = 0 means;
+  ±kz pairs of a z-independent x₀ — warned; pass `iz` to split them).
+- Gates: `tests/test_stability.py` (FD, x₀=0 ⇒ J=L entrywise incl. 3D, hand Fourier
+  transcriptions of the RMHD and GDI linearizations), `tests/test_stability_general.py`
+  (CMHD uniform-state exact waves, GDI dispersion, propagator vs dense at dt⁴, branch/alias,
+  loud defaults). The shear-tearing reference (`tests/_gen_shear_tearing_reference.py`,
+  `tests/data/shear_tearing_reference.npz`, force-added) is Alfred's Julia eigencode — never
+  regenerate to make a comparison pass; at S=1e12, ka ≲ 1e-2 its dense spectrum has a
+  spurious eps-proportional mode above tearing (irrelevant in the 1e3–1e5 window).
+
 ### Checkpointing
 
 **Read docs/checkpointing.md before touching `snapshot_io.py`** — layouts, restore rules,

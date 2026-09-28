@@ -127,6 +127,14 @@ geometry-agnostic, and makes the eigensolver robust:
   linear gates already use); GDI's analytic linear growth (GDI_PLAN theory). Each run
   through the matrix-free path, not a hand-built matrix.
 
+**Rung 0b landed (7b83f9d + review fixes 87eb72a, 2026-09-28).** Measured outcomes that
+change later rungs: the ky-averaged preconditioner is exact for 1D x₀ but GMRES fails
+near the slow-mode cluster once a y-perturbation ε ≳ 0.1–0.3 (cos x sheet, 32–64×16), and
+(L−σ)⁻¹ never helps at ν = 0 — so **propagator Arnoldi is the 2D-equilibrium workhorse**
+(rung 2b item 3), shift-invert the 1D one. Propagator error is O(dt^p) and exactly
+independent of T; its default residual_tol is 1e-4. Uniform dense grid envelope on the
+laptop: nx ≤ 2048 (n ≈ 2500, ~75 s eig); S=1e5 at ka=0.1 needs nx ≈ 2e4 → matrix-free.
+
 ## Rung 1 — validation (notebooks, no repo changes beyond rung 0/0b)
 
 ### 1a. No-shear tearing against EXACT theory
