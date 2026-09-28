@@ -10,7 +10,9 @@
 #      the analytic L ENTRYWISE -- z_spectral separable (nu == eta), putzer2 (nu != eta),
 #      z_diss_k != 0, and FD-z's periodic 4th-order Alfven stencil plus its d4/dz4 filter.
 #   3. independent Fourier transcription of the linearized RMHD block about
-#      psi0 = A cos(qx), phi0 = alpha A cos(qx) (derivation in the test's docstring).
+#      psi0 = A cos(qx), phi0 = alpha A cos(qx) (derivation in the test's docstring), and its
+#      GDI twin about phi0 = A cos(qx), N0 = B cos(qx) (L included; the one home for the
+#      hand transcriptions of a bracket linearization).
 #   4. ky_block_matrix against the full jvp_operator on a random ky-column vector (2D, 3D
 #      FD-z, 3D z_spectral), the complex-linearity of a ky column (and its absence on the
 #      full fields space), and the matrix-free ky_block_operator.
@@ -310,6 +312,87 @@ def test_fourier_transcription():
                 band = np.abs(H - np.diag(np.diag(H))).max()
                 c.check(f"alpha={alpha} iky={iky}: coupling is nontrivial", band > 1e-3,
                         f"{band:.3e}")
+
+
+def _gdi_cosine_block(idx, params, iky, A, B, q):
+    """Hand transcription of GDI's ky-column block about phi0 = A cos(qx), N0 = B cos(qx).
+
+    Shares nothing with gdi.NonlinearTerm / gdi.linear_matrix but the conventions. Fields
+    (N, phi) (gdi.py header, docs/numerics.md "GDI"), {a,b} = a_x b_y - a_y b_x, w = lap phi
+    the vorticity; the nonlinear RHS (plans/GDI_PLAN.md: brackets {phi, N}, {phi, w}) is
+        d_t N = -{phi, N},      d_t w = -{phi, w},
+    with phi_k evolved: d_t phi_k = -(1/k^2) (d_t w)_k. Every bracket of two functions of x
+    vanishes, so (phi0, N0) is an exact ideal steady state. Linearize with dphi, dN ~
+    exp(i ky y), using {a0(x), b} = a0' i ky b and {a, b0(x)} = -i ky a b0':
+        d(d_t N) = -{phi0, dN} - {dphi, N0} = i ky [-phi0' dN + N0' dphi]
+        d(d_t w) = -{phi0, dw} - {dphi, w0} = i ky [-phi0' dw + w0' dphi]
+    With s = sin qx: phi0' = -A q s, N0' = -B q s, w0 = -q^2 phi0 so w0' = A q^3 s, and on an
+    input mode dw = -k'^2 dphi (k'^2 = kx'^2 + ky^2):
+        d(d_t N) = i ky q s [A dN - B dphi]
+        d(d_t w) = i ky q s A (q^2 - k'^2) dphi
+    (s g)_kx = (g_(kx-q) - g_(kx+q))/(2i), so output kx couples to kx -+ q with weight
+    +-(ky q/2); the phi row carries the extra -1/k^2 of the OUTPUT mode. The block of J adds
+    L's 2x2 per mode, from docs/numerics.md "GDI" (gamma_par = gpar_fac nu_in k^2):
+        L[N,N] = -gamma_par - diss k^2h        L[N,phi]   = gamma_par + i ky/Ln
+        L[phi,N] = gpar_fac nu_in - i ky nu_in v0/k^2
+        L[phi,phi] = -nu_in - gpar_fac nu_in - diss k^2h
+    """
+    ep = params.eqpars
+    nu, g, Ln, v0 = ep["nu_in"], ep["gpar_fac"], ep["Ln"], ep["v0"]
+    diss, hyper = ep["diss"], ep["hyper"]
+    nx = params.nx
+    kx = np.fft.fftfreq(nx)*nx*2*np.pi/params.Lx
+    ky = iky*2*np.pi/params.Ly
+    qi = int(round(q*params.Lx/(2*np.pi)))
+    pos = {(int(f), int(ix)): r for r, (f, _, ix) in enumerate(idx)}
+    H = np.zeros((len(idx), len(idx)), dtype=complex)
+    c0 = ky*q/2
+    for r, (fo, _, ixo) in enumerate(idx):
+        k2o = kx[ixo]**2 + ky**2
+        gp = g*nu*k2o
+        if fo == 0:                           # N row
+            H[r, pos[(0, ixo)]] += -gp - diss*k2o**hyper
+            H[r, pos[(1, ixo)]] += gp + 1j*ky/Ln
+        else:                                 # phi row
+            H[r, pos[(0, ixo)]] += g*nu - 1j*ky*nu*v0/k2o
+            H[r, pos[(1, ixo)]] += -nu - g*nu - diss*k2o**hyper
+        for sign, shift in ((+1.0, -qi), (-1.0, +qi)):
+            ixi = (ixo + shift) % nx
+            if (0, ixi) not in pos:
+                continue                     # outside the kept set: the truncation
+            assert abs(kx[ixi] - (kx[ixo] + shift*2*np.pi/params.Lx)) < 1e-12
+            k2i = kx[ixi]**2 + ky**2
+            if fo == 0:
+                H[r, pos[(0, ixi)]] += c0*sign*A
+                H[r, pos[(1, ixi)]] += -c0*sign*B
+            else:
+                H[r, pos[(1, ixi)]] += -(1.0/k2o)*c0*sign*A*(q**2 - k2i)
+    return H
+
+
+@pytest.mark.fp64
+def test_gdi_fourier_transcription():
+    # GDI's twin of gate 3: N' != 0 with an exact answer (the GDI eigenvalue gates in
+    # test_stability_general.py sit at x0 = 0, where N' vanishes)
+    params = fresh_params(dims=2, nx=16, ny=16, Lx=2*np.pi, Ly=2*np.pi, eqtype="GDI",
+                          comm_backend="serial",
+                          eqpars=dict(Ln=1.0, nu_in=0.3, v0=2.0, diss=0.01, hyper=1,
+                                      gpar_fac=0.1))
+    kgrid = jr.setup_kgrids(params)
+    A, B, q = 0.7, 0.4, 2.0                  # phi0 = A cos 2x, N0 = B cos 2x
+    x0 = _x0(params, lambda x, y: jnp.stack([B*jnp.cos(q*x) + 0*y, A*jnp.cos(q*x) + 0*y]))
+    with checks() as c:
+        for iky in (1, 3):
+            J, idx = stability.ky_block_matrix(x0, kgrid, params, iky)
+            H = _gdi_cosine_block(idx, params, iky, A, B, q)
+            err = np.abs(J - H).max()/np.abs(H).max()
+            c.check(f"GDI iky={iky}: dense block == hand transcription entrywise (max rel "
+                    f"{err:.1e}, n={len(idx)})", err < 1e-13, f"max rel {err:.3e}")
+            H0 = _gdi_cosine_block(idx, params, iky, 0.0, 0.0, q)
+            for rows, name in ((idx[:, 0] == 0, "N"), (idx[:, 0] == 1, "phi")):
+                band = np.abs((H - H0)[rows]).max()
+                c.check(f"GDI iky={iky}: the {name} rows' N' coupling is nontrivial "
+                        f"({band:.2f})", band > 1e-2, f"{band:.3e}")
 
 
 # ------------------------------------------------------------------------------ gate 4

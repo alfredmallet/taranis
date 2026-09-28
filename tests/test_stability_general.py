@@ -23,12 +23,23 @@
 #      one iteration, putzer2 real coords included); ky_averaged_preconditioner is
 #      (J - sigma)^-1 exactly for a ky-independent x0, and shift_invert returns the same
 #      pairs with it.
-#   6. Mode blocks assert x0's invariance; the expanding box is rejected.
+#   6. Mode blocks assert x0's invariance (and take only genuine ints: no bool); the
+#      expanding box is rejected.
+#   7. propagator_eigs' own bookkeeping on a genuinely COMPLEX 7x7 CMHD mode block with modes
+#      at |Im lambda| T in (pi, 2 pi): the branch unwrapping, the `aliased` flags, the
+#      residuals and Rayleigh quotients against an independent recomputation from the dense
+#      block, the dense branch's largest-|mu| selection at k = n - 1, k > n rejected; the
+#      default residual_tol raising on a dt past the explicit stability limit on N'; IMEX
+#      rejected on a wave L and gated on CMHD's real diagonal L; the collapsed +-kz warning.
+# (GDI's nonlinear linearization is gated by a hand transcription in tests/test_stability.py,
+# next to rung 0's RMHD one.)
 # fp64 only (round-off tolerances) except test_smoke_both_precisions.
 # pytest: `pytest tests/test_stability_general.py`. Script: `python tests/test_stability_general.py`.
 from _rmhd_testing import bootstrap, checks, fit_order, fresh_params
 
 bootstrap()
+
+import warnings
 
 import numpy as np
 import pytest
@@ -212,7 +223,12 @@ def test_cmhd_propagator_ky_column():
             want = _cmhd_exact(_kvec(params, 0, 1, 0), cs0, gamma, D, hyper)
             errs = []
             for dt in (0.1, 0.05):
-                r = stability.propagator_eigs(x0, kgrid, params, T=0.5, dt=dt, k=7, iky=1)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    r = stability.propagator_eigs(x0, kgrid, params, T=0.5, dt=dt, k=7, iky=1)
+                mixed = [w for w in caught if "spread over several kz" in str(w.message)]
+                c.check(f"{dv} dt={dt}: no collapsed-kz warning (z-independent x0, simple "
+                        f"leading modes)", not mixed, f"{[str(w.message) for w in mixed]}")
                 e = _match(r.values, want)
                 errs.append(e)
                 c.check(f"{dv} gamma={gamma:.3f} dt={dt}: leading 7 of the ky column == the "
@@ -229,6 +245,111 @@ def test_cmhd_propagator_ky_column():
                     f"{order:.2f})", 3.5 < order < 4.6, f"order {order:.3f}")
 
 
+# CMHD uniform state, ONE (kx, ky, kz) mode (n = 7: propagator_eigs' dense branch), unequal
+# (D_rho, nu, eta) so the damping rates differ: a genuinely complex block (Doppler shift +
+# waves: its eigenvectors are not real up to a phase), exact eigenvalues from the 7x7
+# transcription. At T = 1.25, |Im lambda| T / pi = 0, 0.84, 0.86, 0.99, 1.02, 1.12, 1.27:
+# three modes need unwrapping, four are flagged aliased (> 0.9 pi), and the margins from
+# pi and 0.9 pi dwarf the O(dt^4) error.
+_BR_DISS, _BR_CS0, _BR_GAMMA, _BR_T = (0.03, 0.08, 0.02), 1.1, 5.0/3.0, 1.25
+
+
+def _branch_case():
+    params = _cmhd_params(cs0=_BR_CS0, gamma=_BR_GAMMA, diss=_BR_DISS, hyper=1)
+    kgrid = jr.setup_kgrids(params)
+    ikx, iky, iz = _MODES[0]
+    want = np.linalg.eigvals(_cmhd_transcription(_kvec(params, ikx, iky, iz), _BR_CS0,
+                                                 _BR_GAMMA, _BR_DISS, 1, False))
+    return params, kgrid, _uniform_x0(params), dict(iky=iky, ikx=ikx, iz=iz), want
+
+
+def _paired(values, want):
+    # the exact eigenvalue paired with each value (optimal assignment)
+    cost = np.abs(np.asarray(values)[:, None] - np.asarray(want)[None, :])
+    r, c = linear_sum_assignment(cost)
+    return np.asarray(want)[c[np.argsort(r)]], c[np.argsort(r)]
+
+
+@pytest.mark.fp64
+def test_propagator_branches_aliasing_and_selection():
+    params, kgrid, x0, blk, want = _branch_case()
+    T, scale = _BR_T, np.abs(want).max()
+    B, _ = stability.ky_block_matrix(x0, kgrid, params, blk["iky"], ikx=blk["ikx"],
+                                     iz=blk["iz"])
+    with checks() as c:
+        wT = np.abs(want.imag)*T/np.pi
+        c.check(f"config: |Im lambda| T/pi = {np.sort(wT).round(3)} spans (0.1, 0.9), (0.9, 1) "
+                f"and (1, 2)", ((wT > 0.1) & (wT < 0.9)).any() and ((wT > 0.9) & (wT < 1)).any()
+                and ((wT > 1) & (wT < 2)).sum() >= 2)
+        r = stability.propagator_eigs(x0, kgrid, params, T=T, dt=0.025, k=7, **blk)
+        w, _ = _paired(r.values, want)
+        e = np.abs(r.values - w).max()/scale
+        c.check(f"all 7 values on the right branch (rel {e:.1e}, {r.applications} "
+                f"applications x {r.info.nsteps} steps)", e < 1e-6 and r.applications == 7,
+                f"rel {e:.3e}, values {r.values}")
+        flags = np.abs(w.imag)*T > 0.9*np.pi
+        c.check(f"aliased flags == |Im lambda| T > 0.9 pi ({r.aliased})",
+                np.array_equal(r.aliased, flags), f"{r.aliased} vs {flags}")
+        V, lam = r.right, r.values
+        BV = B @ V
+        ray = np.einsum("ij,ij->j", V.conj(), BV)/np.einsum("ij,ij->j", V.conj(), V)
+        e = np.abs(r.rayleigh - ray).max()/scale
+        # the unconjugated v^T B v / v^T v differs from it by O(residual) because the
+        # eigenvectors are complex (not real up to a phase), which is what makes this check see
+        # a dropped conj; on a real block (rung 0's RMHD sheets) the two would coincide
+        ray_t = np.einsum("ij,ij->j", V, BV)/np.einsum("ij,ij->j", V, V)
+        gap = np.abs(ray_t - ray).max()/scale
+        c.check(f"Rayleigh quotients == v^H B v / v^H v from the dense block (rel {e:.1e}; the "
+                f"unconjugated form is {gap:.1e} away)", e < 1e-13 and gap > 1e2*1e-13,
+                f"rel {e:.3e}, gap {gap:.3e}")
+        e = np.abs(r.rayleigh - w).max()/scale
+        c.check(f"Rayleigh quotients == exact (rel {e:.1e})", e < 1e-6, f"rel {e:.3e}")
+        res = (np.linalg.norm(BV - V*lam[None, :], axis=0)
+               / (np.maximum(np.abs(lam), r.scale)*np.linalg.norm(V, axis=0)))
+        c.check(f"residuals on J == recomputed from the dense block ({r.residuals.max():.2e} "
+                f"vs {res.max():.2e}), nonzero (the O(dt^4) error) and under 1e-6",
+                np.allclose(r.residuals, res, rtol=1e-6, atol=1e-14)
+                and 1e-13 < r.residuals.max() < 1e-6, f"{r.residuals} vs {res}")
+
+        # the dense branch at k = n - 1 keeps the LARGEST |mu|: the one left out is the most
+        # damped (the slowest Re pair), never the least damped div B mode at -eta k^2
+        r6 = stability.propagator_eigs(x0, kgrid, params, T=T, dt=0.025, k=6, **blk)
+        w6, cols = _paired(r6.values, want)
+        e = np.abs(r6.values - w6).max()/scale
+        left = want[np.setdiff1d(np.arange(7), cols)][0]
+        c.check(f"k = n - 1 = 6 (dense branch, {r6.applications} applications): 6 exact "
+                f"values (rel {e:.1e}), the one left out ({left:.4f}) is the most damped",
+                r6.applications == 7 and e < 1e-6 and left.real <= want.real.min() + 1e-9,
+                f"left {left}, returned {r6.values}")
+        for k in (8, 0):
+            with pytest.raises(ValueError, match="1 <= k <= n"):
+                stability.propagator_eigs(x0, kgrid, params, T=T, dt=0.025, k=k, **blk)
+        c.check("k > n and k < 1 are ValueErrors", True)
+
+
+@pytest.mark.fp64
+def test_propagator_loud_default():
+    # dt = T = 1.6: one lsrk54 step with omega_fast dt ~ 5, past the stepper's stability limit
+    # on N' (CMHD's waves live in N). The returned pairs are garbage and the default
+    # residual_tol must say so; residual_tol=np.inf is the explicit opt-out.
+    params, kgrid, x0, blk, want = _branch_case()
+    with checks() as c:
+        with pytest.raises(RuntimeError, match="residual on J over residual_tol"):
+            stability.propagator_eigs(x0, kgrid, params, T=1.6, dt=1.6, k=7, **blk)
+        r = stability.propagator_eigs(x0, kgrid, params, T=1.6, dt=1.6, k=7, residual_tol=np.inf,
+                                      **blk)
+        e = _match(r.values, want)
+        c.check(f"past the explicit limit: raises by default; opted out, the values are wrong "
+                f"(abs {e:.2f}) and the residuals say so ({r.residuals.max():.2f})",
+                e > 1e-2 and r.residuals.max() > 1e-2)
+        # IMEX on a real diagonal L (CMHD: pure dissipation) is allowed and converges
+        r = stability.propagator_eigs(x0, kgrid, params, T=_BR_T, dt=0.0125, k=7,
+                                      scheme="imexcb3e", **blk)
+        e = _match(r.values, want)/np.abs(want).max()
+        c.check(f"imexcb3e on CMHD's diagonal L: exact values (rel {e:.1e}, residual "
+                f"{r.residuals.max():.1e})", e < 1e-4, f"rel {e:.3e}")
+
+
 # ------------------------------------------------------------------------------- GDI
 
 def _gdi_params(dims, **eq):
@@ -236,10 +357,10 @@ def _gdi_params(dims, **eq):
     base.update(eq)
     if dims == 2:
         return fresh_params(dims=2, nx=16, ny=16, Lx=2*np.pi, Ly=2*np.pi, eqtype="GDI",
-                            comm_backend="serial", eqpars=dict(gpar_fac=0.1, **base))
+                            comm_backend="serial", eqpars={"gpar_fac": 0.1, **base})
     return fresh_params(dims=3, nx=12, ny=12, nz=6, Lx=2*np.pi, Ly=2*np.pi, Lz=4*np.pi,
                         z_spectral=True, eqtype="GDI", comm_backend="serial",
-                        eqpars=dict(D_par=0.5, gpar_fac=0.0, **base))
+                        eqpars={"D_par": 0.5, "gpar_fac": 0.0, **base})
 
 
 def _gdi_exact(kx, ky, kz, ep):
@@ -291,6 +412,31 @@ def test_gdi_exact_dispersion():
                         f"{e:.1e})", e < 1e-11, f"rel {e:.3e}")
             c.check(f"GDI {dims}D: the configuration is unstable (gamma_max "
                     f"{want.real.max():.4f})", want.real.max() > 0)
+
+
+def test_imex_rejected_on_a_wave_L_and_collapsed_kz_warning():
+    # any precision (no tolerances). IMEX damps an oscillatory L artificially at |omega| dt
+    # >~ 1: rejected on GDI's putzer2 L (drift terms) and z_spectral RMHD's +-i kz L.
+    with checks() as c:
+        rm = fresh_params(dims=3, nx=8, ny=8, nz=8, Lx=2*np.pi, Ly=2*np.pi, Lz=2*np.pi,
+                          z_spectral=True, diss=(0.01, 0.01), hyper=1)
+        for name, params in (("GDI 2D (putzer2)", _gdi_params(2)),
+                             ("z_spectral RMHD (separable)", rm)):
+            kgrid = jr.setup_kgrids(params)
+            x0 = jnp.zeros((params.nfields, params.nz, params.nx, params.ny//2 + 1),
+                           dtype=_precision.ctype)
+            with pytest.raises(ValueError, match="IMEX scheme"):
+                stability.propagator_eigs(x0, kgrid, params, T=2.0, dt=0.5, k=2, iky=1,
+                                          scheme="imexcb3e")
+            c.check(f"{name}: imexcb3e rejected", True)
+        # GDI 3D with D_par = 0: J at x0 = 0 does not depend on kz at all, so every eigenvalue
+        # is shared by all kept kz blocks; Krylov lists it once, with a kz-mixed eigenvector
+        params = _gdi_params(3, D_par=0.0, gpar_fac=0.1)
+        kgrid = jr.setup_kgrids(params)
+        x0 = jnp.zeros((2, params.nz, params.nx, params.ny//2 + 1), dtype=_precision.ctype)
+        with pytest.warns(RuntimeWarning, match="spread over several kz blocks"):
+            stability.propagator_eigs(x0, kgrid, params, T=2.0, dt=2.0, k=2, iky=1)
+        c.check("a kz-degenerate eigenvalue listed once by Arnoldi is warned about", True)
 
 
 # ------------------------------------------------------------------------------ FD gate
@@ -444,6 +590,20 @@ def test_preconditioners():
         e = _relerr(pre(sigma).matvec(stability._complexify(op)(z) - sigma*z), z)
         c.check(f"ky-averaged preconditioner: exact inverse for a 1D x0 (rel {e:.1e})",
                 e < 1e-12, f"{e:.3e}")
+        # the RMHD cos x blocks are REAL matrices (conj(B) = B), blind to a conjugation error
+        # in the complex-block probing; GDI about phi0 = 0.7 cos 2x, N0 = 0.4 cos 2x has
+        # genuinely complex blocks (i ky / Ln, -i ky nu_in v0 / k^2)
+        gp = _gdi_params(2)
+        gk = jr.setup_kgrids(gp)
+        gx0 = jr.initialize(lambda x, y: jnp.stack([0.4*jnp.cos(2*x) + 0*y,
+                                                    0.7*jnp.cos(2*x) + 0*y]), gp).fields
+        gop, gco = stability.real_operator(gx0, gk, gp)
+        gpre = stability.ky_averaged_preconditioner(gx0, gk, gp, gco)
+        imb = max(np.abs(b.imag).max() for b in gpre.blocks)
+        gz = rng.standard_normal(gco.n) + 1j*rng.standard_normal(gco.n)
+        e = _relerr(gpre(sigma).matvec(stability._complexify(gop)(gz) - sigma*gz), gz)
+        c.check(f"ky-averaged preconditioner: exact inverse on GDI's complex blocks (max |Im B| "
+                f"{imb:.1f}; rel {e:.1e})", imb > 0.1 and e < 1e-12, f"{e:.3e}")
         M, _ = stability.real_matrix(x0, kgrid, params, coords)
         ev = np.linalg.eigvals(M)
         lead = ev[np.argmax(ev.real)]
@@ -480,6 +640,11 @@ def test_block_guards_and_ebm():
         with pytest.raises(ValueError, match="z_spectral"):
             stability.ky_block_index(jr.setup_kgrids(p2), p2, 1, iz=0)
         c.check("a fixed iz is rejected under finite-difference z", True)
+        for kw in (dict(iky=True), dict(iky=np.bool_(True)), dict(iky=1.0),
+                   dict(iky=1, ikx=True), dict(iky=1, iz=True), dict(iky=1, ikx=np.bool_(False))):
+            with pytest.raises(ValueError, match="must be an int"):
+                stability.ky_block_index(kgrid, params, kw.pop("iky"), **kw)
+        c.check("bool and float indices are rejected (True is not the ky = 1 column)", True)
         ebm = fresh_params(eqpars=dict(cs0=1.0, diss=0.01, hyper=1,
                                        expansion=dict(adot=0.1)), **_CMHD_BOX)
         with pytest.raises(ValueError, match="expanding box"):

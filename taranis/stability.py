@@ -40,7 +40,7 @@ import numpy as np
 import scipy.linalg
 import scipy.sparse.linalg as spla
 
-from . import _precision, timestepping
+from . import _precision, propagators, timestepping
 from .physics import construct_rhs, equation_registry
 from .types import SimulationState
 
@@ -149,12 +149,17 @@ def _kept(kgrid, params):
     return np.broadcast_to(np.asarray(kgrid.dealias), (params.nz, params.nx, params.ny//2 + 1))
 
 
+def _is_index(i):
+    # a genuine integer: bool is an int subclass (True would silently mean index 1)
+    return isinstance(i, (int, np.integer)) and not isinstance(i, (bool, np.bool_))
+
+
 def _check_block_args(params, iky, ikx, iz):
-    if not (isinstance(iky, (int, np.integer)) and 0 < iky < params.ny/2):
+    if not (_is_index(iky) and 0 < iky < params.ny/2):
         raise ValueError(f"stability: iky must be an int with 0 < iky < ny/2 = {params.ny/2} "
                          f"(ky = 0 and Nyquist are self-conjugate rows, where J is not "
                          f"complex-linear); got {iky!r}")
-    if ikx is not None and not (isinstance(ikx, (int, np.integer)) and 0 <= ikx < params.nx):
+    if ikx is not None and not (_is_index(ikx) and 0 <= ikx < params.nx):
         raise ValueError(f"stability: ikx must be an int index in [0, nx); got {ikx!r}")
     if iz is not None:
         if not (params.spatial_dimensions == 3 and params.z_spectral):
@@ -162,7 +167,7 @@ def _check_block_args(params, iky, ikx, iz):
             # commutes with z shifts but does not decouple the z points
             raise ValueError("stability: a fixed iz (a kz mode) needs dims=3 with "
                              "z_spectral=True, where axis 1 is kz")
-        if not (isinstance(iz, (int, np.integer)) and 0 <= iz < params.nz):
+        if not (_is_index(iz) and 0 <= iz < params.nz):
             raise ValueError(f"stability: iz must be an int index in [0, nz); got {iz!r}")
 
 
@@ -182,17 +187,24 @@ def ky_block_index(kgrid, params, iky, *, ikx=None, iz=None):
     return np.argwhere(np.broadcast_to(col, (params.nfields,) + col.shape))
 
 
+def _nonzero_content(a, axis):
+    # (largest |x0| off the zero wavenumber along axis, the round-off allowance, max |x0|)
+    scale = float(np.max(np.abs(a))) if a.size else 0.0
+    tol = 1e3*np.finfo(a.real.dtype).eps*scale
+    if a.shape[axis] == 1:
+        return 0.0, tol, scale
+    return float(np.max(np.abs(np.take(a, np.arange(1, a.shape[axis]), axis=axis)))), tol, scale
+
+
 def _assert_invariant(x0, ikx=None, iz=None):
     # a block needs x0 invariant along y, plus x when ikx is fixed and z (kz axis) when iz is:
     # x0 may then carry only the zero wavenumber along each of those axes
     a = np.asarray(x0)
-    scale = float(np.max(np.abs(a))) if a.size else 0.0
-    tol = 1e3*np.finfo(a.real.dtype).eps*scale
     for name, axis, fixed in (("ky", 3, True), ("kx", 2, ikx is not None),
                               ("kz", 1, iz is not None)):
-        if not fixed or a.shape[axis] == 1:
+        if not fixed:
             continue
-        worst = float(np.max(np.abs(np.take(a, np.arange(1, a.shape[axis]), axis=axis))))
+        worst, tol, scale = _nonzero_content(a, axis)
         if worst > tol:
             raise ValueError(f"stability: this block needs a {name}-independent x0 (J is "
                              f"then block-diagonal in {name}); x0's {name} != 0 content is "
@@ -618,6 +630,19 @@ def _space(x0, kgrid, params, iky, ikx, iz, coords):
 # convergence order of each IF-LSRK/RK scheme (the IMEX tableaux carry their own .order)
 _SCHEME_ORDER = {"rk44": 4, "lsrk33": 3, "lsrk54": 4}
 
+# propagator_eigs' default residual_tol: the largest scale-relative residual on J
+# (||J v - lambda v|| / (max(|lambda|, scale) ||v||)) a returned pair may carry. That residual
+# IS the stepper's O(dt^p) time error -- not round-off -- so the bound is a statement about dt,
+# not about tol. Measured 2026-09-28 over every propagator_eigs call in
+# tests/test_stability_general.py: 1.2e-15 (N' = 0, exact IF) to 1.7e-6 (RMHD cos x tearing,
+# lsrk54 dt = 0.5) at fp64, 1.1e-6 worst at fp32 (CMHD mode block, dt = 0.02). The broken
+# cases of the rung-0b review sit at 2e-3 and 1.4e-2 (IMEX on the +-i kz wave L at dt = 0.5,
+# 1 -- now also rejected outright, _check_scheme_on_L) and 0.38 (lsrk54 past its explicit
+# stability limit on CMHD's N', omega_fast dt = 3.9; 0.48 in test_propagator_loud_default).
+# 1e-4 leaves ~60x over the worst legitimate call and ~20x under the mildest broken one; at
+# fp32 it is ~1e3 eps, so round-off never trips it.
+_PROPAGATOR_RESIDUAL_TOL = 1e-4
+
 
 def _scheme_order(name):
     _, scheme = timestepping.get_scheme(name)
@@ -637,6 +662,28 @@ def _propagator_info(T, dt, scheme):
         raise ValueError(f"stability: T and dt must be > 0, got T={T!r}, dt={dt!r}")
     nsteps = max(1, int(np.ceil(T/dt - 1e-9)))
     return PropagatorInfo(float(T), float(T)/nsteps, nsteps, scheme, _scheme_order(scheme))
+
+
+def _check_scheme_on_L(kgrid, name):
+    # CB-IMEX treats ALL of L implicitly with an L-stable solve, which artificially damps an
+    # oscillatory L at |omega| dt >~ 1 (CLAUDE.md: never IMEX a wave-dominated L) -- in
+    # propagator_eigs that reorders the spectrum silently (a faster wave mode damped out of
+    # the k fastest). Allowed only on a REAL diagonal L (pure dissipation: 2D and FD-z RMHD,
+    # CMHD), where the implicit solve is the legitimate stiff-dissipation path. Nothing is
+    # lost by the rule: an IF scheme applies any L exactly.
+    _, scheme = timestepping.get_scheme(name)
+    if not isinstance(scheme, timestepping.IMEX_Scheme):
+        return
+    lin = kgrid.lin
+    if isinstance(lin, propagators.IdentityOperator):
+        return
+    if isinstance(lin, propagators.DiagonalOperator) and not np.any(np.imag(np.asarray(lin.L))):
+        return
+    raise ValueError(f"stability: the IMEX scheme {name!r} treats L implicitly, and this L "
+                     f"({type(lin).__name__}) is not a real diagonal (pure dissipation): it "
+                     f"carries oscillatory (wave / drift) terms, which an L-stable solve "
+                     f"damps artificially at |omega| dt >~ 1, reordering the spectrum. Use an "
+                     f"IF scheme (lsrk54, rk44, lsrk33), which applies L exactly")
 
 
 @functools.lru_cache(maxsize=32)
@@ -671,13 +718,15 @@ def propagator_operator(x0, kgrid, params, *, T, dt, scheme="lsrk54", iky=None, 
 
     The space is the mode block (iky [, ikx, iz]) or, with iky None, the real coordinates.
     dt is rounded down so that nsteps*dt = T exactly. Forcing is off and there are no
-    particles (the harness rejects both). Returns (op, info, index) with info a
-    PropagatorInfo and index the block's idx or the RealCoords.
+    particles (the harness rejects both). An IMEX scheme is accepted only on a real diagonal
+    L (pure dissipation), ValueError otherwise (_check_scheme_on_L). Returns (op, info,
+    index) with info a PropagatorInfo and index the block's idx or the RealCoords.
     """
     _check_supported(params)
     x0 = _fields(x0, params)
     sp = _space(x0, kgrid, params, iky, ikx, iz, coords)
     info = _propagator_info(T, dt, scheme)
+    _check_scheme_on_L(kgrid, scheme)
     flow = _flow_fn(params, sp.kind, info)
     jdt = _space_fns(params, sp.kind).dtype
 
@@ -705,12 +754,15 @@ class PropagatorEigResult(NamedTuple):
 
 def propagator_eigs(x0, kgrid, params, *, T, dt, k=6, scheme="lsrk54", iky=None, ikx=None,
                     iz=None, coords=None, tol=1e-10, ncv=None, maxiter=300, v0=None,
-                    branch_margin=0.1, residual_tol=None):
+                    branch_margin=0.1, residual_tol=_PROPAGATOR_RESIDUAL_TOL):
     """The k fastest-growing eigenvalues of J (largest Re lambda), by ARPACK on exp(J T).
 
     The default solver for the fastest modes of a general x0. exp(J T) is nsteps = T/dt
     fixed steps of the solver's stepper `scheme` on the linearized system
-    (propagator_operator): no linear solve, and the stiffness of L never enters an IF scheme.
+    (propagator_operator): no linear solve, and the stiffness of L never enters an IF scheme
+    (L is applied exactly). N' is stepped EXPLICITLY, so dt must respect the stepper's
+    stability limit on N' -- for CMHD the waves live in N, so that is the fast-wave CFL.
+    IMEX schemes are rejected unless L is a real diagonal (propagator_operator).
     The largest |mu| of exp(J T) are the largest Re lambda, lambda = log(mu)/T.
 
     Accuracy: the one-step map is R(dt) = exp(J dt) + O(dt^(p+1)), so lambda carries an
@@ -720,22 +772,44 @@ def propagator_eigs(x0, kgrid, params, *, T, dt, k=6, scheme="lsrk54", iky=None,
     and the branch: arg(mu) = Im(lambda) T mod 2 pi. The branch is chosen by the Rayleigh
     quotient v^H J v / v^H v; `aliased` flags |Im lambda| T within branch_margin*pi of pi or
     beyond (shorten T). When k >= n - 1 (ARPACK's limit) exp(J T) is formed on the n basis
-    vectors and diagonalised densely.
+    vectors and diagonalised densely, keeping the k largest |mu|; k > n is a ValueError.
+
+    Loud by default: RuntimeError when any returned pair's residual on J exceeds
+    residual_tol (default 1e-4, _PROPAGATOR_RESIDUAL_TOL: ~60x over the worst O(dt^p) error
+    of the gate suite, far under what a dt past the explicit limit on N' or a branch
+    collision produces). A residual over it means the pairs are not J's to that accuracy:
+    reduce dt (or change T when two modes share one mu). residual_tol=np.inf is the explicit
+    opt-out, for studying the discrete propagator itself; None means the default.
 
     Krylov limitation: a single start vector spans ONE direction of a semisimple multiple
-    eigenvalue, so an exactly repeated mu (e.g. the k = 0 means, all at lambda = 0) is
-    returned once and the next distinct eigenvalue takes the other slot.
+    eigenvalue, so an exactly repeated mu is returned once and the next distinct eigenvalue
+    takes the other slot -- the k = 0 means (all at lambda = 0), and, on a ky column under
+    z_spectral with a z-INDEPENDENT x0 (J block-diagonal in kz), any eigenvalue shared by the
+    kz and -kz blocks: every eigenvalue of an equation whose J depends on kz only through kz^2
+    (GDI's D_par kz^2), the real eigenvalues of RMHD (whose -kz spectrum is the conjugate of
+    the kz one). Such an eigenvalue may be listed fewer times than its multiplicity, with
+    eigenvectors mixing the kz blocks; that case is detected (an eigenvector of a
+    z-independent x0 spread over m kz, its eigenvalue returned fewer than m times) and warned
+    about. Pass iz to take one kz block at a time instead. The dense branch lists every
+    copy. Degeneracies with no block structure to reveal them (e.g. +-kx at x0 = 0) are not
+    detected.
 
-    Raises RuntimeError on ARPACK non-convergence, and on any residual over residual_tol when
-    that is given. Sorted by decreasing Re lambda.
+    Raises RuntimeError on ARPACK non-convergence and on any residual over residual_tol.
+    Sorted by decreasing Re lambda.
     """
     t0 = time.perf_counter()
+    if residual_tol is None:
+        residual_tol = _PROPAGATOR_RESIDUAL_TOL
     op, info, index = propagator_operator(x0, kgrid, params, T=T, dt=dt, scheme=scheme,
                                           iky=iky, ikx=ikx, iz=iz, coords=coords)
     x0 = _fields(x0, params)
     sp = _space(None, kgrid, params, iky, ikx, iz, index if iky is None else None)
     n = sp.n
-    if k >= n - 1:
+    if not (_is_index(k) and 1 <= k <= n):
+        raise ValueError(f"stability.propagator_eigs: k must be an int with 1 <= k <= n = {n} "
+                         f"(the size of the space); got {k!r}")
+    dense = k >= n - 1
+    if dense:
         E = np.stack([op.matvec(e) for e in np.eye(n, dtype=sp.np_dtype)], axis=1)
         mu, V = np.linalg.eig(E)
         keep = np.argsort(-np.abs(mu), kind="stable")[:k]
@@ -778,12 +852,57 @@ def propagator_eigs(x0, kgrid, params, *, T, dt, k=6, scheme="lsrk54", iky=None,
     out = PropagatorEigResult(lam[order], V[:, order], None, res[order], scale, mu[order],
                               ray[order], aliased[order], info, apps,
                               time.perf_counter() - t0, index)
-    if residual_tol is not None and not np.all(out.residuals <= residual_tol):
+    if not np.all(out.residuals <= residual_tol):
+        bad = ~(out.residuals <= residual_tol)
         raise RuntimeError(
-            f"stability.propagator_eigs: residuals {out.residuals} exceed residual_tol="
-            f"{residual_tol:.1e} (values {out.values}); the O(dt^{info.order}) time error "
-            f"dominates -- reduce dt")
+            f"stability.propagator_eigs: {int(bad.sum())} of {len(bad)} returned pairs have a "
+            f"residual on J over residual_tol={residual_tol:.1e} (residuals {out.residuals}, "
+            f"values {out.values}; scheme {info.scheme}, dt={info.dt:.4g}, T={info.T:.4g}). "
+            f"They are not eigenpairs of J to that accuracy: the O(dt^{info.order}) time error "
+            f"dominates, or dt is past the stepper's explicit stability limit on N' (reduce "
+            f"dt), or two modes share one mu (change T). residual_tol=np.inf opts out")
+    if (not dense and sp.kind == "block" and iz is None and params.spatial_dimensions == 3
+            and params.z_spectral):
+        _warn_collapsed_kz(out, index, x0)
     return out
+
+
+# an Arnoldi eigenvector of a kz-block-diagonal J whose weight on a kz, relative to its dominant
+# kz, exceeds this fraction (in norm) counts that kz as spanned
+_KZ_MIX_TOL = 1e-3
+# returned values within this fraction of max(|lambda|, scale) are copies of one eigenvalue
+_KZ_COPY_TOL = 1e-6
+
+
+def _warn_collapsed_kz(out, idx, x0):
+    # z-independent x0 under z_spectral: J is block-diagonal in kz, so a simple eigenvalue's
+    # eigenvector lives on one kz. An eigenvector spread over m kz belongs to an eigenvalue
+    # shared by those m blocks (to numerical precision); if it was returned fewer than m
+    # times, Krylov collapsed copies of it (propagator_eigs' docstring) -- warn
+    worst, tol, _ = _nonzero_content(np.asarray(x0), 1)
+    izs = np.unique(idx[:, 1])
+    if worst > tol or len(izs) < 2:
+        return
+    W = np.stack([np.linalg.norm(out.right[idx[:, 1] == i], axis=0) for i in izs])
+    spans = W > _KZ_MIX_TOL*np.max(W, axis=0, keepdims=True)
+    lam = out.values
+    ctol = _KZ_COPY_TOL*np.maximum(np.abs(lam), out.scale)
+    short = []
+    for j in np.flatnonzero(spans.sum(axis=0) > 1):
+        copies = np.abs(lam - lam[j]) <= ctol[j]
+        nkz = int(np.any(spans[:, copies], axis=1).sum())
+        if copies.sum() < nkz:
+            short.append((lam[j], int(copies.sum()), nkz))
+    if short:
+        listed = "; ".join(f"{v:.6g} returned {c}x, spans {m} kz" for v, c, m in short)
+        warnings.warn(
+            f"stability.propagator_eigs: x0 is z-independent, so J is block-diagonal in kz, "
+            f"but these eigenvectors spread over several kz blocks and their eigenvalue was "
+            f"returned fewer times than the blocks it spans ({listed}): each is (numerically) "
+            f"an eigenvalue shared by those kz blocks (e.g. the +-kz pair), and a single-start "
+            f"Krylov space missed copies of it -- the k returned are short of its "
+            f"multiplicity. Pass iz to take one kz block at a time", RuntimeWarning,
+            stacklevel=3)
 
 
 # ---------------------------------------------------------------- preconditioners
