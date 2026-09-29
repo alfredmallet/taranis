@@ -155,9 +155,19 @@ def _advance_block(carry,kgrid,params,nblock,scheme,stepper):
         return _step(carry,kgrid,params,rhs,set_timestep,scheme,stepper,None,exp_ops)
     return jax.lax.scan(stepping,carry,None,nblock)
 
+def _reject_overrides(kgrid):
+    # a kgrid from setup_kgrids(params, overrides=...) is the stability harness's: its k and L
+    # carry values the rest of the solver (set_timestep's dx/dy, forcing, particles) does not
+    # see. Structure only (python), so the graph is untouched
+    if getattr(kgrid, "overrides", None) is not None:
+        raise ValueError("this kgrid carries overrides (setup_kgrids(params, overrides=...)): "
+                         "that seam is for taranis.stability only. Build the solver's kgrid "
+                         "with setup_kgrids(params), and a Parameters with the values you want")
+
 def block_of_steps(x,kgrid,params,nblock,scheme,stepper):
     # public driver: particles off, state in -> state out; on, (state, pstate) in ->
     # ((state, pstate), ys) out.
+    _reject_overrides(kgrid)
     if params.particles is not None:
         return _advance_block(x,kgrid,params,nblock,scheme,stepper)
     return _advance_block((x,None),kgrid,params,nblock,scheme,stepper)[0][0]
@@ -231,6 +241,7 @@ def simulate_scan(state,kgrid,params,nblock,t_snap,t_end,mngr,schemestr='lsrk33'
     t_start = perf_counter()
     stepper,scheme = get_scheme(schemestr)
     _check_pstate(params,pstate)
+    _reject_overrides(kgrid)
     state = _refresh_forcing_scale(state, kgrid, params)
     # donate_argnums=(0,): caller's input `state` buffer is consumed/reused for the output, since we always reassign `state` from the return value below.
     if params.comm_backend == "jax":
@@ -276,6 +287,7 @@ def simulate(initial_state,kgrid,params,t_snap,t_end,mngr,schemestr='lsrk33',sav
     t_start = perf_counter()
     stepper,scheme = get_scheme(schemestr)
     _check_pstate(params,pstate)
+    _reject_overrides(kgrid)
     set_timestep = equation_registry[params.eqtype].set_timestep_func
     rhs = construct_rhs(equation_registry[params.eqtype])
     # kgrid is an explicit argument (not a closure) so the jax backend can hand it to

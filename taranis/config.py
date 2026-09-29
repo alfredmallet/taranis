@@ -2,6 +2,7 @@ import numpy as np
 import copy
 from . import comms
 from . import _precision
+from . import overrides as _overrides
 # imported BY VALUE: these three names are the substitution point comms._resolve_backend
 # reads (HAVE_MPI4JAX only through it, hence the noqa)
 from ._mpi_compat import HAVE_MPI4JAX, HAVE_MPI4PY, MPI  # noqa: F401
@@ -19,6 +20,9 @@ def _json_scalar(v):
         return item()
     raise TypeError(f"Parameter value {v!r} (type {type(v).__name__}) can't be recorded "
                     f"in params.json — pass plain python types to Parameters")
+
+# params.json key of the overrides a stability study stamps (Parameters.save(overrides=))
+_OVERRIDES_KEY = "_overrides"
 
 # ctor args excluded from params.json's "differing record" check
 _TRANSPORT_KEYS = ("comm_backend",)
@@ -286,16 +290,27 @@ class Parameters():
                         f"is the same system as v_A = B0 on a box B0*Lz); B0 stays the free "
                         f"per-ensemble knob in 2D, which has no Alfven term")
 
-    def save(self, snap_path, filename="params.json"):
+    def save(self, snap_path, filename="params.json", overrides=None):
         # record the constructor arguments (not derived attrs) to snap_path/filename, so a
         # run directory documents how it was made and from_snapshot can reproduce it.
-        # saving over an existing file with different contents is a hard error
+        # saving over an existing file with different contents is a hard error.
+        # overrides (the stability harness's seam, taranis/overrides.py): per-call values,
+        # not Parameters state -- a study that ran at them stamps them here, validated and
+        # concrete, under the separate key "_overrides" (absent when None or {}). The key is
+        # compared like any other: a directory is ONE point, so re-saving with different (or
+        # without the) overrides is the same hard error as a differing parameter, identical
+        # re-save stays a no-op, and a record written before the key existed matches a save
+        # without overrides. Parameters.load_overrides reads them back.
         path = os.path.join(str(snap_path), filename)
         err = None
+        # every rank validates (no collective), so a bad dict raises everywhere
+        stamp = _overrides.to_record(self, overrides) if overrides else None
         if self.rank == 0:
             # round-trip through JSON up front
             rec = json.loads(json.dumps(self._init_args, default=_json_scalar))
             rec["_precision"] = _precision.precision
+            if stamp:
+                rec[_OVERRIDES_KEY] = stamp
             if os.path.exists(path):
                 with open(path) as f:
                     old = json.load(f)
@@ -324,7 +339,7 @@ class Parameters():
                     err = (f"{path} already records different parameters "
                            f"(saved, current): {diffs}. If the change is intended, delete "
                            f"{filename} and re-save; to reuse the recorded values, "
-                           f"Parameters.from_snapshot(...) and pass overrides explicitly.")
+                           f"Parameters.from_snapshot(..., **changes) with the new values.")
                 elif backfilled or moved:
                     # semantically identical: refresh the file so it records the new keys
                     old["_created"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -341,18 +356,38 @@ class Parameters():
         if err is not None:
             raise ValueError(err)
 
+    @staticmethod
+    def load_overrides(snap_path, filename="params.json"):
+        # the overrides a save(..., overrides=) stamped into snap_path/filename (lists as
+        # tuples), or None when the record has none
+        with open(os.path.join(str(snap_path), filename)) as f:
+            stamped = json.load(f).get(_OVERRIDES_KEY)
+        return {k: _lists_to_tuples(v) for k, v in stamped.items()} if stamped else None
+
     @classmethod
-    def from_snapshot(cls, snap_path, filename="params.json", **overrides):
+    def from_snapshot(cls, snap_path, filename="params.json", **changes):
         # reconstruct Parameters from a run directory's record (written by save());
-        # explicitly passed overrides win
+        # explicitly passed constructor changes win
         # runs __init__ to get derived params
         path = os.path.join(str(snap_path), filename)
+        if "overrides" in changes:
+            # "overrides" is the stability seam's per-call point, never a ctor argument
+            raise TypeError("Parameters.from_snapshot takes constructor changes, not "
+                            "overrides=: pass Parameters.load_overrides(snap_path) to the "
+                            "taranis.stability calls instead")
         with open(path) as f:
             rec = json.load(f)
         rec.pop("_created", None)
         prec = rec.pop("_precision", None)
         current_prec = _precision.precision
         rank0 = MPI.COMM_WORLD.Get_rank() == 0 if HAVE_MPI4PY else True
+        stamped = rec.pop(_OVERRIDES_KEY, None)
+        if stamped and rank0:
+            # per-call values, not Parameters state: never folded in silently
+            warnings.warn(f"{path} records overrides {stamped!r} (a stability study's point): "
+                          f"they are NOT part of the returned Parameters. Pass "
+                          f"overrides=Parameters.load_overrides({str(snap_path)!r}) to the "
+                          f"stability calls to reproduce it.", stacklevel=2)
         # legacy shim: diss/hyper were ctor args before 2026-08-01, they are equation
         # parameters now. Fold before the unknown-key check so they are not "unknown".
         moved = _fold_legacy_eqpars(rec)
@@ -372,7 +407,7 @@ class Parameters():
         args = {k: _lists_to_tuples(v) for k, v in rec.items() if k in known}
         # transport, not physics: re-resolve on this machine unless the caller says otherwise
         args.pop("comm_backend", None)
-        args.update(overrides)
+        args.update(changes)
         return cls(**args)
 
 

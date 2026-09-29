@@ -334,8 +334,16 @@ def _separable_operator(sep, params, nz_local, nkx, nky):
         # z-sharded spec
         raise NotImplementedError(f"{params.eqtype}: a z-dependent linear operator is not "
                                   "supported by comm_backend='jax' yet")
-    _check_hermitian_separable(sep, params)
+    if not _traced(sep):
+        _check_hermitian_separable(sep, params)
     return sep
+
+def _traced(L):
+    # a TRACED L (grids.setup_kgrids(params, overrides=...) under jit/jvp, the stability
+    # harness only) cannot be value-checked; its structure -- the shapes checked here and the
+    # recipe's own construction -- is the static configuration's, which is checked whenever
+    # it is built concretely (and with the overrides' concrete values when those are)
+    return any(isinstance(a, jax.core.Tracer) for a in jax.tree.leaves(L))
 
 def build(L, params):
     # Validate a recipe's L and return the operator it selects (grids.setup_kgrids is the
@@ -370,7 +378,8 @@ def build(L, params):
         # z-sharded spec (arrives with the spectral-z work).
         raise NotImplementedError(f"{params.eqtype}: a z-dependent linear operator is not "
                                   "supported by comm_backend='jax' yet")
-    _check_hermitian_compatible(L, params)
+    if not _traced(L):
+        _check_hermitian_compatible(L, params)
     if L.ndim == 4:
         return DiagonalOperator(L)
     return Putzer2Operator(*putzer2_precompute(L))
@@ -381,4 +390,5 @@ def putzer2_precompute(L):
     from .physics.shared_physics import eig2_ms
     Lc = jnp.asarray(L).astype(jnp.result_type(jnp.asarray(L).dtype, jnp.complex64))
     m, s2 = eig2_ms(Lc[0,0], Lc[0,1], Lc[1,0], Lc[1,1])
+    # sqrt has an infinite jvp where s2 = 0 (k = 0 at nu != eta): d/dp through apply_exp needs a guard
     return Lc, m, jnp.sqrt(s2)

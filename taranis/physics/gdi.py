@@ -34,6 +34,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .. import comms, grids
+from ..overrides import getp
 from . import shared_physics
 from .shared_physics import bracket, grad_fields
 
@@ -104,6 +105,13 @@ def _L_entries(ksq, ky_deriv, inv_ksq, Ln, nu_in, v0, gamma_par, gpar_ratio, dis
 
 def linear_matrix(kgrid, params):
     Ln, nu_in, v0, gpar_fac, diss, hyper, D_par = _eqpars(params)
+    if kgrid.overrides is not None:
+        # the stability harness's seam (taranis/overrides.py): traced continuous eqpars
+        ov = kgrid.overrides
+        Ln, nu_in, v0, gpar_fac, diss = (getp(params, ov, k)
+                                         for k in ("Ln", "nu_in", "v0", "gpar_fac", "diss"))
+        if params.spatial_dimensions == 3:
+            D_par = getp(params, ov, "D_par")
     ky_deriv = kgrid.ky.at[..., -1].set(0.0)   # zero the Nyquist row: maintain real fields
     kz = kgrid.kz if params.spatial_dimensions == 3 else None
     gamma_par, gpar_ratio = _closure_terms(kgrid.ksq, kgrid.inv_ksq, kz, gpar_fac, nu_in, D_par)

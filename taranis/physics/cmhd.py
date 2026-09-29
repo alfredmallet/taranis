@@ -124,6 +124,7 @@ import numpy as np
 
 from .. import comms, grids
 from .. import _precision
+from ..overrides import getp
 
 
 class CMHDGrads(NamedTuple):
@@ -421,6 +422,13 @@ def linear_matrix(kgrid, params):
     _, diss, hyper, _ = _eqpars(params)
     kz = _kz_deriv(kgrid, params)
     ksq_tot = kgrid.ksq + kz*kz
+    if kgrid.overrides is not None:
+        # the stability harness's seam (taranis/overrides.py): a traced diss, expanded over
+        # the fields like _diss_per_field (whose numpy form cannot take a tracer)
+        dv = jnp.reshape(getp(params, kgrid.overrides, "diss"), (-1,))
+        if dv.shape[0] == 3:
+            dv = dv[jnp.array([0, 1, 1, 1, 2, 2, 2])]
+        return -dv.reshape(-1, 1, 1, 1) * ksq_tot**hyper
     d = jnp.array(_diss_per_field(diss), dtype=_precision.ftype).reshape(-1, 1, 1, 1)
     return -d * ksq_tot**hyper
 
@@ -501,6 +509,10 @@ def NonlinearTerm(state, grads, kgrid, params, halo=None):
     # 2-element sum reaching construct_rhs would be a registry change. It is still gated by
     # the same trace-time predicate, so the off graph is untouched either way.
     cs0, _, _, gamma = _eqpars(params)
+    if kgrid.overrides is not None:
+        # the stability harness's seam (taranis/overrides.py): a traced cs0 (every use below
+        # is arithmetic: cs0*cs0, cs0*cs0*a**-cs_q)
+        cs0 = getp(params, kgrid.overrides, "cs0")
     exp = _expansion(params)                     # None off: TRACE-TIME python
     lnrho = _density_var(params) == "lnrho"      # "rho" off: TRACE-TIME python too
     kx, ky = kgrid.kx, kgrid.ky

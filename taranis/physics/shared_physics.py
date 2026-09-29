@@ -64,9 +64,11 @@ def _z_halo(f,params,halo):
     return recv_left, recv_right, w
 
 # gets the necessary z derivatives, as whole local slabs.
-def z_derivatives(f,params,halo=None):
+def z_derivatives(f,params,halo=None,dz=None):
     # whole local slab padded with the halo planes, then sliced. z axis is axis 1.
-    dz=params.dz
+    # dz: params.dz unless given (the stability harness's traced Lz, rmhd.FDLinearTerm)
+    if dz is None:
+        dz=params.dz
     recv_left, recv_right, w = _z_halo(f,params,halo)
     nz = f.shape[1]
     f_padded = jnp.concatenate([recv_left,f,recv_right],axis=1)

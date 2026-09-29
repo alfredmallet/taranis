@@ -34,6 +34,15 @@
 # state (forward-over-forward: L does not depend on x0), left_eigenvector gives w by
 # shift-invert on J^H, and eigenvalue_sensitivity gives dlambda/ds = w^H dJ v / w^H v with its
 # condition number, refusing a non-simple or numerically unisolated eigenvalue.
+#
+# Parameters (rung 2, taranis/overrides.py): every operator and solver takes overrides=
+# {key: value} -- continuous physics parameters (diss, cs0, GDI's Ln/nu_in/..., the box
+# lengths Lx/Ly/Lz) evaluated at a point other than the Parameters' own, through
+# grids.setup_kgrids(params, overrides=...) (k, ksq, inv_ksq, L rebuilt; the RHS read sites
+# see the dict in kgrid.overrides). overrides=None is exactly the pre-rung-2 path. The dJ
+# functions also take dparams= {key: tangent}: dJ/ds along a direction in (state, parameter)
+# space, J(s) = J at (x0 + s dx0, p + s dp), forward-over-forward through the kgrid build --
+# so a parameter that enters L alone gives dL/dp, and a box length moves k in L AND in N.
 import functools
 import time
 import warnings
@@ -45,7 +54,8 @@ import numpy as np
 import scipy.linalg
 import scipy.sparse.linalg as spla
 
-from . import _precision, propagators, timestepping
+from . import _precision, grids, propagators, timestepping
+from . import overrides as _overrides
 from .physics import construct_rhs, equation_registry
 from .types import SimulationState
 
@@ -81,6 +91,20 @@ def _fields(x0, params):
     if f.shape != shape:
         raise ValueError(f"stability: x0 has shape {f.shape}, expected the fields shape {shape}")
     return f
+
+
+def _kgrid_at(kgrid, params, overrides):
+    # the kgrid J is evaluated with: kgrid itself (overrides None: the pre-rung-2 path, and a
+    # kgrid the caller already built with setup_kgrids(params, overrides=...)), or one rebuilt
+    # by the sanctioned constructor at the overridden point
+    if overrides is None:
+        return kgrid
+    if kgrid.overrides is not None:
+        raise ValueError("stability: overrides= given for a kgrid that already carries "
+                         "overrides; pass the plain setup_kgrids(params) kgrid, or omit "
+                         "overrides=")
+    _check_supported(params)
+    return grids.setup_kgrids(params, overrides=overrides)
 
 
 def _state(params, fields):
@@ -129,19 +153,22 @@ def _jitted(params, adjoint):
     return jax.jit(_adjoint_action(params) if adjoint else _jacobian_action(params))
 
 
-def jvp_operator(x0, kgrid, params):
-    # matrix-free v -> J v on the fields array (jitted; x0 a fields array or a state)
+def jvp_operator(x0, kgrid, params, *, overrides=None):
+    # matrix-free v -> J v on the fields array (jitted; x0 a fields array or a state), at the
+    # parameter point `overrides` (module note)
     _check_supported(params)
+    kgrid = _kgrid_at(kgrid, params, overrides)
     x0 = _fields(x0, params)
     jv = _jitted(params, False)
     return lambda v: jv(x0, jnp.asarray(v, dtype=_precision.ctype), kgrid)
 
 
-def transpose_operator(x0, kgrid, params):
+def transpose_operator(x0, kgrid, params, *, overrides=None):
     # matrix-free u -> J^H u on the fields array, by vjp of one RHS evaluation. The adjoint
     # is under the real inner product Re<u, w>; on a ky column, where J is complex-linear,
     # that is the conjugate transpose.
     _check_supported(params)
+    kgrid = _kgrid_at(kgrid, params, overrides)
     x0 = _fields(x0, params)
     jhu = _jitted(params, True)
     return lambda u: jhu(x0, jnp.asarray(u, dtype=_precision.ctype), kgrid)
@@ -307,11 +334,14 @@ def _space_size(kind, args):
     return args[0].shape[0] if kind == "block" else args[0].shape[0] + args[1].shape[0]
 
 
-def ky_block_matrix(x0, kgrid, params, iky, chunk=None, *, ikx=None, iz=None):
+def ky_block_matrix(x0, kgrid, params, iky, chunk=None, *, ikx=None, iz=None, overrides=None):
     # dense J restricted to the kept entries of ky column iky (order: ky_block_index), for a
     # ky-independent x0 -- or of one (kx, ky[, kz]) mode for an x0 independent of x [and z]:
     # one jvp per basis vector, vmapped in chunks. Returns (J_block complex128 (n, n), idx).
+    # A block is an INDEX: under overrides={"Ly": ...} block iky is ky = 2 pi iky/Ly, so its
+    # wavenumber moves with Ly while iky (and the dealias-kept set) stays fixed.
     _check_supported(params)
+    kgrid = _kgrid_at(kgrid, params, overrides)
     x0 = _fields(x0, params)
     idx = ky_block_index(kgrid, params, iky, ikx=ikx, iz=iz)
     _assert_invariant(x0, ikx, iz)
@@ -333,10 +363,11 @@ def _host_op(fns, n, np_dtype, x0, kgrid, args, adjoint=True):
                                rmatvec=wrap(fns.rmv) if adjoint else None, dtype=np_dtype)
 
 
-def ky_block_operator(x0, kgrid, params, iky, *, ikx=None, iz=None):
+def ky_block_operator(x0, kgrid, params, iky, *, ikx=None, iz=None, overrides=None):
     # matrix-free form of ky_block_matrix: a complex scipy LinearOperator (matvec J,
     # rmatvec J^H) on the kept entries of the block. Returns (op, idx).
     _check_supported(params)
+    kgrid = _kgrid_at(kgrid, params, overrides)
     x0 = _fields(x0, params)
     idx = ky_block_index(kgrid, params, iky, ikx=ikx, iz=iz)
     _assert_invariant(x0, ikx, iz)
@@ -426,19 +457,21 @@ def real_coords(kgrid, params):
                       mirror_dst=(offs + mflat[paired][None, :]).reshape(-1))
 
 
-def real_operator(x0, kgrid, params, coords=None):
+def real_operator(x0, kgrid, params, coords=None, *, overrides=None):
     # matrix-free J in real coordinates, for any x0: a real scipy LinearOperator (matvec J,
     # rmatvec J^T by vjp). Returns (op, coords).
     _check_supported(params)
+    kgrid = _kgrid_at(kgrid, params, overrides)
     x0 = _fields(x0, params)
     coords = real_coords(kgrid, params) if coords is None else coords
     op = _host_op(_space_fns(params, "real"), coords.n, np.float64, x0, kgrid, coords.args)
     return op, coords
 
 
-def real_matrix(x0, kgrid, params, coords=None, chunk=None):
+def real_matrix(x0, kgrid, params, coords=None, chunk=None, *, overrides=None):
     # dense J in real coordinates (small grids): one jvp per coordinate. Returns (M, coords).
     _check_supported(params)
+    kgrid = _kgrid_at(kgrid, params, overrides)
     x0 = _fields(x0, params)
     coords = real_coords(kgrid, params) if coords is None else coords
     fns, args = _space_fns(params, "real"), coords.args
@@ -719,7 +752,7 @@ def _flow_fn(params, kind, info):
 
 
 def propagator_operator(x0, kgrid, params, *, T, dt, scheme="lsrk54", iky=None, ikx=None,
-                        iz=None, coords=None):
+                        iz=None, coords=None, overrides=None):
     """exp(J T) as a scipy LinearOperator, integrated by the solver's own stepper.
 
     The space is the mode block (iky [, ikx, iz]) or, with iky None, the real coordinates.
@@ -727,8 +760,12 @@ def propagator_operator(x0, kgrid, params, *, T, dt, scheme="lsrk54", iky=None, 
     particles (the harness rejects both). An IMEX scheme is accepted only on a real diagonal
     L (pure dissipation), ValueError otherwise (_check_scheme_on_L). Returns (op, info,
     index) with info a PropagatorInfo and index the block's idx or the RealCoords.
+    overrides: the parameter point (module note) -- honoured throughout, since both the
+    stepper's L (kgrid.lin) and its N' (the RHS read sites) come from the overridden kgrid;
+    the stepper runs at the fixed dt, so no set_timestep (which does not see overrides) runs.
     """
     _check_supported(params)
+    kgrid = _kgrid_at(kgrid, params, overrides)
     x0 = _fields(x0, params)
     sp = _space(x0, kgrid, params, iky, ikx, iz, coords)
     info = _propagator_info(T, dt, scheme)
@@ -760,7 +797,7 @@ class PropagatorEigResult(NamedTuple):
 
 def propagator_eigs(x0, kgrid, params, *, T, dt, k=6, scheme="lsrk54", iky=None, ikx=None,
                     iz=None, coords=None, tol=1e-10, ncv=None, maxiter=300, v0=None,
-                    branch_margin=0.1, residual_tol=_PROPAGATOR_RESIDUAL_TOL):
+                    branch_margin=0.1, residual_tol=_PROPAGATOR_RESIDUAL_TOL, overrides=None):
     """The k fastest-growing eigenvalues of J (largest Re lambda), by ARPACK on exp(J T).
 
     The default solver for the fastest modes of a general x0. exp(J T) is nsteps = T/dt
@@ -806,6 +843,9 @@ def propagator_eigs(x0, kgrid, params, *, T, dt, k=6, scheme="lsrk54", iky=None,
     t0 = time.perf_counter()
     if residual_tol is None:
         residual_tol = _PROPAGATOR_RESIDUAL_TOL
+    _check_supported(params)
+    # one overridden kgrid for exp(J T) AND the residuals on J (overrides: the module note)
+    kgrid = _kgrid_at(kgrid, params, overrides)
     op, info, index = propagator_operator(x0, kgrid, params, T=T, dt=dt, scheme=scheme,
                                           iky=iky, ikx=ikx, iz=iz, coords=coords)
     x0 = _fields(x0, params)
@@ -950,10 +990,13 @@ def _diag_fn(params, kind):
     return jax.jit(fn)
 
 
-def diagonal_preconditioner(kgrid, params, *, iky=None, ikx=None, iz=None, coords=None):
+def diagonal_preconditioner(kgrid, params, *, iky=None, ikx=None, iz=None, coords=None,
+                            overrides=None):
     """Factory sigma -> (L - sigma I)^-1 (L = kgrid.lin, k-local) in the block (iky [, ikx,
     iz]) or the real coordinates, through the operator's solve_shifted. Exact where N' is
-    small against L - sigma; no help where L ~ 0 (nu = 0) or N' dominates."""
+    small against L - sigma; no help where L ~ 0 (nu = 0) or N' dominates. overrides: L at
+    that parameter point."""
+    kgrid = _kgrid_at(kgrid, params, overrides)
     sp = _space(None, kgrid, params, iky, ikx, iz, coords)
     fn = _diag_fn(params, sp.kind)
 
@@ -981,8 +1024,9 @@ class KyAveragedPreconditioner:
     block (two per ky > 0 column: sigma and conj(sigma)).
     """
 
-    def __init__(self, x0, kgrid, params, coords=None, chunk=None):
+    def __init__(self, x0, kgrid, params, coords=None, chunk=None, *, overrides=None):
         _check_supported(params)
+        kgrid = _kgrid_at(kgrid, params, overrides)
         x0 = _fields(x0, params)
         xbar = x0.at[..., 1:].set(0.0)
         coords = real_coords(kgrid, params) if coords is None else coords
@@ -1056,17 +1100,21 @@ class KyAveragedPreconditioner:
         return spla.LinearOperator((self.n, self.n), matvec=apply, dtype=np.complex128)
 
 
-def ky_averaged_preconditioner(x0, kgrid, params, coords=None, chunk=None):
+def ky_averaged_preconditioner(x0, kgrid, params, coords=None, chunk=None, *, overrides=None):
     # KyAveragedPreconditioner(x0, ...): the factory, blocks built once for every sigma
-    return KyAveragedPreconditioner(x0, kgrid, params, coords=coords, chunk=chunk)
+    return KyAveragedPreconditioner(x0, kgrid, params, coords=coords, chunk=chunk,
+                                    overrides=overrides)
 
 
-# ---------------------------------------------------------------- rung 1b: sensitivities
-# Parameters that enter through the STATE only: x0(p), so dJ/dp = dJ/ds along dx0 = dx0/dp
-# (for shear tearing, Phi0 = alpha Psi0 gives dx0/dalpha = (Psi0 in phi, 0 in psi); a sheet
-# width or an amplitude likewise). Physics parameters (eta, nu, ...) and the wavenumber k
-# enter L, the kgrid or the RHS coefficients, not x0 -- they are rung 2 (the overrides seam)
-# and out of scope here.
+# ---------------------------------------------------------------- rung 1b/2: sensitivities
+# dJ/ds along a direction in (state, parameter) space: J(s) = J at (x0 + s dx0, p + s dp).
+# A parameter entering through the STATE only is a pure state direction: x0(p), so
+# dJ/dp = dJ/ds along dx0 = dx0/dp (for shear tearing, Phi0 = alpha Psi0 gives dx0/dalpha =
+# (Psi0 in phi, 0 in psi); a sheet width or an amplitude likewise) -- rung 1b, where L drops
+# out. Physics parameters and the box lengths (rung 2) are a parameter direction dp
+# (`dparams`, keys as overrides): they enter L, the wavenumbers and the RHS coefficients, and
+# the derivative is taken through the kgrid build. Both together when x0 depends on the
+# parameter too (a box length Lx: x0's coefficients move with the grid points x_j = j Lx/nx).
 
 
 def _djacobian_action(params):
@@ -1079,6 +1127,19 @@ def _djacobian_action(params):
         def nv(f):
             return jax.jvp(lambda g: N(g, kgrid), (f,), (v,))[1]
         return jax.jvp(nv, (x0,), (dx0,))[1].astype(_precision.ctype)
+    return djv
+
+
+def _dparam_action(params):
+    # (x0, dx0, v, point, dpoint) -> (dJ/ds) v, J(s) = J at (x0 + s dx0, point + s dpoint):
+    # forward-over-forward through setup_kgrids(params, overrides=point), so the tangent
+    # reaches L (kgrid.lin), the wavenumbers N reads and the RHS read sites' coefficients
+    jv = _jacobian_action(params)
+
+    def djv(x0, dx0, v, point, dpoint):
+        def jat(f, p):
+            return jv(f, v, grids.setup_kgrids(params, overrides=p))
+        return jax.jvp(jat, (x0, point), (dx0, dpoint))[1].astype(_precision.ctype)
     return djv
 
 
@@ -1100,53 +1161,121 @@ def _dspace_fns(params, kind):
     return jax.jit(act), jax.jit(probe)
 
 
+@functools.lru_cache(maxsize=32)
+def _dparam_space_fns(params, kind):
+    # as _dspace_fns for a (state, parameter) direction: (mv, probe), both taking
+    # (..., x0, dx0, (point, dpoint), args) -- the parameter pair in the kgrid's slot
+    djv = _dparam_action(params)
+    fns = _space_fns(params, kind)
+    embed, gather, dt = fns.embed, fns.gather, fns.dtype
+
+    def act(u, x0, dx0, pd, args):
+        return gather(djv(x0, dx0, embed(u, args), pd[0], pd[1]), args)
+
+    def probe(cols, x0, dx0, pd, args):
+        n = _space_size(kind, args)
+        return jax.vmap(lambda j: act(jax.nn.one_hot(j, n, dtype=dt), x0, dx0, pd,
+                                      args))(cols)
+    return jax.jit(act), jax.jit(probe)
+
+
 @functools.lru_cache(maxsize=16)
 def _jitted_dj(params):
     return jax.jit(_djacobian_action(params))
 
 
-def djvp_operator(x0, dx0, kgrid, params):
-    # matrix-free v -> (dJ/ds) v on the fields array, J(s) = J at x0 + s dx0 (x0, dx0 fields
-    # arrays or states; dx0 is the transform of a REAL field, like x0). Real-linear in v, as J
-    # is on this space.
+@functools.lru_cache(maxsize=16)
+def _jitted_dparam(params):
+    return jax.jit(_dparam_action(params))
+
+
+def _param_direction(params, overrides, dparams):
+    # (point, dpoint): the parameter point (overrides, the static value for every key only
+    # dparams names) and the tangent (0 for every key only overrides names), each key
+    # broadcast to one shape (a scalar diss against a (nu, eta) direction becomes a pair --
+    # the same operator, in the general backend), validated as overrides / as a direction
+    ov = _overrides.validate(params, overrides) or {}
+    dp = _overrides.validate(params, dparams, direction=True)
+    point, dpoint = {}, {}
+    for key in sorted(set(ov) | set(dp)):
+        p = ov[key] if key in ov else jnp.asarray(_overrides.static_value(params, key),
+                                                  dtype=_precision.ftype)
+        d = dp.get(key, jnp.zeros_like(p))
+        shape = np.broadcast_shapes(np.shape(p), np.shape(d))
+        point[key] = jnp.broadcast_to(p, shape)
+        dpoint[key] = jnp.broadcast_to(d, shape)
+    return _overrides.validate(params, point), dpoint
+
+
+def _dj_setup(x0, dx0, kgrid, params, overrides, dparams):
+    # (x0, dx0, kgrid-or-None, (point, dpoint)-or-None): the pure-state rung-1b form when
+    # dparams is None (at the overridden kgrid, if any), else the (state, parameter) form
     _check_supported(params)
-    x0, dx0 = _fields(x0, params), _fields(dx0, params)
-    djv = _jitted_dj(params)
-    return lambda v: djv(x0, dx0, jnp.asarray(v, dtype=_precision.ctype), kgrid)
+    x0 = _fields(x0, params)
+    dx0 = jnp.zeros_like(x0) if dx0 is None else _fields(dx0, params)
+    if dparams is None:
+        return x0, dx0, _kgrid_at(kgrid, params, overrides), None
+    if kgrid.overrides is not None:
+        raise ValueError("stability: dparams= needs the plain setup_kgrids(params) kgrid (the "
+                         "parameter point goes in overrides=)")
+    return x0, dx0, None, _param_direction(params, overrides, dparams)
 
 
-def _dj_space(x0, dx0, kgrid, params, iky, ikx, iz, coords):
+def djvp_operator(x0, dx0, kgrid, params, *, dparams=None, overrides=None):
+    """Matrix-free v -> (dJ/ds) v on the fields array, J(s) = J at (x0 + s dx0, p + s dparams),
+    p the parameter point `overrides` (x0, dx0 fields arrays or states; dx0 is the transform of
+    a REAL field, like x0; dx0=None is a pure parameter direction). dparams=None: the pure
+    state direction of rung 1b (L drops out). dparams: {key: tangent}, keys as overrides
+    (taranis/overrides.py). Real-linear in v, as J is on this space."""
+    x0, dx0, kg, pd = _dj_setup(x0, dx0, kgrid, params, overrides, dparams)
+    if pd is None:
+        djv = _jitted_dj(params)
+        return lambda v: djv(x0, dx0, jnp.asarray(v, dtype=_precision.ctype), kg)
+    djv = _jitted_dparam(params)
+    return lambda v: djv(x0, dx0, jnp.asarray(v, dtype=_precision.ctype), pd[0], pd[1])
+
+
+def _dj_space(x0, dx0, kgrid, params, iky, ikx, iz, coords, overrides, dparams):
     # the space, with the invariance of BOTH x0 and dx0 asserted for a mode block: dJ is
-    # block-diagonal (and complex-linear on a block) only when J(s) is for every s
-    _check_supported(params)
-    x0, dx0 = _fields(x0, params), _fields(dx0, params)
+    # block-diagonal (and complex-linear on a block) only when J(s) is for every s (a
+    # parameter direction keeps it: parameters are uniform in space)
+    x0, dx0, kg, pd = _dj_setup(x0, dx0, kgrid, params, overrides, dparams)
     sp = _space(x0, kgrid, params, iky, ikx, iz, coords)
     if sp.kind == "block":
         _assert_invariant(dx0, ikx, iz, name="dx0")
-    return x0, dx0, sp
+    if pd is None:
+        mv, probe = _dspace_fns(params, sp.kind)
+        return x0, dx0, kg, sp, mv, probe
+    mv, probe = _dparam_space_fns(params, sp.kind)
+    return x0, dx0, pd, sp, mv, probe
 
 
-def dj_operator(x0, dx0, kgrid, params, *, iky=None, ikx=None, iz=None, coords=None):
-    """dJ/ds along dx0 as a scipy LinearOperator (matvec only) in the mode block (iky [, ikx,
-    iz]; x0 AND dx0 invariance asserted) or, with iky None, the real coordinates. Same row /
-    column order as ky_block_matrix / real_matrix. Returns (op, index)."""
-    x0, dx0, sp = _dj_space(x0, dx0, kgrid, params, iky, ikx, iz, coords)
-    mv, _ = _dspace_fns(params, sp.kind)
+def dj_operator(x0, dx0, kgrid, params, *, iky=None, ikx=None, iz=None, coords=None,
+                dparams=None, overrides=None):
+    """dJ/ds as a scipy LinearOperator (matvec only) in the mode block (iky [, ikx, iz]; x0
+    AND dx0 invariance asserted) or, with iky None, the real coordinates. Same row / column
+    order as ky_block_matrix / real_matrix (at the same overrides). Direction as
+    djvp_operator: dx0 (None: zero) and dparams. A mode block is an index: along
+    dparams={"Ly": dLy} block iky's wavenumber ky = 2 pi iky/Ly moves -- with Ly = 2 pi iky/k,
+    dparams={"Ly": -Ly/k} is d/dk. Returns (op, index)."""
+    x0, dx0, kg, sp, mv, _ = _dj_space(x0, dx0, kgrid, params, iky, ikx, iz, coords,
+                                       overrides, dparams)
     jdt = _space_fns(params, sp.kind).dtype
 
     def apply(u):
         u = np.asarray(u).reshape(-1)
-        return np.array(mv(jnp.asarray(u, dtype=jdt), x0, dx0, kgrid, sp.args), dtype=sp.np_dtype)
+        return np.array(mv(jnp.asarray(u, dtype=jdt), x0, dx0, kg, sp.args), dtype=sp.np_dtype)
     return spla.LinearOperator((sp.n, sp.n), matvec=apply, dtype=sp.np_dtype), sp.index
 
 
-def dj_matrix(x0, dx0, kgrid, params, *, iky=None, ikx=None, iz=None, coords=None, chunk=None):
-    """Dense dJ/ds along dx0 in the mode block or the real coordinates (as dj_operator), one
+def dj_matrix(x0, dx0, kgrid, params, *, iky=None, ikx=None, iz=None, coords=None, chunk=None,
+              dparams=None, overrides=None):
+    """Dense dJ/ds in the mode block or the real coordinates (as dj_operator), one
     forward-over-forward jvp per basis vector. Returns (dJ, index): complex128 on a block,
     float64 in real coordinates."""
-    x0, dx0, sp = _dj_space(x0, dx0, kgrid, params, iky, ikx, iz, coords)
-    _, probe = _dspace_fns(params, sp.kind)
-    M = _dense_from_probes(lambda cols: probe(cols, x0, dx0, kgrid, sp.args), sp.n,
+    x0, dx0, kg, sp, _, probe = _dj_space(x0, dx0, kgrid, params, iky, ikx, iz, coords,
+                                          overrides, dparams)
+    M = _dense_from_probes(lambda cols: probe(cols, x0, dx0, kg, sp.args), sp.n,
                            min(_probe_chunk(params, chunk), sp.n), sp.np_dtype)
     return M, sp.index
 
@@ -1259,7 +1388,8 @@ def eigenvalue_sensitivity(J, dJ, lam, v, w, *, spectrum, residual_tol=_SENS_RES
     dJ: dense, LinearOperator or callable, in the same space (dj_matrix / dj_operator with the
     same iky/ikx/iz or coords). v: right eigenvector; w: left eigenvector with J^H w =
     conj(lam) w (EigResult.left / left_eigenvector). Real coordinates work as they are (J, dJ
-    real; v, w complex). Scope: parameters entering through x0 only (module note above).
+    real; v, w complex). Any direction dj_operator / dj_matrix take (state, parameter or
+    both); J must be at the same parameter point (overrides) as dJ.
 
     spectrum: computed eigenvalues of J INCLUDING lam -- eig_dense's values, or shift_invert's
     k >= 2 values near lam -- from which the gap to the nearest other eigenvalue is taken (the

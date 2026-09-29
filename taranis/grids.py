@@ -33,6 +33,11 @@ class K_Grids(NamedTuple):
     # is only drawn at shell modes rather than over the whole k-grid (ou_update).
     fidx_x: Optional[jnp.ndarray] = None
     fidx_y: Optional[jnp.ndarray] = None
+    # the stability harness's overrides seam (taranis/overrides.py): None everywhere in the
+    # solver; a {key: value} dict only on a kgrid built by setup_kgrids(params, overrides=...),
+    # whose wavenumbers and lin were built from those values. Physics read sites branch on it
+    # in plain python and read through overrides.getp; run.py rejects a kgrid carrying one.
+    overrides: Optional[dict] = None
 
 def dealias_mask(params):
     # 2/3-rule elliptical dealiasing mask, in mode-index space (Lx/Ly[/Lz] cancel out).
@@ -45,14 +50,32 @@ def dealias_mask(params):
     iz = ft.fftfreq(params.nz, dtype=_precision.ftype) * params.nz
     return (jnp.abs(iz).reshape(-1,1,1) < params.nz/3.0) & perp[None,:,:]
 
-def setup_kgrids(params):
+def setup_kgrids(params, overrides=None):
     # gets the wavenumber grid object from parameters, precomputing all the static
     # concrete arrays (ksq, inv_ksq, dealias, the equation set's linear operator,
     # y-doubling factor, forcing shell mask/z-envelopes)
     # the scaling here respects jax.numpy's fourier transform conventions
     # so that e.g. we calculate derivatives correctly.
-    kx = ft.fftfreq(params.nx, dtype=_precision.ftype) * params.nx * 2 * jnp.pi / params.Lx
-    ky = ft.rfftfreq(params.ny, dtype=_precision.ftype) * params.ny * 2 * jnp.pi / params.Ly
+    #
+    # overrides (the stability harness's seam, taranis/overrides.py; None in the solver): a
+    # {key: value} dict of continuous parameters, values possibly TRACED. The box lengths
+    # Lx/Ly/Lz then come from it, lin is built from linear_matrix_func reading it, and the
+    # dict rides in kgrid.overrides for the RHS read sites -- so this one function is still
+    # the only place a kgrid is made, traced or not. Unforced, non-sharded runs only.
+    Lx, Ly, Lz = params.Lx, params.Ly, getattr(params, "Lz", None)
+    if overrides is not None:
+        from . import overrides as _ov
+        if params.forcing or params.comm_backend == "jax":
+            raise ValueError("setup_kgrids(overrides=...) is the stability harness's seam: "
+                             "unforced, non-sharded runs only (forcing=False, "
+                             f"comm_backend != 'jax'); got forcing={params.forcing!r}, "
+                             f"comm_backend={params.comm_backend!r}")
+        overrides = _ov.validate(params, overrides)
+        Lx, Ly = _ov.getp(params, overrides, "Lx"), _ov.getp(params, overrides, "Ly")
+        if params.spatial_dimensions == 3:
+            Lz = _ov.getp(params, overrides, "Lz")
+    kx = ft.fftfreq(params.nx, dtype=_precision.ftype) * params.nx * 2 * jnp.pi / Lx
+    ky = ft.rfftfreq(params.ny, dtype=_precision.ftype) * params.ny * 2 * jnp.pi / Ly
     kx_grid = kx.reshape(-1, 1)
     ky_grid = ky.reshape(1, -1)
 
@@ -66,7 +89,7 @@ def setup_kgrids(params):
     kz = None
     if params.z_spectral:
         kz = (ft.fftfreq(params.nz, dtype=_precision.ftype)
-              * params.nz * 2 * jnp.pi / params.Lz).reshape(-1,1,1)
+              * params.nz * 2 * jnp.pi / Lz).reshape(-1,1,1)
 
     fmask = None
     fidx_x = None
@@ -93,7 +116,8 @@ def setup_kgrids(params):
 
     kgrid = K_Grids(kx=kx_grid, ky=ky_grid, ksq=ksq, inv_ksq=inv_ksq,
                     dealias=dealias, yfac=yfac, kz=kz, fmask=fmask,
-                    z_envcos=z_envcos, z_envsin=z_envsin, fidx_x=fidx_x, fidx_y=fidx_y)
+                    z_envcos=z_envcos, z_envsin=z_envsin, fidx_x=fidx_x, fidx_y=fidx_y,
+                    overrides=overrides)
     kgrid = _attach_linear_operator(kgrid, params)
     if params.comm_backend == "jax":
         kgrid = _kgrid_to_global(kgrid, params)  # global (z-sharded) arrays for shard_map

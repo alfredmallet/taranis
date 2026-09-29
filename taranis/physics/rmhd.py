@@ -8,6 +8,7 @@ from . import shared_physics
 from .shared_physics import bracket,grad_fields,z_derivatives
 from .. import comms
 from ..propagators import SeparableL
+from ..overrides import getp
 
 class RMHDGrads(NamedTuple):
     # one real-space (d/dx, d/dy) pair per RMHD field, each (2,nz,nx,ny)
@@ -30,13 +31,25 @@ def linear_matrix(kgrid,params):
     # z_spectral: includes the AW propagation.  Applied as exp(L*tau).
     diss_par, hyper = _diss_hyper(params)
     zdiss = _z_diss_k(params)   # validated in both modes, meaningless without kz
+    equal = None
+    if kgrid.overrides is not None:
+        # the stability harness's seam (taranis/overrides.py): traced diss / z_diss_k. The
+        # backend is chosen from the override's SHAPE, never its value: a scalar diss is
+        # nu == eta by construction, a (nu, eta) pair takes the general putzer2 form
+        if "diss" in kgrid.overrides:
+            equal = np.shape(kgrid.overrides["diss"]) in ((), (1,))
+        diss_par = getp(params, kgrid.overrides, "diss")
+        if params.z_spectral:
+            zdiss = getp(params, kgrid.overrides, "z_diss_k")
     if not params.z_spectral:
         diss = jnp.array(diss_par, dtype=_precision.ftype).reshape(-1,1,1,1)
         return -diss*kgrid.ksq**hyper
     diss = jnp.broadcast_to(jnp.array(diss_par, dtype=_precision.ftype).reshape(-1),
                             (params.nfields,))
     kz = _kz_deriv(kgrid,params)
-    if SEPARABLE_L and _equal_dissipation(diss_par, params):
+    if equal is None:
+        equal = _equal_dissipation(diss_par, params)
+    if SEPARABLE_L and equal:
         # L = d*I + i*kz*sigma_x with d = dperp + dz: the separable backend
         return SeparableL(dperp=-diss[0]*kgrid.ksq**hyper, dz=-zdiss*kz**4, kz=kz)
     # (nz,1,1) kz against (nkx,nky) k_perp broadcasts every entry to (nz,nkx,nky)
@@ -120,9 +133,16 @@ def FDLinearTerm(state,grads,kgrid,params,halo=None):
     # todo: add functionality for variable z_order
     if not fd_linear_active(params):
         return jnp.zeros_like(state.fields)
-    dz=params.dz
-    diss=params.z_diss * (dz/2)**4
-    df_dz,d4f_dz4 = z_derivatives(state.fields,params,halo=halo)
+    if kgrid.overrides is None:
+        dz=params.dz
+        diss=params.z_diss * (dz/2)**4
+        df_dz,d4f_dz4 = z_derivatives(state.fields,params,halo=halo)
+    else:
+        # the stability harness's seam (taranis/overrides.py): traced Lz (the stencil's dz)
+        # and z_diss
+        dz=getp(params,kgrid.overrides,"Lz")/params.nz
+        diss=getp(params,kgrid.overrides,"z_diss") * (dz/2)**4
+        df_dz,d4f_dz4 = z_derivatives(state.fields,params,halo=halo,dz=dz)
     #RMHD only logic: the z-derivatives belong to the opposite equations
     df_dz_rmhd = jnp.stack([df_dz[1],df_dz[0]])
     return df_dz_rmhd - diss * d4f_dz4
