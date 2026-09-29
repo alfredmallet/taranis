@@ -2,6 +2,7 @@ from typing import NamedTuple,Tuple,Callable,Optional,Union
 from . import rmhd
 from . import gdi
 from . import cmhd
+from . import sm22
 from .. import _precision
 
 class Term(NamedTuple):
@@ -26,6 +27,12 @@ class EquationRecipe(NamedTuple):
     # built in grids.setup_kgrids; timesteppers apply exp(L*tau) through propagators
     # not in the RHS. no linear term: None.
     linear_matrix_func: Optional[Callable] = None
+    # SOLVER AUX: equations whose RHS contains an iterative solve (SM22's phi) carry the last
+    # solution between stages and steps as a warm start. aux_init_func(state, kgrid, params)
+    # -> aux pytree (the cold start); grad_func then takes it as a 4th positional arg and its
+    # grads must expose the updated one as `grads.aux`. None: no aux, and every path is the
+    # pre-aux graph (the rhs/stepper aux argument stays None and adds no leaves).
+    aux_init_func: Optional[Callable] = None
 
 
 # backends where pre-issuing the halo might overlap comms with compute.
@@ -41,7 +48,7 @@ def _halo_start_enabled(params):
 # NB: *spectral* linear terms are handled in propagators.
 def construct_rhs(recipe):
     terms = tuple(t if isinstance(t,Term) else Term(t) for t in recipe.term_funcs)
-    def rhs(state,kgrid,params):
+    def rhs(state,kgrid,params,aux=None):
         # check that precision of the fields is correct.
         assert state.fields.dtype == _precision.ctype, (
             f"state.fields dtype {state.fields.dtype} != expected field dtype "
@@ -63,7 +70,10 @@ def construct_rhs(recipe):
                 f"{[getattr(t.func,'__name__',t.func) for t in terms]}")
         use_halo = recipe.halo_start_func is not None and _halo_start_enabled(params)
         halo = recipe.halo_start_func(state,kgrid,params) if use_halo else None
-        grads = recipe.grad_func(state,kgrid,params)
+        if aux is None:
+            grads = recipe.grad_func(state,kgrid,params)
+        else:
+            grads = recipe.grad_func(state,kgrid,params,aux)
         fields_rhs = None
         for term in active:
             if fields_rhs is None:
@@ -97,5 +107,15 @@ equation_registry = {
                            grad_func = cmhd.grad,
                            nfields = 7,
                            linear_matrix_func = cmhd.linear_matrix
+                           ),
+    # Squire & Mallet 2022 constant-|B| growth rule (docs/numerics.md "SM22"): L is the +1
+    # growth of the fluctuation (and optional hyperdissipation), the phi solve lives in grad,
+    # and the last phi rides the solver aux as the Krylov warm start.
+    "SM22": EquationRecipe(set_timestep_func = sm22.set_timestep,
+                           term_funcs = (Term(sm22.NonlinearTerm),),
+                           grad_func = sm22.grad,
+                           nfields = 3,
+                           linear_matrix_func = sm22.linear_matrix,
+                           aux_init_func = sm22.aux_init
                            ),
 }

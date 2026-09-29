@@ -114,11 +114,30 @@ def _fixed_dt(params):
     # the frozen dt of the plain (non-cfl-block) step scan, or None when dt is adaptive
     return None if params.adaptive_timestep else params.dt
 
+def _has_solver_aux(params):
+    # the equation carries a solver aux (EquationRecipe.aux_init_func, SM22's phi warm start).
+    # Particles require RMHD, which has none, so the carry's aux slot is never contested.
+    return equation_registry[params.eqtype].aux_init_func is not None
+
+def init_aux(state,kgrid,params):
+    # the cold-start solver aux for block_of_steps' (state, aux) carry; None when the equation
+    # has none. Not snapshotted: a restart cold-starts it once (reproducible to the solver
+    # tolerance, not bitwise).
+    if not _has_solver_aux(params):
+        return None
+    return equation_registry[params.eqtype].aux_init_func(state,kgrid,params)
+
 def _step(carry,kgrid,params,rhs,set_timestep,scheme,stepper,dt_override=None,exp_ops=None):
     # One full timestep on the run carry (state, aux), aux being the ParticleState when
-    # particles are on and None off (a leafless pytree: scan/while_loop/donation ignore it).
-    # Returns (carry, ys) with ys = (post-step t, per-ensemble moments) on, None off.
+    # particles are on, the solver aux for an equation that has one (SM22), and None
+    # otherwise (a leafless pytree: scan/while_loop/donation ignore it).
+    # Returns (carry, ys) with ys = (post-step t, per-ensemble moments) with particles, None
+    # otherwise.
     state,aux = carry
+    if _has_solver_aux(params):
+        # no forcing, no particles (both rejected by the equation's own checks)
+        new_state,aux = stepper(state,kgrid,params,rhs,set_timestep,scheme,dt_override,exp_ops,aux=aux)
+        return (new_state,aux), None
     new_state = stepper(state,kgrid,params,rhs,set_timestep,scheme,dt_override,exp_ops)
     # advance the O-U forcing state (and per-step norm scale) once per full timestep
     if params.forcing:
@@ -166,10 +185,13 @@ def _reject_overrides(kgrid):
 
 def block_of_steps(x,kgrid,params,nblock,scheme,stepper):
     # public driver: particles off, state in -> state out; on, (state, pstate) in ->
-    # ((state, pstate), ys) out.
+    # ((state, pstate), ys) out. An equation with a solver aux (SM22): (state, aux) in ->
+    # (state, aux) out, aux from init_aux or the previous call.
     _reject_overrides(kgrid)
     if params.particles is not None:
         return _advance_block(x,kgrid,params,nblock,scheme,stepper)
+    if _has_solver_aux(params):
+        return _advance_block(x,kgrid,params,nblock,scheme,stepper)[0]
     return _advance_block((x,None),kgrid,params,nblock,scheme,stepper)[0][0]
 
 def _write_snapshot(snap,state,params,mngr,save,label="snapshot",pstate=None):
@@ -260,7 +282,7 @@ def simulate_scan(state,kgrid,params,nblock,t_snap,t_end,mngr,schemestr='lsrk33'
         _truncate_moments(mngr.directory,float(state.t))
     # float(): pull to host so this doesn't alias state.t's buffer, which donate_argnums frees on the next jit call
     t_last_snapshot = float(state.t)
-    carry = (state,pstate)
+    carry = (state,pstate if not _has_solver_aux(params) else init_aux(state,kgrid,params))
     snap = _start_snapshots(state,params,mngr,save,pstate)
     block_count=0
     saved_current=True
@@ -268,7 +290,9 @@ def simulate_scan(state,kgrid,params,nblock,t_snap,t_end,mngr,schemestr='lsrk33'
         carry,ys = advance(carry)
         if params.particles is not None and save:
             _append_moments(mngr.directory,ys)
-        state,pstate = carry
+        state = carry[0]
+        if params.particles is not None:
+            pstate = carry[1]
         block_count+=1
         saved_current=False
         if params.rank==0 and block_count%print_every==0:
@@ -320,12 +344,14 @@ def simulate(initial_state,kgrid,params,t_snap,t_end,mngr,schemestr='lsrk33',sav
     state=_refresh_forcing_scale(initial_state, kgrid, params)
     # float(): pull to host so this doesn't alias state.t's buffer, which donate_argnums frees on the next jit call
     t_last_snapshot = float(state.t)
-    carry = (state,pstate)
+    carry = (state,pstate if not _has_solver_aux(params) else init_aux(state,kgrid,params))
     snap = _start_snapshots(state,params,mngr,save,pstate)
 
     while state.t<t_end:
         carry = sim_to_next_snap_jit(carry,min(t_last_snapshot+t_snap,t_end))
-        state,pstate = carry
+        state = carry[0]
+        if params.particles is not None:
+            pstate = carry[1]
         snap = _write_snapshot(snap,state,params,mngr,save,"snapshot",pstate)
         t_last_snapshot=float(state.t)
     mngr.wait_until_finished()

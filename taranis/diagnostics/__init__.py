@@ -4,8 +4,8 @@
 # today). core.py holds the equation-agnostic machinery. The RMHD names are re-exported
 # here: they are the historical top-level surface, `diagnostics.energy(...)` etc. Nothing
 # else is -- gdi/cmhd/particles are reached as `diagnostics.cmhd.energies(...)`.
-from . import cmhd, gdi, particles, rmhd
+from . import cmhd, gdi, particles, rmhd, sm22
 from .core import _binned
 from .rmhd import energy, perpspec, parspec
 
-__all__ = ["cmhd", "gdi", "particles", "rmhd", "energy", "perpspec", "parspec", "_binned"]
+__all__ = ["cmhd", "gdi", "particles", "rmhd", "sm22", "energy", "perpspec", "parspec", "_binned"]

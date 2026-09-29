@@ -8,8 +8,9 @@ docs/performance.md (measurements and tuning) and docs/checkpointing.md.
 
 A pseudospectral solver for reduced MHD (RMHD) and related plasma fluid models, in JAX.
 Spectral (rfft2) in the perpendicular (x,y) plane, 4th-order finite-difference in z,
-MPI-decomposed along z only. Implemented equation sets: RMHD, 2D GDI, and compressible
-MHD (CMHD, `z_spectral` + single-process only); the architecture supports adding others
+MPI-decomposed along z only. Implemented equation sets: RMHD, 2D GDI, compressible
+MHD (CMHD, `z_spectral` + single-process only) and the SM22 constant-|B| growth rule
+(2D or `z_spectral` 3D, single-process); the architecture supports adding others
 without touching the core solver.
 
 ## Setup / running
@@ -121,7 +122,8 @@ until 2026-08-01, and old records are folded into `eqpars` with a warning by
 
 Equation sets register in `physics/__init__.py::equation_registry`:
 `EquationRecipe(set_timestep_func, term_funcs, grad_func, nfields,
-forcing_scale_func=None, halo_start_func=None, linear_matrix_func=None)` per `eqtype`.
+forcing_scale_func=None, halo_start_func=None, linear_matrix_func=None,
+aux_init_func=None)` per `eqtype` (`aux_init_func`: the SOLVER AUX, see SM22 below).
 `term_funcs` entries are `physics.Term(func, active=...)` (a bare callable is accepted and
 wrapped, meaning always active) and `construct_rhs` sums only the terms whose
 `active(params)` is true — plain python at TRACE time, `params` being static, so an
@@ -233,7 +235,9 @@ machine/jax-version dependent — held where first measured, does NOT hold under
 Per-machine perf knob.
 
 Two scheme families in `_scheme_registry`, one contract
-(`stepper(state,kgrid,params,rhs,set_timestep,scheme,dt_override=None,exp_ops=None)`):
+(`stepper(state,kgrid,params,rhs,set_timestep,scheme,dt_override=None,exp_ops=None,aux=None)`;
+`aux` is the SM22 solver aux — IF steppers only, IMEX raises — and with it the stepper
+returns `(state, aux)`, without it the bare state and the pre-aux graph):
 
 - **IF (integrating-factor)** — `rk44`, `lsrk33`, `lsrk54` (RMHD production). L applied
   exactly via `apply_exp`; treats the linear physics exactly but misweights the nonlinear
@@ -500,6 +504,47 @@ Fully spectral polytropic compressible MHD, `nfields=7` in state order
 - Not built: forcing, particles in CMHD fields, MPI/z-decomposition, FD-z, `dims==2`,
   shock capturing, density_var-aware and EBM-aware diagnostics, and a barotropic
   `gamma > 1` under expansion (exactly self-consistent, deferred — plan §5).
+
+### SM22 constant-|B| growth (`physics/sm22.py`, landed 2026-09-29 on branch `sm22`)
+
+Squire & Mallet 2022's growth rule `dt B = dB + curl(grad phi x B)`, `dB = B - <B>`, with
+phi making d|B|²/dt uniform. `nfields=3` (B), `dims=2` (2.5D: 3 components on (x,y)) or
+`dims=3` + `z_spectral`; single-process, no forcing, no particles. Derivation:
+docs/numerics.md "SM22". Rules:
+
+- **The +dB growth IS L**: `linear_matrix` = +1 on k≠0, 0 at k=0 (minus optional
+  `diss·(k²/k_c²)^hyper`, k_c the coarsest band edge) — exact under the IF steppers, and
+  `<B>` (the k=0 mode, carried in the fields like CMHD's background) is BITWISE constant.
+- **Galerkin constraint**: phi lives on the 2/3 band minus k=0 and the constraint
+  `P_band[B·P_dealias curl(grad phi x B)] = -P_band[B·dB + (gamma/2)(|B|²-<|B|²>)]` is
+  imposed on that band only — square band→band, so BiCGSTAB converges (a full-grid
+  collocation constraint with a band-limited phi is overdetermined and stalls). In-band
+  |B|² is then frozen to time-integration error; the OUT-of-band |B|² (`Berr_out`) and the
+  band-edge content (`edge_*`) are the honest unresolved burden. The reference code's
+  `tail_max` (content above N/3) is identically zero here — do not port it.
+- **The solve lives in `grad`** (set_timestep needs max|grad phi|); Krylov vectors are
+  k-space coefficients, the preconditioner k-local (`precond`: `"scalar"` = sm22_v2's
+  m k², default; `"tensor"` = <|B|²>k² − k·<BB>·k, floored).
+  `fixed_iters=True` = exactly `maxiter` frozen-after-convergence iterations in a
+  fori_loop (reverse-differentiable; gate 6 checks jax.grad against FD);
+  default False = while_loop with early exit (forward runs, forward-mode AD).
+- **SOLVER AUX** (`EquationRecipe.aux_init_func`): the last phi is threaded through every
+  stage (`rhs(state,kgrid,params,aux)`, the new one read off `grads.aux`) and, via the run
+  carry's aux slot (shared with particles — never both), across steps. `run.init_aux`
+  makes the cold start; `block_of_steps` takes and returns `(state, aux)`;
+  `simulate`/`simulate_scan` manage it internally. NOT snapshotted: a restart cold-starts
+  once, so it reproduces to the solver tolerance, not bitwise. aux=None everywhere else
+  is the pre-aux graph (refactor reference + gate 6 green, bitwise, HLO histogram).
+- eqpars: `gamma` (0), `maxiter` (100), `rtol` (1e-9 fp64 / 1e-4 fp32), `fixed_iters`,
+  `precond`, `diss` (0), `hyper` (8), `dtmax` (0.05); dt = min(dtmax, cfl_safety·h/max|∇φ|).
+- Parity vs the jax_constantB 2D reference (`sm22_v2`, Hou–Li filter, no mask) is AT
+  CONVERGENCE only: smooth seed 2 at 192², A=1: maxgrad 27.527 vs 27.531, lp8/Berr to 5
+  digits; resolved phase (A=0.3) identical at every N. The 2/3 mask costs effective
+  resolution (taranis N ≈ reference 0.7–0.75 N at matched maxgrad) — never splice the two
+  codes into one ladder.
+- Gates: `tests/test_sm22.py` (linear e^t growth, band constraint on the production RHS,
+  invariants, 2.5D embedding, warm start, reverse mode). Diagnostics: `diagnostics/sm22.py`
+  (`diagnostics`, `amplitude`).
 
 ### Test particles (`taranis/particles/`, plans/TESTPART_PLAN.md — Phase A landed 2026-08-18, Phase B (3D, single-process) 2026-08-19)
 

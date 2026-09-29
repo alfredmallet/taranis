@@ -1293,6 +1293,44 @@ Under FD-z, `Lz` enters through the stencil's dz = Lz/nz: the first-derivative p
 scales as 1/Lz, while the filter `z_diss·(dz/2)⁴·∂_z⁴` is Lz-free (= z_diss·S₄/16), so at
 x₀ = 0 dJ/dLz = −(the cross-field ∂_z part of J)/Lz exactly (a gate).
 
+## SM22 constant-|B| growth (`physics/sm22.py`)
+
+Squire & Mallet (2022, JPP 88) grow a constant-|B| field in pseudo-time:
+
+    dt B = dB + curl(u x B),   dB = B - <B>,   u = grad phi,
+
+with phi chosen so that |B|² stays uniform: B·dt B = const, i.e.
+
+    B·curl(grad phi x B) = -B·dB + c        (+ optional -(gamma/2)(|B|² - <|B|²>) relaxation).
+
+For uniform B the operator's symbol is |B|²k² − (B·k)² = |B×k|² ≥ 0, which is what both
+preconditioners approximate.
+
+**Discretization.** Fully spectral, fields band-limited by the 2/3 mask (initialize masks
+the IC; the RHS is masked). The +dB term is k-local and linear, so it is L = +1 (k≠0);
+<B> is the k=0 mode and is never touched. phi is sought in the band minus k=0 and the
+constraint is imposed Galerkin-wise on the same set,
+
+    P_band[ B · P_dealias curl(grad phi x B) ] = P_band[ -B·dB ],
+
+so d/dt P_band(|B|²) = 0 exactly in continuous time and the time-discrete in-band |B|²
+drift is the scheme's O(dt^p) error (measured 3e-8 over t = 0.75 at 32², adaptive dt;
+2e-11 at dt = 0.01). The out-of-band part of |B|² is not constrained — it is the
+unresolved burden, the Galerkin analogue of the reference code's collocation tail, and
+`diagnostics.sm22` reports it as `Berr_out`. A collocation constraint (all grid points)
+with a band-limited phi would have more equations than unknowns; the band->band system is
+square.
+
+**Krylov.** Right-preconditioned BiCGSTAB (jax_constantB sm22_v2's, with masked
+frozen-after-convergence updates) on k-space coefficients with the real inner product
+Re Σ yfac conj(a) b. One operator application: grad phi (d inverse), u x B (3 forward),
+masked curl (3 inverse), B·(·) (1 forward) — 9 real transforms in 2D, 10 in 3D; the
+preconditioner is a k-local multiply. Two per iteration.
+
+**Warm start.** The previous stage's phi (the solver aux), cold start zero; with a
+tolerance stop the answer is warm-start independent to rtol, with fixed_iters it is not
+(the computed map then depends on the guess, as in the reference).
+
 ## Reading 2D MHD results
 
 Energy cascades **forward** in 2D MHD — the opposite of 2D hydrodynamics' inverse cascade
