@@ -285,6 +285,22 @@ def psi0_harrislike(x, Lx, a):
     return np.real(np.fft.ifft(ph))
 
 
+def psi0_tanhpair(x, Lx):
+    # rung 1b-ref (examples/tearing_shear_run.py): two EXACT tanh sheets per period,
+    # B_y = -1 + sum_m [tanh(x - Lx/4 - m Lx) - tanh(x - 3Lx/4 - m Lx)] (m = -2..2), i.e.
+    # B_y = tanh(x - Lx/4) near the first sheet and -tanh(x - 3Lx/4) near the second, up to
+    # O(e^(-Lx)); Psi0 = int B_y dx by FFT (B_y is analytic with zero mean). Unlike the
+    # Harris-like family its local profile has no O(a^2) shape error: the only deviation from
+    # an isolated tanh sheet is the outer-region coupling of the two sheets, ~e^(-k Lx/2).
+    n = len(x)
+    by = -1.0 + sum(np.tanh(x - Lx/4 - m*Lx) - np.tanh(x - 3*Lx/4 - m*Lx) for m in range(-2, 3))
+    kx = 2*np.pi*np.fft.fftfreq(n, d=Lx/n)
+    bh = np.fft.fft(by)
+    ph = np.zeros_like(bh)
+    ph[1:] = bh[1:]/(1j*kx[1:])
+    return np.real(np.fft.ifft(ph))
+
+
 def make_params(S, ka, nx, Lx, a=1.0):
     # eta = a/S: S is the Lundquist number on the sheet half-width a (v_Ay = 1); k = ka/a
     k = ka/a
@@ -292,24 +308,28 @@ def make_params(S, ka, nx, Lx, a=1.0):
                          forcing=False, eqpars={"diss": (0.0, a/S), "hyper": 1})
 
 
-def make_x0(params, case, a=1.0, amp=1.0):
-    # the equilibrium as a fields array: psi = amp*Psi0(x), phi = 0
+def make_x0(params, case, a=1.0, amp=1.0, alpha=0.0):
+    # the equilibrium as a fields array: psi = amp*Psi0(x), phi = alpha*psi (field-aligned
+    # flow, rung 1b-ref; alpha = 0 is rung 1a's static sheet)
     x = np.arange(params.nx)*params.Lx/params.nx
     if case == "sech2":
         p0 = psi0_sech2(x, params.Lx)
     elif case == "harris":
         p0 = psi0_harrislike(x, params.Lx, a)
+    elif case == "tanhpair":
+        p0 = psi0_tanhpair(x, params.Lx)
     elif case == "cosx":                  # examples/tearing-mode-2D, tearing-growth-vs-k
         p0 = np.cos(2*np.pi*x/params.Lx)
     else:
         raise ValueError(case)
     p0 = jnp.asarray(amp*p0).reshape(1, -1, 1)
-    return jr.initialize(lambda X, Y: jnp.stack([0*p0 + 0*Y, p0 + 0*Y]), params).fields
+    return jr.initialize(lambda X, Y: jnp.stack([alpha*p0 + 0*Y, p0 + 0*Y]), params).fields
 
 
 def sheet_index(case, nx):
-    # grid index of the (first) resonant surface: sech^2 at Lx/2, Harris-like/cos x at 0
-    return nx//2 if case == "sech2" else 0
+    # grid index of the (first) resonant surface: sech^2 at Lx/2, tanh pair at Lx/4,
+    # Harris-like/cos x at 0 (the two-sheet cases have their second sheet half a box further)
+    return nx//2 if case == "sech2" else (nx//4 if case == "tanhpair" else 0)
 
 
 # ============================================================ eigen-solves
@@ -329,12 +349,12 @@ def _eigfun(params, idx, v, i0=None):
     return x, psi*ph, phi*ph, d2*ph
 
 
-def dense_spectrum(case, S, ka, nx, Lx, a=1.0, nkeep=16, amp=1.0):
+def dense_spectrum(case, S, ka, nx, Lx, a=1.0, nkeep=16, amp=1.0, alpha=0.0):
     # full spectrum of the ky block (eig_dense); returns a dict with the top nkeep eigenvalues
     # by real part, their residuals, and the leading eigenfunction
     params = make_params(S, ka, nx, Lx, a)
     kg = jr.setup_kgrids(params)
-    x0 = make_x0(params, case, a, amp)
+    x0 = make_x0(params, case, a, amp, alpha)
     t0 = time.time()
     B, idx = st.ky_block_matrix(x0, kg, params, 1)
     r = st.eig_dense(B)
@@ -390,18 +410,19 @@ def band_width(case, Lx, a=1.0):
     # profile's nearest complex singularity is at Im x = asinh(pi a/2) -> w ~ that.
     if case == "cosx":
         return int(np.ceil(Lx/(2*np.pi))) + 2     # cos x couples kx to kx +- 1 only
-    qcut = 21.0 if case == "sech2" else 30.0/np.arcsinh(np.pi*a/2)
+    qcut = 21.0 if case in ("sech2", "tanhpair") else 30.0/np.arcsinh(np.pi*a/2)
     return int(np.ceil(qcut*Lx/(2*np.pi))) + 2
 
 
-def si_solve(case, S, ka, nx, Lx, sigma, a=1.0, k=1, tol=1e-12, amp=1.0, lam_hint=None):
+def si_solve(case, S, ka, nx, Lx, sigma, a=1.0, k=1, tol=1e-12, amp=1.0, lam_hint=None,
+             alpha=0.0):
     # shift-invert about sigma on the matrix-free ky block, band-LU-preconditioned GMRES.
     # The GMRES tolerance is set from the attainable accuracy of a shifted solve, whose
     # relative residual cannot go below ~eps ||J||/|lambda - sigma| (lam_hint: the expected
     # eigenvalue; default |lambda - sigma| ~ 0.03|sigma|).
     params = make_params(S, ka, nx, Lx, a)
     kg = jr.setup_kgrids(params)
-    x0 = make_x0(params, case, a, amp)
+    x0 = make_x0(params, case, a, amp, alpha)
     t0 = time.time()
     op, idx = st.ky_block_operator(x0, kg, params, 1)
     M, nnz, normA = _band_preconditioner(op, idx, nx, sigma, band_width(case, Lx, a))
@@ -414,9 +435,11 @@ def si_solve(case, S, ka, nx, Lx, sigma, a=1.0, k=1, tol=1e-12, amp=1.0, lam_hin
     v = r.right[:, 0]
     rel = np.linalg.norm(op.matvec(v) - r.values[0]*v)/(abs(r.values[0])*np.linalg.norm(v))
     x, psi, phi, d2 = _eigfun(params, idx, v, sheet_index(case, nx))
-    # two-sheet cases: psi(pi)/psi(0) of every returned vector (+1 even, -1 odd about pi/2)
-    ratios = [complex(_eigfun(params, idx, r.right[:, j], 0)[1][nx//2]) for j in range(k)] \
-        if case != "sech2" else [np.nan]*k
+    # two-sheet cases: psi(second sheet)/psi(first sheet) of every returned vector (+1 even,
+    # -1 odd about the midpoint between the sheets)
+    i0 = sheet_index(case, nx)
+    ratios = [complex(_eigfun(params, idx, r.right[:, j], i0)[1][(i0 + nx//2) % nx])
+              for j in range(k)] if case != "sech2" else [np.nan]*k
     return dict(values=r.values, residuals=r.residuals, rel_residual=rel, scale=r.scale,
                 n=len(idx), seconds=time.time() - t0, build_seconds=tb, nnz=nnz,
                 gmres_rtol=gmres_rtol, sheet_ratio=np.asarray(ratios),
@@ -455,7 +478,7 @@ def _save(path, out):
 
 
 def cached(kind, case, S, ka, nx, Lx, sigma=None, a=1.0, amp=1.0, target="lead", root=None,
-           nkeep=16, lam_hint=None, nev=1, attempt=0):
+           nkeep=16, lam_hint=None, nev=1, attempt=0, alpha=0.0):
     # The key is the configuration and the TARGET, not sigma: a target names one eigenvalue.
     # attempt > 0 (a retry with a moved sigma after a rejected pair) gets its own entry.
     # one eigen-solve, computed once and cached as DATA_ROOT/solves/<hash>.npz.
@@ -465,28 +488,41 @@ def cached(kind, case, S, ka, nx, Lx, sigma=None, a=1.0, amp=1.0, target="lead",
     extra_key = {} if nev == 1 else {"nev": nev}
     if attempt:
         extra_key["attempt"] = attempt
+    if alpha:
+        extra_key["alpha"] = float(alpha)       # alpha = 0 keeps rung 1a's keys
     h, txt = _key(kind=kind, case=case, S=S, ka=ka, nx=nx, Lx=Lx, a=a, amp=amp, target=target,
                   **extra_key)
     path = os.path.join(root, "solves", h + ".npz")
     if os.path.exists(path):
         d = np.load(path, allow_pickle=False)
         return {k: d[k] for k in d.files}
+    failed = os.path.join(root, "solves", h + ".failed")
+    if os.path.exists(failed):          # a solve that raised is cached as its message, so a
+        with open(failed) as fh:       # re-read never repeats a failing GMRES/ARPACK run
+            raise RuntimeError(fh.read())
     t0 = time.time()
     if kind == "dense":
-        r = dense_spectrum(case, S, ka, nx, Lx, a, nkeep, amp)
+        r = dense_spectrum(case, S, ka, nx, Lx, a, nkeep, amp, alpha)
         values, residuals, rel = r["values"], r["residuals"], np.nan
         extra = dict(n_pos=int(np.sum(r["all_values"].real > 1e-10*r["scale"])))
     else:
-        r = si_solve(case, S, ka, nx, Lx, sigma, a, k=nev, amp=amp, lam_hint=lam_hint)
+        try:
+            r = si_solve(case, S, ka, nx, Lx, sigma, a, k=nev, amp=amp, lam_hint=lam_hint,
+                         alpha=alpha)
+        except RuntimeError as e:
+            with open(failed, "w") as fh:
+                fh.write(f"(cached failure) {e}")
+            raise
         values, residuals, rel = r["values"], r["residuals"], r["rel_residual"]
         extra = dict(sigma=complex(sigma), nnz=r["nnz"], build_seconds=r["build_seconds"],
                      solves=r["stats"]["solves"], gmres_iters=r["stats"]["gmres_iters"],
                      gmres_rtol=r["gmres_rtol"], sheet_ratio=r["sheet_ratio"])
     i0 = sheet_index(case, nx)
     prof = _profile(r["x"], r["psi"], r["phi"], r["d2"], i0, Lx,
-                    half=1.5 if case == "sech2" else (0.6 if case == "harris" else 1.0))
+                    half=1.5 if case in ("sech2", "tanhpair") else
+                    (0.6 if case == "harris" else 1.0))
     width = width_quarter(prof["xn"], prof["d2n"])
-    out = dict(cfg=txt, kind=kind, case=case, S=S, ka=ka, nx=nx, Lx=Lx, a=a, amp=amp,
+    out = dict(cfg=txt, kind=kind, case=case, S=S, ka=ka, nx=nx, Lx=Lx, a=a, amp=amp, alpha=alpha,
                target=target, values=np.asarray(values), residuals=np.asarray(residuals),
                rel_residual=rel, scale=r["scale"], n=r["n"], seconds=time.time() - t0,
                width=width, **prof, **extra)
@@ -504,7 +540,7 @@ def _accept(lam, target, sigma):
 
 
 def ladder(case, S, ka, Lx, nx0, sigma0, nxcap=32768, target="tearing", a=1.0, amp=1.0,
-           tol=1e-7, root=None, log=print, nev=1):
+           tol=1e-7, root=None, log=print, nev=1, alpha=0.0):
     # shift-invert at nx0, 2 nx0, ... (sigma continued from the previous rung, 10% above it)
     # until successive eigenvalues agree to tol (relative) or nx passes nxcap. Returns a dict:
     # the rung eigenvalues, the final value, its convergence error |lam_N - lam_{N-1}|, the
@@ -517,7 +553,7 @@ def ladder(case, S, ka, Lx, nx0, sigma0, nxcap=32768, target="tearing", a=1.0, a
             sig = sigma + off*abs(sigma)
             try:
                 rec = cached("si", case, S, ka, nx, Lx, sig, a, amp, target, root,
-                             lam_hint=hint, nev=nev, attempt=attempt)
+                             lam_hint=hint, nev=nev, attempt=attempt, alpha=alpha)
             except RuntimeError as e:
                 log(f"    si failed at nx={nx}, sigma={sig:.4g}: {str(e)[:120]}")
                 continue
@@ -546,7 +582,7 @@ def ladder(case, S, ka, Lx, nx0, sigma0, nxcap=32768, target="tearing", a=1.0, a
     err = abs(rungs[-1][1] - rungs[-2][1]) if len(rungs) >= 2 else np.inf
     return dict(ok=True, nx=[r[0] for r in rungs], lam=[r[1] for r in rungs],
                 value=rungs[-1][1], err=err, converged=err <= tol*abs(rungs[-1][1]),
-                rec=recs[-1])
+                rec=recs[-1], vals=[r["values"] for r in recs])
 
 
 # ============================================================ configurations
