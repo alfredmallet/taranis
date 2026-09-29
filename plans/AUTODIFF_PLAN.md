@@ -208,6 +208,21 @@ Protocol:
 
 Deliverable: `examples/tearing-eigen.ipynb` (1a + 1b).
 
+**Outcome (2026-09-29): `examples/tearing-shear-eigen.ipynb` +
+`examples/tearing_shear_run.py`, gate `tests/test_tearing_shear.py`.** Same pencil as the Julia
+code, term for term; the spectrum is even in α (2e-14). sech²: 90/90 points agree (rel.diff
+5e-8–1.1e-4, ≤0.21 of the reference's bar). tanh: the plan's Harris-like family carries an
+O(a²) shape error in Δ′ (up to 1.6e-2) that shows in γ, so it was replaced by an exact-tanh
+sheet PAIR compared by its mean (image coupling antisymmetric → mean exact to 1e-11); 30/30
+unstable points agree (0.00–0.42 bars), 6 stable points have no growing mode. Where the codes
+differ, the Julia x_lim = 10 outer box is the error (re-running it at x_lim = 40 moves it onto
+taranis). Dense spectra: the `:SR` selection never missed the fastest mode in the window. The
+cost of tanh at α = 0.8 is set by an ideal Doppler-shifted Alfvén resonance, not the resistive
+layer (sech² converges at far fewer points per resonance distance — cause open): it needs nx = 65536 at S ≥ 1e4 in a reduced box Lx = max(20/k, 40). Review 2026-09-29
+found the S = 1e4, α = 0.8 tanh rows under-resolved at the old 16384 cap; rerun, now converged
+to ≤2e-8. Open: S = 1e5, ka = 0.7, α = 0.8 is not ladder-converged at 65536 (last change 2.6e-4).
+Paper trends hold: γ_max(α)/γ_max(0) = 0.955, 0.80, 0.58, 0.28 (α = 0.3–0.95), k_max grows with α.
+
 ## Rung 1b — eigenvalue sensitivities and marginal curves
 
 For a simple eigenvalue λ with right v and left w (Jᴴw = λ̄w):
@@ -226,6 +241,33 @@ and the sheet width a. Targets:
   Harris). The headline validation of the sensitivity machinery.
 - Non-normality diagnostic: |wᴴv| (the eigenvalue condition number) vs α — shear makes J
   strongly non-normal; report where the eigenvalue becomes ill-conditioned.
+
+**Rung 1b machinery landed (2026-09-28).**
+`stability.djvp_operator` / `dj_operator` / `dj_matrix` (dJ/ds along dx₀, forward-over-forward,
+fields / mode block / real coords; block invariance of dx₀ asserted), `left_eigenvector`
+(shift_invert on Jᴴ, match-checked), `eigenvalue_sensitivity` (dλ/ds, κ, refusal when
+κ·δ/gap > 1e-3 or residuals > 1e-8). Gates `tests/test_stability_sensitivity.py`: dJ vs FD
+exact for RMHD/GDI, O(h²) for CMHD; sech² shear tearing (α = 0.8, 48 points, S = 50) dγ/dα =
+−0.2391 vs eigenvalue FD at O(h²) (err 1.4e-7 at h = 1e-3), κ = 3.7 — mild non-normality at
+this S, but the right-vector-only formula is already 0.21 off; CMHD uniform state dλ along
+dB₀, du₀, dρ₀ against the hand-differentiated closed form to 5e-15. Findings: the default
+left-solve offset had to be 1e-3·‖J‖ (at 1e-6 unpreconditioned GMRES stalls above
+rtol 1e-12); a real ky-block eigenvalue is exactly double in real coordinates, so
+sensitivities of 1D equilibria belong in the ky block.
+
+**Rung 1b science (2026-09-29): `examples/tearing-sensitivity.ipynb` +
+`examples/tearing_sensitivity_run.py`, gate `tests/test_tearing_sensitivity.py`.** dγ/dα vs
+eigenvalue FD at O(h²) (orders 1.83–2.007) up to S = 1e5, α = 0.99. Running exponents
+d lnγ/d ln(1−α²): constant-ψ reaches 1/2 (0.496 at S = 1e6); nonconstant-ψ (ka = 0.1) plateaus
+at 0.51, 0.61, 0.646 (the last not grid-checked) for S = 1e3, 1e4, 1e5, rising toward 2/3; every curve leaves its asymptote
+once δ_in/a ≳ 0.1–0.2 (S ≤ 1e4; at S ≥ 1e5 the curves are cut by refusals first). Ridge: p_ridge crosses 4/7 and peaks at ≈0.59, falling with S (consistent
+with 4/7 from above); integrated it reproduces 1b-ref's γ_max ratios to ≤3e-3. Marginal curve:
+Newton in the sheet width is LINEAR (ratio 0.750) because the root has multiplicity 4
+(γ ∝ SΔ′⁴ in the suppression band); with the measured multiplicity it lands on ka* = √5
+(S = 1e3; to a few ×1e-6 — the last digits are estimator-dependent), so the plan's "second derivative by forward-over-forward" was not needed. κ runs from
+~10 to >1e6 as α → 1 and S grows; the right-vector-only formula is off by 10–70× at ka = 0.1 and
+wrong in sign at small α for ka ≥ 1. Limit: the harness refuses (κδ/gap > 1e-3) at ka ≥ 1,
+1−α² ≲ 4e-3, S = 1e5 — the inner GMRES stalls at δ ~ 1e-11, not the formula.
 
 ## Rung 2 — physics parameters and k via an overrides seam (unchanged design + k)
 
@@ -302,6 +344,6 @@ controlled statistical-sensitivity estimator in plasma turbulence.
    spectrum of it as "fastest mode" there).
 3. Rung 0b (general machinery + generality gates), review.
 4. Rung 1a notebook (no-shear tearing vs exact theory), then 1b (shear vs Julia
-   reference), then rung 1b sensitivities.
+   reference), then rung 1b sensitivities — DONE 2026-09-29.
 4. Overrides seam + reference gate; rung 2 targets.
 5. Rung 2b items; λ₁/m notebook; 3a; 3b.

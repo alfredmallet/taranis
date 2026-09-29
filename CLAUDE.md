@@ -748,7 +748,7 @@ Derivation and conventions: docs/numerics.md "Test particles". Rules:
 - Not yet: the 3D production run, and z-decomposed (multi-rank) particles — designs for the
   latter are in plans/TESTPART_PLAN.md §4, neither is built.
 
-### Linear stability harness (`taranis/stability.py`, plans/AUTODIFF_PLAN.md — rungs 0/0b landed 2026-09-28)
+### Linear stability harness (`taranis/stability.py`, plans/AUTODIFF_PLAN.md — rungs 0/0b landed 2026-09-28, rung 1b machinery 2026-09-28)
 
 Read-only consumer of the solver (imports physics; nothing imports it). Rules:
 
@@ -775,10 +775,27 @@ Read-only consumer of the solver (imports physics; nothing imports it). Rules:
   cluster of strongly 2D x₀ — there use `propagator_eigs`.
 - Single-start Krylov lists an exactly degenerate eigenvalue once (the two k = 0 means;
   ±kz pairs of a z-independent x₀ — warned; pass `iz` to split them).
+- **Sensitivities (rung 1b)**: `djvp_operator`/`dj_operator`/`dj_matrix(x0, dx0, ...)` give
+  dJ/ds along a state direction dx₀ (forward-over-forward jvp of N — L has no x₀), same
+  spaces and row order as J; a mode block asserts the invariance of dx₀ as well as x₀.
+  `eigenvalue_sensitivity(J, dJ, λ, v, w, *, spectrum)` → dλ/ds = wᴴdJv/wᴴv (w: J^H w = λ̄w,
+  `EigResult.left`) plus κ = ‖w‖‖v‖/|wᴴv|; it raises on a right/left residual > 1e-8 (refine
+  propagator pairs first), on wᴴv at round-off, and when κ·δ/gap > 1e-3 (δ the pair's
+  backward error, gap from `spectrum`, which must contain λ and another value — `[λ]` alone
+  is a ValueError, `()` the only opt-out; a partial Krylov spectrum can list a multiple λ once) —
+  defective and semisimple-multiple eigenvalues (e.g. a real ky-block λ, doubled in real
+  coords) are refused, never differentiated. `left_eigenvector(J, λ)` = `shift_invert` on
+  J^H at σ̄ (default offset 1e-3·max(|λ|, scale); raises when the eigenvalue found is not λ).
+  Only parameters entering through x₀ (α, sheet width, amplitude); η, ν, k are rung 2.
 - Gates: `tests/test_stability.py` (FD, x₀=0 ⇒ J=L entrywise incl. 3D, hand Fourier
   transcriptions of the RMHD and GDI linearizations), `tests/test_stability_general.py`
   (CMHD uniform-state exact waves, GDI dispersion, propagator vs dense at dt⁴, branch/alias,
-  loud defaults). The shear-tearing reference (`tests/_gen_shear_tearing_reference.py`,
+  loud defaults), `tests/test_stability_sensitivity.py` (dJ FD gate, dλ/dα vs eigenvalue
+  FD at O(h²), EXACT CMHD uniform-state dλ along dB₀/du₀/dρ₀, left vectors, refusals);
+  the rung-1b notebooks' own helpers (`examples/tearing_{shear,sensitivity}_run.py`) are gated by
+  `tests/test_tearing_shear.py`/`test_tearing_sensitivity.py`, which import them. Conjugation
+  (wᴴ vs wᵀ) is invisible at a real tearing λ — only the CMHD complex-wave gates catch it.
+  The shear-tearing reference (`tests/_gen_shear_tearing_reference.py`,
   `tests/data/shear_tearing_reference.npz`, force-added) is Alfred's Julia eigencode — never
   regenerate to make a comparison pass; at S=1e12, ka ≲ 1e-2 its dense spectrum has a
   spurious eps-proportional mode above tearing (irrelevant in the 1e3–1e5 window).
