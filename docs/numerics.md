@@ -1272,6 +1272,27 @@ params.json, so the differing-record check blocks cross-mode restarts; `initiali
 user function must return s in field 0 in this mode (document at the helper). No
 migration of old snapshots — a log-converter is trivial if ever wanted.
 
+## Linear stability: parameter derivatives (`taranis/overrides.py`, AUTODIFF rung 2)
+
+The harness linearizes `dt f = L(p) f + N(f; p)` and differentiates J with respect to a
+continuous parameter p by forward-over-forward jvp through `grids.setup_kgrids(params,
+overrides=p)` — so the tangent reaches L (`kgrid.lin`), the wavenumbers N reads, and the
+coefficients at the RHS read sites (`cs0`, the FD-z `dz`) in one pass. Two conventions:
+
+- **A box length moves k with the state held in Fourier space.** x₀ is its coefficient
+  array; changing Lx rescales every kx = 2π·ikx/Lx and leaves the coefficients alone, i.e.
+  x₀ is stretched with the box. That is the derivative of the *family* of states "same
+  profile per grid index", not of a fixed physical profile x₀(x): for the latter, add the
+  state direction dx₀ = ∂x₀/∂L (a combined `dx0` + `dparams` direction; dJ is linear in the
+  direction, so the two parts add).
+- **A mode block is an index.** Block iky has ky = 2π·iky/Ly, so at fixed iky
+  d/dk = (dLy/dk) d/dLy with Ly = 2π·iky/k: `dparams={"Ly": -Ly/k}`. The dealias-kept set
+  is index space (independent of L), so the block's rows do not change along the direction.
+
+Under FD-z, `Lz` enters through the stencil's dz = Lz/nz: the first-derivative part of J
+scales as 1/Lz, while the filter `z_diss·(dz/2)⁴·∂_z⁴` is Lz-free (= z_diss·S₄/16), so at
+x₀ = 0 dJ/dLz = −(the cross-field ∂_z part of J)/Lz exactly (a gate).
+
 ## Reading 2D MHD results
 
 Energy cascades **forward** in 2D MHD — the opposite of 2D hydrodynamics' inverse cascade

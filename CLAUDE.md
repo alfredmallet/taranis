@@ -82,7 +82,7 @@ docs/numerics.md; tests: `tests/test_z_spectral.py`.
 `params.save(snap_path)` records constructor args + precision to `params.json`; identical
 re-save is a no-op, a differing existing record is a hard error. **Collective under
 MPI** — never call from a subset of ranks. `Parameters.from_snapshot(snap_path,
-**overrides)` re-runs `__init__`; overrides win, unknown keys warn, precision mismatch
+**changes)` re-runs `__init__`; changes win, unknown keys warn, precision mismatch
 warns. Both are explicit calls — nothing writes params.json automatically.
 
 `Parameters` (`config.py`) is **not a pytree**. It is only closed over or passed static,
@@ -748,7 +748,7 @@ Derivation and conventions: docs/numerics.md "Test particles". Rules:
 - Not yet: the 3D production run, and z-decomposed (multi-rank) particles — designs for the
   latter are in plans/TESTPART_PLAN.md §4, neither is built.
 
-### Linear stability harness (`taranis/stability.py`, plans/AUTODIFF_PLAN.md — rungs 0/0b landed 2026-09-28, rung 1b machinery 2026-09-28)
+### Linear stability harness (`taranis/stability.py`, plans/AUTODIFF_PLAN.md — rungs 0/0b landed 2026-09-28, rung 1b machinery 2026-09-28, rung 2 overrides seam 2026-09-29)
 
 Read-only consumer of the solver (imports physics; nothing imports it). Rules:
 
@@ -786,12 +786,46 @@ Read-only consumer of the solver (imports physics; nothing imports it). Rules:
   defective and semisimple-multiple eigenvalues (e.g. a real ky-block λ, doubled in real
   coords) are refused, never differentiated. `left_eigenvector(J, λ)` = `shift_invert` on
   J^H at σ̄ (default offset 1e-3·max(|λ|, scale); raises when the eigenvalue found is not λ).
-  Only parameters entering through x₀ (α, sheet width, amplitude); η, ν, k are rung 2.
+  A pure state direction covers parameters entering through x₀ (α, sheet width,
+  amplitude); physics parameters and k are the rung-2 `dparams` below.
+- **Overrides seam (rung 2, `taranis/overrides.py`)**: continuous parameters at a point
+  other than the `Parameters`' own, for the harness ONLY. `setup_kgrids(params,
+  overrides={key: value})` rebuilds k/ksq/inv_ksq/`lin` from the values (possibly traced) and
+  stores the validated dict in `K_Grids.overrides` (None everywhere in the solver). **Every
+  read site of an overridable key reads it through `overrides.getp(params,
+  kgrid.overrides, key)` inside a plain python `if kgrid.overrides is not None:` branch**, so
+  `overrides=None` is literally today's graph (refactor reference + gate 6 are the proof —
+  never restructure the None branch). Keys (`overrides.overridable(params)`): Lx, Ly, Lz
+  (3D; kz under z_spectral, the stencil dz under FD-z), RMHD `diss` (scalar/pair),
+  `z_diss_k` (z_spectral), `z_diss` (FD-z); GDI `Ln nu_in v0 gpar_fac diss`, `D_par` (3D);
+  CMHD `cs0`, `diss` (scalar/triple). Anything that sets a shape or a trace-time branch
+  (`hyper`, `gamma`, `density_var`, dims, nx…) or does not enter J is STATIC by
+  construction: naming it, an unknown key, a key dead in this configuration, a complex /
+  non-finite value, a bad shape or a non-positive length/cs0 is a ValueError. Values are
+  cast to `_precision.ftype`. The RMHD z_spectral backend follows the diss override's SHAPE
+  (scalar → separable, pair → putzer2). A new read site of a listed key MUST go through
+  `getp` (the gate file's independent-route check — J at overrides == J of a `Parameters`
+  built with those values — is what catches a missed one). `run.py`'s
+  `block_of_steps`/`simulate`/`simulate_scan` reject an overridden kgrid; forcing and
+  `comm_backend="jax"` are rejected by `setup_kgrids(overrides=)`. Every stability operator/
+  solver takes `overrides=` (with the PLAIN kgrid — an already-overridden kgrid plus
+  `overrides=` is refused; an overridden kgrid with `overrides=None` is its point).
+  `djvp_operator`/`dj_operator`/`dj_matrix(..., dparams={key: tangent}, overrides=)`:
+  dJ/ds with J(s) at (x₀ + s·dx₀, p + s·dp), forward-over-forward through
+  `setup_kgrids` (dx0=None: a pure parameter direction; a scalar point against a pair
+  direction is broadcast). A box length moves k in L AND N with x₀'s Fourier coefficients
+  held fixed; a mode block is an INDEX, so **d/dk of block iky is `dparams={"Ly": -Ly/k}`**.
+  `Parameters.save(dir, overrides=)` stamps `_overrides` in params.json (compared like any
+  key: a directory is one point), `Parameters.load_overrides(dir)` reads it back,
+  `from_snapshot` warns and never folds it in.
 - Gates: `tests/test_stability.py` (FD, x₀=0 ⇒ J=L entrywise incl. 3D, hand Fourier
   transcriptions of the RMHD and GDI linearizations), `tests/test_stability_general.py`
   (CMHD uniform-state exact waves, GDI dispersion, propagator vs dense at dt⁴, branch/alias,
   loud defaults), `tests/test_stability_sensitivity.py` (dJ FD gate, dλ/dα vs eigenvalue
-  FD at O(h²), EXACT CMHD uniform-state dλ along dB₀/du₀/dρ₀, left vectors, refusals);
+  FD at O(h²), EXACT CMHD uniform-state dλ along dB₀/du₀/dρ₀, left vectors, refusals),
+  `tests/test_stability_overrides.py` (rung 2: static point == None, independent route,
+  dJ/dp vs FD for every live key in 9 configurations, exact x₀=0 and closed-form
+  dispersion dλ/dp, tearing dγ/dη and dγ/dk, rejections, save round trip, fp32 dtypes);
   the rung-1b notebooks' own helpers (`examples/tearing_{shear,sensitivity}_run.py`) are gated by
   `tests/test_tearing_shear.py`/`test_tearing_sensitivity.py`, which import them. Conjugation
   (wᴴ vs wᵀ) is invisible at a real tearing λ — only the CMHD complex-wave gates catch it.

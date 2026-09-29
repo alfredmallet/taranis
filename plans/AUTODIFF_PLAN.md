@@ -288,6 +288,29 @@ Coppi 1/3 crossover without a sweep); **k_max by Newton on ∂γ/∂k = 0** — 
 k_max(α), k_max(S) curves replacing the paper's grid-scanned (jagged) figs 3–4, and the
 S^{−3/7}, S^{−1/7} scalings (eq 8.1, 5.13) inside our S window.
 
+**Rung 2 machinery landed (2026-09-29); the science targets are NEXT.** Decision on k: a
+traced-Ly kgrid builder — `grids.setup_kgrids(params, overrides=...)` is still the only
+kgrid constructor and takes traced values; no notebook-local construction. `taranis/overrides.py`
+(key table per eqtype, `getp`, `validate`, `to_record`), `K_Grids.overrides`, read sites in
+rmhd (`linear_matrix`, `FDLinearTerm` via `z_derivatives(dz=)`), gdi (`linear_matrix`), cmhd
+(`linear_matrix`, `cs0` in `NonlinearTerm`); `propagators.build` skips the Hermitian VALUE
+checks on a traced L; `run.py` rejects an overridden kgrid; `Parameters.save(overrides=)` /
+`load_overrides` / `from_snapshot` warning; `overrides=` on every stability operator and
+solver, `dparams=` on `djvp_operator`/`dj_operator`/`dj_matrix`. d/dk of block iky =
+`dparams={"Ly": -Ly/k}`. Gates `tests/test_stability_overrides.py` (details in CLAUDE.md):
+J at the static point is bitwise J(None) everywhere except FD-z (1.5e-16: python-float vs
+XLA dz arithmetic); J at a moved point == J of a `Parameters` built there (0.0 at fp64);
+dJ/dp vs FD for every live key in RMHD 2D (block + real coords), 3D FD-z, z_spectral
+separable and putzer2, GDI 2D/3D, CMHD rho (γ=1) / lnrho (γ=5/3) — order 2.00 or round-off
+for affine keys; exact x₀ = 0 derivatives of L; dλ/dp against closed-form dispersion
+relations (Alfvén, GDI eq 3.7, CMHD fast/slow/Alfvén) to ≤1.4e-9; tearing (S = 50, α = 0.8)
+dγ/dη = 1.910, dγ/dν = −2.176, dγ/dk = 0.0147 vs eigenvalue FD at O(h²). Mutation-tested
+(record in the implementer's report). Refactor reference and gate 6 unchanged (None graph).
+
+Next (not started): dγ/dη → dlnγ/dlnS along the dispersion curve (FKR 3/5 → Coppi 1/3
+without a sweep), and k_max by Newton on ∂γ/∂k = 0 (∂²γ/∂k² by FD of the dλ/dk, or a
+second forward pass) — smooth k_max(α), k_max(S), the S^{−3/7}, S^{−1/7} scalings.
+
 ## Rung 2b — new science (each its own notebook; order open)
 
 1. **Viscosity** (the paper's stated future work): γ(Pm, α, k), `diss=(ν, η)`.
@@ -345,5 +368,5 @@ controlled statistical-sensitivity estimator in plasma turbulence.
 3. Rung 0b (general machinery + generality gates), review.
 4. Rung 1a notebook (no-shear tearing vs exact theory), then 1b (shear vs Julia
    reference), then rung 1b sensitivities — DONE 2026-09-29.
-4. Overrides seam + reference gate; rung 2 targets.
+4. Overrides seam + reference gate — machinery DONE 2026-09-29; rung 2 targets next.
 5. Rung 2b items; λ₁/m notebook; 3a; 3b.
