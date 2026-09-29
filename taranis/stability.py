@@ -29,6 +29,11 @@
 # or GMRES with an optional preconditioner factory -- diagonal_preconditioner,
 # ky_averaged_preconditioner), and propagator_eigs, the default for the FASTEST-GROWING modes
 # of a general x0: ARPACK on v -> exp(J T) v, integrated by the solver's own stepper.
+#
+# Sensitivities (rung 1b): dj_operator / dj_matrix give dJ/ds along a direction dx0 of the
+# state (forward-over-forward: L does not depend on x0), left_eigenvector gives w by
+# shift-invert on J^H, and eigenvalue_sensitivity gives dlambda/ds = w^H dJ v / w^H v with its
+# condition number, refusing a non-simple or numerically unisolated eigenvalue.
 import functools
 import time
 import warnings
@@ -196,19 +201,20 @@ def _nonzero_content(a, axis):
     return float(np.max(np.abs(np.take(a, np.arange(1, a.shape[axis]), axis=axis)))), tol, scale
 
 
-def _assert_invariant(x0, ikx=None, iz=None):
+def _assert_invariant(x0, ikx=None, iz=None, name="x0"):
     # a block needs x0 invariant along y, plus x when ikx is fixed and z (kz axis) when iz is:
-    # x0 may then carry only the zero wavenumber along each of those axes
+    # x0 may then carry only the zero wavenumber along each of those axes (`name` labels the
+    # array in the message: dj_matrix asserts the direction dx0 too)
     a = np.asarray(x0)
-    for name, axis, fixed in (("ky", 3, True), ("kx", 2, ikx is not None),
-                              ("kz", 1, iz is not None)):
+    for k, axis, fixed in (("ky", 3, True), ("kx", 2, ikx is not None),
+                           ("kz", 1, iz is not None)):
         if not fixed:
             continue
         worst, tol, scale = _nonzero_content(a, axis)
         if worst > tol:
-            raise ValueError(f"stability: this block needs a {name}-independent x0 (J is "
-                             f"then block-diagonal in {name}); x0's {name} != 0 content is "
-                             f"{worst:.3e} against max |x0| = {scale:.3e}")
+            raise ValueError(f"stability: this block needs a {k}-independent {name} (J is "
+                             f"then block-diagonal in {k}); {name}'s {k} != 0 content is "
+                             f"{worst:.3e} against max |{name}| = {scale:.3e}")
 
 
 # Index arrays ride into the compiled functions as TRACED arguments, so one compile per
@@ -1053,3 +1059,276 @@ class KyAveragedPreconditioner:
 def ky_averaged_preconditioner(x0, kgrid, params, coords=None, chunk=None):
     # KyAveragedPreconditioner(x0, ...): the factory, blocks built once for every sigma
     return KyAveragedPreconditioner(x0, kgrid, params, coords=coords, chunk=chunk)
+
+
+# ---------------------------------------------------------------- rung 1b: sensitivities
+# Parameters that enter through the STATE only: x0(p), so dJ/dp = dJ/ds along dx0 = dx0/dp
+# (for shear tearing, Phi0 = alpha Psi0 gives dx0/dalpha = (Psi0 in phi, 0 in psi); a sheet
+# width or an amplitude likewise). Physics parameters (eta, nu, ...) and the wavenumber k
+# enter L, the kgrid or the RHS coefficients, not x0 -- they are rung 2 (the overrides seam)
+# and out of scope here.
+
+
+def _djacobian_action(params):
+    # (x0, dx0, v, kgrid) -> (dJ/ds) v, J(s) = J at x0 + s dx0. L does not depend on x0, so
+    # this is N's mixed second derivative d2N[x0](dx0, v): forward-over-forward, the jvp in x0
+    # (tangent dx0) of the jvp in the state (tangent v)
+    N = _nonlinear(params)
+
+    def djv(x0, dx0, v, kgrid):
+        def nv(f):
+            return jax.jvp(lambda g: N(g, kgrid), (f,), (v,))[1]
+        return jax.jvp(nv, (x0,), (dx0,))[1].astype(_precision.ctype)
+    return djv
+
+
+@functools.lru_cache(maxsize=32)
+def _dspace_fns(params, kind):
+    # compiled dJ maps of one (Parameters, space kind): (mv, probe), both taking
+    # (..., x0, dx0, kgrid, args); kind as in _space_fns
+    djv = _djacobian_action(params)
+    fns = _space_fns(params, kind)
+    embed, gather, dt = fns.embed, fns.gather, fns.dtype
+
+    def act(u, x0, dx0, kgrid, args):
+        return gather(djv(x0, dx0, embed(u, args), kgrid), args)
+
+    def probe(cols, x0, dx0, kgrid, args):
+        n = _space_size(kind, args)
+        return jax.vmap(lambda j: act(jax.nn.one_hot(j, n, dtype=dt), x0, dx0, kgrid,
+                                      args))(cols)
+    return jax.jit(act), jax.jit(probe)
+
+
+@functools.lru_cache(maxsize=16)
+def _jitted_dj(params):
+    return jax.jit(_djacobian_action(params))
+
+
+def djvp_operator(x0, dx0, kgrid, params):
+    # matrix-free v -> (dJ/ds) v on the fields array, J(s) = J at x0 + s dx0 (x0, dx0 fields
+    # arrays or states; dx0 is the transform of a REAL field, like x0). Real-linear in v, as J
+    # is on this space.
+    _check_supported(params)
+    x0, dx0 = _fields(x0, params), _fields(dx0, params)
+    djv = _jitted_dj(params)
+    return lambda v: djv(x0, dx0, jnp.asarray(v, dtype=_precision.ctype), kgrid)
+
+
+def _dj_space(x0, dx0, kgrid, params, iky, ikx, iz, coords):
+    # the space, with the invariance of BOTH x0 and dx0 asserted for a mode block: dJ is
+    # block-diagonal (and complex-linear on a block) only when J(s) is for every s
+    _check_supported(params)
+    x0, dx0 = _fields(x0, params), _fields(dx0, params)
+    sp = _space(x0, kgrid, params, iky, ikx, iz, coords)
+    if sp.kind == "block":
+        _assert_invariant(dx0, ikx, iz, name="dx0")
+    return x0, dx0, sp
+
+
+def dj_operator(x0, dx0, kgrid, params, *, iky=None, ikx=None, iz=None, coords=None):
+    """dJ/ds along dx0 as a scipy LinearOperator (matvec only) in the mode block (iky [, ikx,
+    iz]; x0 AND dx0 invariance asserted) or, with iky None, the real coordinates. Same row /
+    column order as ky_block_matrix / real_matrix. Returns (op, index)."""
+    x0, dx0, sp = _dj_space(x0, dx0, kgrid, params, iky, ikx, iz, coords)
+    mv, _ = _dspace_fns(params, sp.kind)
+    jdt = _space_fns(params, sp.kind).dtype
+
+    def apply(u):
+        u = np.asarray(u).reshape(-1)
+        return np.array(mv(jnp.asarray(u, dtype=jdt), x0, dx0, kgrid, sp.args), dtype=sp.np_dtype)
+    return spla.LinearOperator((sp.n, sp.n), matvec=apply, dtype=sp.np_dtype), sp.index
+
+
+def dj_matrix(x0, dx0, kgrid, params, *, iky=None, ikx=None, iz=None, coords=None, chunk=None):
+    """Dense dJ/ds along dx0 in the mode block or the real coordinates (as dj_operator), one
+    forward-over-forward jvp per basis vector. Returns (dJ, index): complex128 on a block,
+    float64 in real coordinates."""
+    x0, dx0, sp = _dj_space(x0, dx0, kgrid, params, iky, ikx, iz, coords)
+    _, probe = _dspace_fns(params, sp.kind)
+    M = _dense_from_probes(lambda cols: probe(cols, x0, dx0, kgrid, sp.args), sp.n,
+                           min(_probe_chunk(params, chunk), sp.n), sp.np_dtype)
+    return M, sp.index
+
+
+# ---- left eigenvectors and eigenvalue sensitivities (host side: dense arrays or scipy
+# LinearOperators -- a real one, real_operator, is complexified; its adjoint is J^T)
+
+def _complexify_rmv(op):
+    # J^H on complex vectors: rmatvec, complexified for a real operator (J^H = J^T)
+    if np.issubdtype(op.dtype, np.complexfloating):
+        return op.rmatvec
+
+    def rmv(z):
+        z = np.asarray(z).reshape(-1)
+        return op.rmatvec(z.real) + 1j*op.rmatvec(z.imag)
+    return rmv
+
+
+def _maps(J):
+    # (J z, J^H z, scale) for a dense array or a LinearOperator; scale as in shift_invert
+    if isinstance(J, np.ndarray):
+        return (lambda z: J @ z), (lambda z: J.conj().T @ z), _dense_norm(J)
+    mv = _complexify(J)
+    return mv, _complexify_rmv(J), _probe_norm(mv, J.shape[0])
+
+
+def _apply_any(A, z):
+    if isinstance(A, np.ndarray):
+        return A @ z
+    if isinstance(A, spla.LinearOperator):
+        return _complexify(A)(z)
+    return np.asarray(A(z))
+
+
+class LeftEig(NamedTuple):
+    value: complex           # the eigenvalue of J (the conjugate of the adjoint's)
+    left: np.ndarray         # unit w with J^H w = conj(value) w
+    residual: float          # ||J^H w - conj(value) w|| / (max(|value|, scale) ||w||)
+    scale: float
+    stats: Optional[dict] = None
+
+
+# default offset of left_eigenvector's shift from lam, relative to max(|lam|, scale): close
+# enough that the target is usually the eigenvalue nearest the shift (and a miss raises), far
+# enough that the shifted GMRES solves stay regular -- at 1e-6 they stall above rtol = 1e-12
+# (attainable residual ~ eps cond(J^H - sigma)), measured on the sech^2 shear-tearing block
+_LEFT_OFFSET = 1e-3
+
+
+def left_eigenvector(J, lam, *, sigma=None, match_tol=1e-6, **kwargs):
+    """The left eigenvector w of J for the eigenvalue near lam (J^H w = conj(lam) w, the
+    EigResult.left convention), by shift_invert on the adjoint J^H at conj(sigma).
+
+    J is a dense array or a LinearOperator with rmatvec (ky_block_operator: J^H; real_operator:
+    J^T, the adjoint of a real matrix). sigma defaults to lam + 1e-3 max(|lam|, ||J||) e^(i
+    pi/4); pass one nearer lam when another eigenvalue is that close (a miss raises, below).
+    kwargs go to shift_invert (k defaults to 1; tol, restart, M, ...). lam may be approximate
+    (e.g. from propagator_eigs, to ~match_tol): the returned value is the adjoint solve's.
+    Residual-gated by shift_invert (it raises rather than return a wrong pair), which also
+    raises when unpreconditioned GMRES stalls that close to a clustered spectrum. Raises
+    RuntimeError when the eigenvalue found is not lam, |value - lam| > match_tol max(|lam|,
+    scale): another eigenvalue is nearer sigma. Returns a LeftEig (value, unit w, residual).
+    """
+    lam = complex(lam)
+    if isinstance(J, np.ndarray):
+        A = np.ascontiguousarray(J.conj().T)
+        scale = _dense_norm(J)
+    else:
+        A = spla.LinearOperator(J.shape, matvec=J.rmatvec, rmatvec=J.matvec, dtype=J.dtype)
+        scale = _probe_norm(_complexify(J), J.shape[0])
+    if sigma is None:
+        sigma = lam + _LEFT_OFFSET*max(abs(lam), scale)*np.exp(0.25j*np.pi)
+    kwargs.setdefault("k", 1)
+    res = shift_invert(A, np.conj(complex(sigma)), **kwargs)
+    value = complex(np.conj(res.values[0]))
+    if not abs(value - lam) <= match_tol*max(abs(lam), res.scale):
+        raise RuntimeError(
+            f"stability.left_eigenvector: the adjoint eigenvalue nearest conj(sigma) is the "
+            f"conjugate of {value}, not lam = {lam} (|difference| {abs(value - lam):.3e} over "
+            f"match_tol={match_tol:g} x {max(abs(lam), res.scale):.3e}): another eigenvalue of "
+            f"J is nearer sigma = {complex(sigma)}; pass a sigma closer to lam")
+    w = res.right[:, 0]
+    return LeftEig(value, w/np.linalg.norm(w), float(res.residuals[0]), res.scale, res.stats)
+
+
+class Sensitivity(NamedTuple):
+    dlam: complex            # dlambda/ds = w^H dJ v / w^H v
+    kappa: float             # eigenvalue condition number ||w|| ||v|| / |w^H v| (>= 1)
+    wv: complex              # w^H v for unit v, w
+    gap: float               # distance to the nearest OTHER value of `spectrum` (inf: opted out)
+    rel_err: float           # kappa delta / gap (delta: the pair's backward error), refused
+    #                          above max_rel_err
+    residual_right: float    # ||J v - lambda v|| / (max(|lambda|, scale) ||v||)
+    residual_left: float     # ||J^H w - conj(lambda) w|| / (max(|lambda|, scale) ||w||)
+    scale: float             # the ||J|| estimate (as shift_invert's) residuals are relative to
+
+
+# eigenvalue_sensitivity's defaults: residual_tol admits eig_dense (~1e-15) and shift_invert
+# (<= 1e-9 at its default tol), not propagator_eigs' O(dt^p) pairs (refine those first:
+# shift_invert near the value, left_eigenvector); max_rel_err is the isolation criterion
+_SENS_RESIDUAL_TOL = 1e-8
+_SENS_MAX_REL_ERR = 1e-3
+
+
+def eigenvalue_sensitivity(J, dJ, lam, v, w, *, spectrum, residual_tol=_SENS_RESIDUAL_TOL,
+                           max_rel_err=_SENS_MAX_REL_ERR):
+    """dlambda/ds = w^H (dJ v) / (w^H v) for a SIMPLE, numerically isolated eigenvalue lam of J.
+
+    J: the dense block or its LinearOperator (needs rmatvec: the left pair is checked);
+    dJ: dense, LinearOperator or callable, in the same space (dj_matrix / dj_operator with the
+    same iky/ikx/iz or coords). v: right eigenvector; w: left eigenvector with J^H w =
+    conj(lam) w (EigResult.left / left_eigenvector). Real coordinates work as they are (J, dJ
+    real; v, w complex). Scope: parameters entering through x0 only (module note above).
+
+    spectrum: computed eigenvalues of J INCLUDING lam -- eig_dense's values, or shift_invert's
+    k >= 2 values near lam -- from which the gap to the nearest other eigenvalue is taken (the
+    one entry nearest lam is dropped; it must be within residual_tol max(|lam|, scale) of lam).
+    Required: spectrum=() is the explicit opt-out of the isolation test (gap = inf); a
+    spectrum of lam alone is a ValueError, never an implicit opt-out. With a partial
+    spectrum only the eigenvalues it holds are tested (ARPACK does not guarantee the
+    nearest ones, and a single-start Krylov solve can list an exactly multiple eigenvalue
+    once -- only eig_dense's spectrum makes the test complete).
+
+    Raises RuntimeError (never returns a wrong derivative silently) when
+      - the right or left residual exceeds residual_tol (default 1e-8: eig_dense and
+        shift_invert pairs pass, propagator_eigs' O(dt^p) ones need refining first);
+      - |w^H v| <= 1e3 eps ||w|| ||v|| (w^H v at round-off: w is not v's left partner);
+      - rel_err = kappa * delta / gap > max_rel_err (default 1e-3), delta = max(residuals,
+        eps) max(|lam|, scale) the pair's backward error. The criterion: a perturbation of J
+        of size delta moves lam by ~kappa delta, and the first-order derivative is only
+        meaningful while that stays far inside the gap -- a defective eigenvalue (computed
+        split ~sqrt(eps), kappa ~1/sqrt(eps)) and a semisimple multiple one (gap ~0) both
+        fail it.
+    Returns a Sensitivity (dlam, kappa, wv, gap, rel_err, residuals, scale).
+    """
+    lam = complex(lam)
+    v = np.asarray(v, dtype=np.complex128).reshape(-1)
+    w = np.asarray(w, dtype=np.complex128).reshape(-1)
+    v, w = v/np.linalg.norm(v), w/np.linalg.norm(w)
+    mv, rmv, scale = _maps(J)
+    ref = max(abs(lam), scale)
+    res_r = float(np.linalg.norm(mv(v) - lam*v)/ref)
+    res_l = float(np.linalg.norm(rmv(w) - np.conj(lam)*w)/ref)
+    if not (res_r <= residual_tol and res_l <= residual_tol):
+        raise RuntimeError(
+            f"stability.eigenvalue_sensitivity: (lam, v, w) is not an eigentriple of J to "
+            f"residual_tol={residual_tol:.1e}: right residual {res_r:.3e}, left residual "
+            f"{res_l:.3e} (J^H w = conj(lam) w). Refine the pair (shift_invert near lam, "
+            f"left_eigenvector), and check that w is the LEFT vector of this lam")
+    wv = complex(np.vdot(w, v))
+    eps = np.finfo(np.float64).eps
+    if not abs(wv) > 1e3*eps:
+        raise RuntimeError(
+            f"stability.eigenvalue_sensitivity: |w^H v| = {abs(wv):.3e} is at round-off: lam = "
+            f"{lam} has no first-order sensitivity (defective, or w is not v's left partner)")
+    kappa = 1.0/abs(wv)
+    spectrum = np.asarray(spectrum, dtype=np.complex128).reshape(-1)
+    if spectrum.size:
+        d = np.abs(spectrum - lam)
+        i = int(np.argmin(d))
+        if not d[i] <= residual_tol*ref:
+            raise ValueError(
+                f"stability.eigenvalue_sensitivity: spectrum must contain lam (nearest entry "
+                f"{spectrum[i]} is {d[i]:.3e} away); pass eigenvalues INCLUDING lam")
+        if spectrum.size < 2:
+            # lam alone tests nothing: an implicit opt-out (e.g. a k=1 solver's values) would
+            # accept a multiple eigenvalue silently -- only () opts out
+            raise ValueError(
+                "stability.eigenvalue_sensitivity: spectrum holds lam alone, so no gap can be "
+                "taken; pass eigenvalues near lam (shift_invert with k >= 2, or eig_dense's), "
+                "or spectrum=() to opt out of the isolation test explicitly")
+        gap = float(np.delete(d, i).min())
+    else:
+        gap = np.inf
+    delta = max(res_r, res_l, eps)*ref
+    rel_err = kappa*delta/gap if gap > 0 else np.inf
+    if not rel_err <= max_rel_err:
+        raise RuntimeError(
+            f"stability.eigenvalue_sensitivity: lam = {lam} is not numerically simple and "
+            f"isolated: kappa = {kappa:.3e} times the backward error {delta:.3e} is "
+            f"{kappa*delta:.3e}, against a gap of {gap:.3e} to the nearest other eigenvalue "
+            f"(rel_err {rel_err:.3e} > max_rel_err={max_rel_err:g}). A (near-)multiple or "
+            f"defective eigenvalue has no well-defined first-order derivative")
+    dlam = complex(np.vdot(w, _apply_any(dJ, v))/wv)
+    return Sensitivity(dlam, kappa, wv, gap, rel_err, res_r, res_l, scale)
