@@ -4,7 +4,9 @@
 # The fields are exactly band-limited (2/3 mask), so the reference code's tail_max (content
 # above N/3) is identically zero here. The two honest unresolved burdens are instead
 #   * Berr_out: the out-of-band part of |B|^2 -- the constraint is imposed Galerkin-wise on
-#     the band only, so this is what the discretization does not control;
+#     the band only, so this is what the discretization does not control. THE convergence-audit
+#     burden (A. Mallet, 2026-09-29); Berr_out_max is its pointwise form (rule 7: an rms can
+#     hide a dilute defect -- draining with N = honest, pinned = weak member);
 #   * edge_*: B's content in the top shell of the retained band (max-norm mode index in
 #     [edge_frac, 1) x the band edge), pointwise max and L8, the analogue of tail_max/tail8.
 import jax
@@ -43,6 +45,7 @@ def diagnostics(state, kgrid, params, edge_frac=0.75):
     return dict(A=jnp.sqrt(jnp.mean(jnp.sum(dB*dB, axis=0))) / B0,
                 Berr=jnp.sqrt(jnp.mean((Bsq - mBsq)**2)) / mBsq,
                 Berr_out=jnp.sqrt(jnp.mean(out**2)) / mBsq,
+                Berr_out_max=jnp.max(jnp.abs(out)) / mBsq,
                 maxgrad=jnp.sqrt(jnp.max(G2)),
                 lp8=jnp.mean(G2**4)**0.125,
                 edge_max=jnp.sqrt(jnp.max(e2)),
