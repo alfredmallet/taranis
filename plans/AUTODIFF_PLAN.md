@@ -307,9 +307,25 @@ relations (Alfvén, GDI eq 3.7, CMHD fast/slow/Alfvén) to ≤1.4e-9; tearing (S
 dγ/dη = 1.910, dγ/dν = −2.176, dγ/dk = 0.0147 vs eigenvalue FD at O(h²). Mutation-tested
 (record in the implementer's report). Refactor reference and gate 6 unchanged (None graph).
 
-Next (not started): dγ/dη → dlnγ/dlnS along the dispersion curve (FKR 3/5 → Coppi 1/3
-without a sweep), and k_max by Newton on ∂γ/∂k = 0 (∂²γ/∂k² by FD of the dλ/dk, or a
-second forward pass) — smooth k_max(α), k_max(S), the S^{−3/7}, S^{−1/7} scalings.
+**Rung 2 science (2026-10-01): `examples/tearing-kmax.ipynb` + `examples/tearing_rung2_run.py`,
+gate `tests/test_tearing_rung2.py`** (13 tests; kills all 54 one-line mutations of the run
+script). Campaign 1159 cached solves, ~2.5 h on the M1 (one restart after the continuation fix
+4e181a0: seeds held to [k*/2, 2k*], NEWTON_MAXIT 16). ∂_η, ∂_k vs eigenvalue FD at order 2.000
+(4 points, κ ≤ 1e3). q_S(k) = d lnγ/d lnS along the dispersion curve, one sensitivity per point:
+at α = 0 it converges onto the exact relation's analytic exponent (gap ≤ 0.005 for ka ≤ 1 at
+S = 1e5); with shear the large-k plateau moves from FKR −3/5 toward the shear constant-ψ −1/2
+(−0.522 at α = 0.8, S = 1e5), ordered by λ/α — q_S at fixed k discriminates the regime.
+k_max by Newton (secant curvature, 3–6 solves; 2n_x moves k* ≤ 6e-9): smooth k_max(α), γ_max(α)
+matching 1b-ref's peak fits and 1b's ridge fits; d lnγ*/d ln(1−α²) crosses 4/7 between α = 0.9
+and 0.95 and reaches 0.59 (S = 1e5, α = 0.995). k_max(S) running slopes at S = 1e5: −0.1428 /
+−0.4248 (α = 0), −0.1414 / −0.4234 (α = 0.8) — the same −1/7, −3/7 with and without shear, as
+the paper says. **Finding:** a second, low-k maximum (ka ≈ 0.13–0.37, δ_in/a ≈ 0.3–0.65,
+d lnγ*/d lnS ≈ −0.7 → −1.0, γ* rising again as α → 1) dominates at α ≳ 0.95 and low S
+(S = 1e3; S ≤ 2e4 at α = 0.995), so k_max(α) and k_max(S) jump between branches —
+not identified. Not run: the optional S = 2e5–1e6 phase (α = 0).
+
+Open from rung 2: identify the low-k branch (eigenfunction, does it survive ν > 0, is it
+tearing at all); the S ≥ 2e5 phase if the α = 0.995 high-k asymptote is wanted.
 
 ## Rung 2b — new science (each its own notebook; order open)
 
@@ -368,5 +384,5 @@ controlled statistical-sensitivity estimator in plasma turbulence.
 3. Rung 0b (general machinery + generality gates), review.
 4. Rung 1a notebook (no-shear tearing vs exact theory), then 1b (shear vs Julia
    reference), then rung 1b sensitivities — DONE 2026-09-29.
-4. Overrides seam + reference gate — machinery DONE 2026-09-29; rung 2 targets next.
+4. Overrides seam + reference gate — machinery DONE 2026-09-29; rung 2 science DONE 2026-10-01.
 5. Rung 2b items; λ₁/m notebook; 3a; 3b.
