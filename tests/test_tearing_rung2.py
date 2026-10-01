@@ -378,6 +378,28 @@ def test_continuation_seeds_and_box_rule():
                 abs(seen[1]["c0"] + 0.3*(seen[1]["g0"]/g3)*(k3/k4)**2) < 1e-15, f"{seen[1]['c0']}")
         c.check("kmax_S: each S in its own kmax_box",
                 all((s_["Lx"], s_["nx"]) == R.kmax_box(s_["S"]) for s_ in seen))
+
+    # a nearly flat maximum (gamma_kk -> 0): the implicit slopes blow up and the raw
+    # extrapolation lands at k < 0 (the S = 1e3, alpha 0.95 -> 0.97 crash of the first full
+    # campaign: Ly = 2 pi/k < 0 refused by the overrides seam). The seed is held to
+    # [k*/SEED_TRUST, SEED_TRUST k*], and a non-positive gamma seed falls back to gamma*
+    def flat_kmax_solve(S, alpha, k0, g0, c0, nx, Lx, root=None, log=None, compute=True,
+                        deadline=np.inf, tag=None):
+        seen.append(dict(S=S, alpha=alpha, k0=k0, g0=g0, c0=c0))
+        return dict(S=S, alpha=alpha, kmax=0.5, gmax=0.02, gkk=-1e-3, dk_dalpha=-50.0,
+                    slope_k_S=+5.0, slope_g_S=-3/7, rec={"dlam_alpha": -10.0 + 0j})
+    seen.clear()
+    with _patched(R, kmax_solve=flat_kmax_solve, seed=lambda S, a: (0.44, 0.03),
+                  _sigma_seed=lambda S, k, a, Lx, g, compute: g), checks() as c:
+        R.kmax_alpha(1e3, alphas=(0.95, 0.97), log=lambda *a: None)
+        c.check(f"kmax_alpha: runaway k seed clipped to k*/SEED_TRUST ({seen[1]['k0']})",
+                seen[1]["k0"] == 0.5/R.SEED_TRUST)
+        c.check(f"kmax_alpha: negative gamma seed -> previous gamma* ({seen[1]['g0']})",
+                seen[1]["g0"] == 0.02)
+        seen.clear()
+        R.kmax_S(0.95, (1e3, 1e4), log=lambda *a: None)
+        c.check(f"kmax_S: runaway k seed clipped to SEED_TRUST k* ({seen[1]['k0']})",
+                seen[1]["k0"] == 0.5*R.SEED_TRUST)
     with checks() as c:
         for S in (1e3, 1e4, 1e5):
             Lx, nx = R.kmax_box(S)

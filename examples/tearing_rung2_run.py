@@ -85,8 +85,10 @@ TWO_PI = 2*np.pi
 ETA_DIR = (0.0, 1.0)          # d/d eta of diss = (nu, eta): nu does NOT move
 BOX_C = 20.0
 NEWTON_TOL = 1e-7             # |step| <= NEWTON_TOL k*
-NEWTON_MAXIT = 12
+NEWTON_MAXIT = 16            # a switch of branch (the local maximum followed by continuation
+                             # ceases to exist, e.g. alpha = 0.995 S = 5e4) walks ~10 capped steps
 MAX_STEP = 0.25               # |step| <= MAX_STEP k (a trust region for the first steps)
+SEED_TRUST = 2.0              # continuation seeds within [k*/SEED_TRUST, SEED_TRUST k*]
 CURV_H = 0.02                 # relative k step of the curvature/mixed central differences
 NX_DENSE = 1024              # the gap spectrum's coarse grid (rung 1b: 1024 for every box, Lx <= 150)
 
@@ -513,6 +515,15 @@ def _fail(log, what, e):
     log(f"  {what}: FAILED {str(e)[:220]}")
 
 
+def _trust(k0, kprev):
+    # a continuation seed stays within a factor SEED_TRUST of the previous k*: where the maximum
+    # is nearly flat (gamma_kk -> 0, e.g. near a switch between two local maxima) the implicit
+    # slope -gamma_k./gamma_kk blows up and the raw extrapolation can land at k < 0. Wide on
+    # purpose: it only stops runaways (every seed of the first full campaign is inside it, so
+    # their cache keys are unchanged); Newton's own steps are capped at MAX_STEP k anyway
+    return float(np.clip(k0, kprev/SEED_TRUST, kprev*SEED_TRUST))
+
+
 def kmax_alpha(S, alphas=None, root=None, log=print, compute=True, deadline=np.inf):
     # k_max(alpha) at fixed S by continuation in alpha: the seed k is the previous k* extrapolated
     # with the previous dk*/dalpha (implicit differentiation), gamma likewise, the curvature the
@@ -529,8 +540,9 @@ def kmax_alpha(S, alphas=None, root=None, log=print, compute=True, deadline=np.i
             g0 = _sigma_seed(S, k0, al, Lx, g0, compute)
         else:
             dal = al - prev["alpha"]
-            k0 = prev["kmax"] + prev["dk_dalpha"]*dal
+            k0 = _trust(prev["kmax"] + prev["dk_dalpha"]*dal, prev["kmax"])
             g0 = prev["gmax"] + complex(prev["rec"]["dlam_alpha"]).real*dal
+            g0 = g0 if g0 > 0 else prev["gmax"]
             c0 = prev["gkk"]*(g0/prev["gmax"])
         try:
             r = kmax_solve(S, al, k0, g0, c0, nx, Lx, root, log, compute, deadline)
@@ -557,7 +569,7 @@ def kmax_S(alpha, S_list=None, root=None, log=print, compute=True, deadline=np.i
             g0 = _sigma_seed(S, k0, alpha, Lx, g0, compute)
         else:
             r_ = np.log(S/prev["S"])
-            k0 = prev["kmax"]*np.exp(prev["slope_k_S"]*r_)
+            k0 = _trust(prev["kmax"]*np.exp(prev["slope_k_S"]*r_), prev["kmax"])
             g0 = prev["gmax"]*np.exp(prev["slope_g_S"]*r_)
             c0 = prev["gkk"]*(g0/prev["gmax"])*(prev["kmax"]/k0)**2
         try:
