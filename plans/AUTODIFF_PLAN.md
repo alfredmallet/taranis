@@ -321,13 +321,25 @@ and 0.95 and reaches 0.59 (S = 1e5, α = 0.995). k_max(S) running slopes at S = 
 −0.4248 (α = 0), −0.1414 / −0.4234 (α = 0.8) — the same −1/7, −3/7 with and without shear, as
 the paper says. **Finding:** a second, low-k maximum (ka ≈ 0.13–0.37, δ_in/a ≈ 0.3–0.65,
 d lnγ*/d lnS ≈ −0.7 → −1.0, γ* rising again as α → 1) dominates at α ≳ 0.95 and low S
-(S = 1e3; S ≤ 2e4 at α = 0.995), so k_max(α) and k_max(S) jump between branches —
-not identified. High-S phase (α = 0, S = 2e5–1e6, 62 min): slopes −0.14302 / −0.42744 at
+(S = 1e3; S ≤ 1e4 at α = 0.995 — at 2e4 the chain sat on a local maximum, corrected by the
+low-k review), so k_max(α) and k_max(S) jump between branches where both exist (S ≳ 5e3; at
+S ≤ 2e3 one maximum migrates). High-S phase (α = 0, S = 2e5–1e6, 62 min): slopes −0.14302 / −0.42744 at
 S = 1e6, γ*/γ_th = 0.9978; the k slope's 1.7e-4 overshoot of −1/7 is the decaying finite-S
 correction to k* (k*/k_th − 1: 1.2e-3 → 5.6e-4 over 1e5–1e6), not a different exponent.
 
-Open from rung 2: identify the low-k branch (eigenfunction, does it survive ν > 0, is it
-tearing at all).
+**Low-k branch identified (2026-10-02): `examples/tearing-lowk-branch.ipynb` +
+`examples/tearing_lowk_run.py`, gate `tests/test_tearing_lowk.py`** (27 tests; implementer
+76/77 mutations killed, #21 equivalent; fresh reviewer 36/36 after 8 new gates). Not a box/grid
+artifact (S = 1e4, α = 0.995, ka = 0.179: γ = 3.376429e-3; Julia eigencode 3.376433e-3). It is the
+α → 1 end of the tearing branch: at α = 1 (Z⁻ = 0) a real, Δ′-driven mode (cutoff ka = √5)
+survives only for ν ≠ η — with ν = η, ‖δz⁻‖ decays, so no EIGENMODE grows (a modal statement,
+not an energy bound; δz⁺ can grow transiently) — with γ* ∝ S^−0.66, k* ∝ S^−0.174 at ν = 0. For
+α > 1 it becomes ideal KH (q_S → 0 at α = 1.02, 1.1). This contradicts, for the finite-S
+eigenproblem, the paper's "completely stabilized" as the flow becomes Alfvénic. Dominance window
+(two maxima of equal height, box-corrected): 1 − α_c² = 2.84e-2, 1.67e-2, 9.91e-3, 5.01e-3,
+3.01e-3 at S = 5e3–1e5, ≈ 16.6 S^−0.749 (local slopes still drifting); α_c reproduced exactly by
+an independent dense route. Needs Pm ≪ 1 (survives Pm = 0.1, gone at Pm = 1; one point).
+Open: theory for the α = 1 exponents; α_c beyond S = 1e5; α_c(Pm).
 
 ## Rung 2b — new science (each its own notebook; order open)
 
@@ -387,4 +399,4 @@ controlled statistical-sensitivity estimator in plasma turbulence.
 4. Rung 1a notebook (no-shear tearing vs exact theory), then 1b (shear vs Julia
    reference), then rung 1b sensitivities — DONE 2026-09-29.
 4. Overrides seam + reference gate — machinery DONE 2026-09-29; rung 2 science DONE 2026-10-01.
-5. Rung 2b items; λ₁/m notebook; 3a; 3b.
+5. Rung 2b items (item 1 viscosity in review); λ₁/m notebook; 3a; 3b.
