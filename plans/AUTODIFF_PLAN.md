@@ -344,6 +344,19 @@ Open: theory for the α = 1 exponents; α_c beyond S = 1e5; α_c(Pm).
 ## Rung 2b — new science (each its own notebook; order open)
 
 1. **Viscosity** (the paper's stated future work): γ(Pm, α, k), `diss=(ν, η)`.
+   **DONE 2026-10-02: `examples/tearing-viscosity.ipynb` + `examples/tearing_viscosity_run.py`,
+   gate `tests/test_tearing_viscosity.py`** (19 tests; implementer 82/82 mutations killed after 5
+   new gates, fresh reviewer 34/36 + 2 equivalent after 8 new gates). Exact α = 0 visco-resistive
+   layer relation Δ′δ_η = F(Λ, Pm) (6th-order BVP, Richardson in s_max); limits B&L (Pm → 0) and
+   Pm^−1/6 F_v (Pm → ∞), I_V = π6^−1/3 Γ(5/6)/Γ(7/6) = 2.10359 (derived twice), C_VC = 1.52554;
+   n = 2 asymptotes k_max ∝ S^−1/7 Pm^1/14, γ_max ∝ S^−3/7 Pm^−2/7. Eigenvalues converge onto the
+   relation (Pm = 100, S = 1e5: d ln k*/d ln Pm 0.0609, d ln γ*/d ln Pm −0.282 vs 0.0625/−0.278).
+   **Shear destabilises at large Pm**: S = 1e4, Pm = 100, γ*(α)/γ*(0) = 1.72, 2.45, 1.88 at
+   α = 0.3, 0.6, 0.8 (2.449 confirmed by an independent dense route, grid/box/global/parity
+   checked); the small-α coefficient c₂ changes sign between Pm = 3 and 30 and grows roughly like
+   −Pm. A viscous stability boundary below α = 1 (bisection): 1 − α_c² = 0.0592 / 0.0619 at
+   ν = 1e-2, 0.466 / 0.468 at ν = 0.1 — depends mainly on ν in this window. Open: a layer theory
+   with both shear and viscosity; the weak complex pairs at ka ≤ 0.1, Pm ≥ 10.
 2. **Non-proportional profiles**: u₀(x) ≠ αb₀(x) (e.g. different widths, offset shear
    layer). Still 1D, still the dense per-ky path.
 3. **2D equilibria** — where the harness beats any 1D code. ky blocks couple; matrix-free
@@ -399,4 +412,4 @@ controlled statistical-sensitivity estimator in plasma turbulence.
 4. Rung 1a notebook (no-shear tearing vs exact theory), then 1b (shear vs Julia
    reference), then rung 1b sensitivities — DONE 2026-09-29.
 4. Overrides seam + reference gate — machinery DONE 2026-09-29; rung 2 science DONE 2026-10-01.
-5. Rung 2b items (item 1 viscosity in review); λ₁/m notebook; 3a; 3b.
+5. Rung 2b items (item 1 viscosity DONE 2026-10-02; 2–4 next); λ₁/m notebook; 3a; 3b.
