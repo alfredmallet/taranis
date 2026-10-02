@@ -322,10 +322,12 @@ and 0.95 and reaches 0.59 (S = 1e5, α = 0.995). k_max(S) running slopes at S = 
 the paper says. **Finding:** a second, low-k maximum (ka ≈ 0.13–0.37, δ_in/a ≈ 0.3–0.65,
 d lnγ*/d lnS ≈ −0.7 → −1.0, γ* rising again as α → 1) dominates at α ≳ 0.95 and low S
 (S = 1e3; S ≤ 2e4 at α = 0.995), so k_max(α) and k_max(S) jump between branches —
-not identified. Not run: the optional S = 2e5–1e6 phase (α = 0).
+not identified. High-S phase (α = 0, S = 2e5–1e6, 62 min): slopes −0.14302 / −0.42744 at
+S = 1e6, γ*/γ_th = 0.9978; the k slope's 1.7e-4 overshoot of −1/7 is the decaying finite-S
+correction to k* (k*/k_th − 1: 1.2e-3 → 5.6e-4 over 1e5–1e6), not a different exponent.
 
 Open from rung 2: identify the low-k branch (eigenfunction, does it survive ν > 0, is it
-tearing at all); the S ≥ 2e5 phase if the α = 0.995 high-k asymptote is wanted.
+tearing at all).
 
 ## Rung 2b — new science (each its own notebook; order open)
 
