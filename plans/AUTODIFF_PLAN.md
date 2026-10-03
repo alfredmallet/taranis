@@ -457,4 +457,4 @@ controlled statistical-sensitivity estimator in plasma turbulence.
 4. Rung 1a notebook (no-shear tearing vs exact theory), then 1b (shear vs Julia
    reference), then rung 1b sensitivities — DONE 2026-09-29.
 4. Overrides seam + reference gate — machinery DONE 2026-09-29; rung 2 science DONE 2026-10-01.
-5. Rung 2b items (item 1 viscosity DONE 2026-10-02; 2–4 next); λ₁/m notebook; 3a; 3b.
+5. Rung 2b items (item 1 viscosity DONE 2026-10-02; item 2 DEPRIORITISED by Alfred 2026-10-02; items 4 then 3 next — handoff working_notes/handoff_2b_items3-4.md); theory follow-ups of item 1 and of the low-k branch: working_notes/handoff_visc_shear_theory.md, handoff_lowk_alpha1_mode.md; λ₁/m notebook; 3a; 3b.
