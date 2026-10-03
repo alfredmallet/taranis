@@ -359,7 +359,8 @@ Open: theory for the α = 1 exponents; α_c beyond S = 1e5; α_c(Pm).
    with both shear and viscosity; the weak complex pairs at ka ≤ 0.1, Pm ≥ 10.
    **Ofman, Chen, Morrison & Steinolfson 1991 (Phys. Fluids B 3, 1364) comparison — DONE 2026-10-02:
    section 7 of `examples/tearing-viscosity.ipynb` + `examples/tearing_ofman_run.py`, gate
-   `tests/test_tearing_ofman.py`** (11 tests; implementer 60/60 one-line mutations killed, 5 of them after new gates;
+   `tests/test_tearing_ofman.py`** (12 tests; implementer 60/60 one-line mutations killed, 5 of them after new gates; fresh review 2026-10-02:
+   52 new mutations, 23 killed by the original gate, 47 after 13 new checks + the FD route, 4 argued equivalent + 1 control;
    promoted from the untracked scratch study in `examples/data/tearing-ofman/scratch-2026-10-02/`). Their setup:
    Harris sheet (our exact tanh pair, Lx = 40), S = 1e6, ka = 0.5, S_v = S/Pm; flows G = V tanh(Rx) (R = 1,
    V = α is our u₀ = αb₀) and the jet V[sech(Rx) − 1]. One Parameters per (nx, Lx), diss and Ly through the
@@ -376,22 +377,28 @@ Open: theory for the α = 1 exponents; α_c beyond S = 1e5; α_c(Pm).
    - Field-aligned shear, γ(α)/γ(0) at α = 0.2/0.4/0.6/0.8. Pm = 1: 0.9860/0.9417/0.8573/0.7020, so eq. 13c
      ((1−α²)^1/3) holds to ≤ 1.3%. **Pm = 100: 1.386/2.379/3.603/4.445 vs 13c's 0.880/0.724/0.589/0.445 — 13c
      has the wrong sign at large Pm.** The effect starts where 13c's Pm-factor does (α²Pm ~ 4). The 3.6029 is
-     reproduced by a dense eigvals route at nx = 4096 (to 3e-8) and at Lx = 60 (3.602951). This is the
+     reproduced by a dense eigvals route at nx = 4096 (to 3e-8), at Lx = 60 (3.602951) and by a one-sheet,
+     non-periodic finite-difference code that shares nothing with taranis (`fd_single_sheet`: 3.602951; 3.598 with
+     their printed νW'''' instead of ν(∂²−k²)²W, so the sign is not an artefact of the viscous operator). This is the
      fixed-k Harris confirmation of the sech² k_max destabilisation. Pm = 0: 1.217/1.398/1.419/1.201; C&M 1989
      (JPP eq. 1.6 as printed) is 0.2–20% high. Its k-dependence fails a second k: at ka = 0.25 γ(0.25)/γ(0.5) =
      1.372, against 1.581 as printed and 1.118 with (ka)^1/2.
    - Non-aligned tanh flow, V = 1: inviscid (fig 6) γ = 2.725/4.191/5.765/6.757/5.508e-4 at R = 0.1/0.3/0.5/
-     0.73/0.9, peaking at 0.73 as theirs. S-exponents at R = 0.73 (fig 5a): −0.5002, −0.5245. Pm = 1 (fig 8):
+     0.73/0.9: 0.73 is the grid maximum (a parabola puts the peak at R ≈ 0.69; theirs is near 0.7 too). S-exponents at R = 0.73 (fig 5a): −0.5002, −0.5245. Pm = 1 (fig 8):
      γ(Q) has an effective exponent of 0.30 over Q = 0.02–0.14 and turns over at Q ≈ 0.2. So their Q^1/3 holds
-     roughly on their window (the scratch's "not reproduced" was too strong); exact Q^1/3 (0.345) is found along
-     R = 1.
+     roughly on their window (0.24 if it is taken on to Q = 0.23; the scratch's "not reproduced" was too strong);
+     close to Q^1/3 (0.344–0.347) is found along R = 1.
    - Jet, sheet frame (the box mean restored as a Doppler shift, −ik⟨u⟩; the scratch had left it in, Im ≈ −0.32,
      and its inviscid R = 0.44 point failed). R = 0.44: γ = 2.831e-4 + 1.8e-6i inviscid, converged to 2e-9.
-     S_v slopes 0.175/0.171, the same as no flow. R = 2.5 / 6: 4.525e-3 / 1.959e-2 (match their plot); their
-     plotted Im parts are a few times smaller than ours (unresolved). R = 6 vs S_v: 1.63e-2 (1e4), 4.06e-3 (1e3,
-     odd member) — no stabilisation by 1e3. At S_v = 1e2 an oscillating mode 2.71e-2 + 0.780i dominates. It is
-     box- and grid-independent, growing for ν ≥ 1e-2 and damped at ν ≤ 3e-3: viscously destabilised and
-     unidentified.
+     S_v slopes 0.175/0.171, the same as no flow. R = 2.5 / 6: 4.525e-3 / 1.959e-2 (match their plot); our Im
+     parts are 5.5–6.4× their plotted γ_I at three points, ≈ 2π: their FFT axis is likely cycles per τ_H (fig. 10
+     fits neither reading). R = 6 vs S_v: 1.63e-2 (1e4), 4.06e-3 (1e3, odd member), and NOTHING grows at S_v = 3e2
+     (dense nx = 4096) — their stabilisation (γ_R ≈ 3e-6 at S_v ≈ 4e2) is reproduced. [Review 2026-10-02: the first
+     version said "no stabilisation by 1e3", reading a coarse nx = 1024 scan on which the KH branch grows spuriously
+     at S_v ≤ 3e2; OSC_NX is now 4096.] At S_v ≤ 1e2 a different oscillating mode grows: 2.71e-2 + 0.780i at 1e2,
+     damped at ν ≤ 3e-3, also found by the one-sheet FD code with walls at ±20 and ±30 (2.7072e-2 + 0.780392i; with
+     νW'''' 2.96e-2 + 0.779i) — not a box effect; frequency in the outer Alfvén band; unidentified. Their fig. 9
+     stops at S_v ≈ 4e2.
    - Open: a theory for the Pm ≫ 1 shear destabilisation; the S_v = 1e2 jet mode; Chen & Morrison 1990b's
      derivation of 13c (not checked). Our JPP paper cites neither this paper nor Chen & Morrison 1990b (PoF B 2,
      2575; 13c's source).

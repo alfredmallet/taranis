@@ -59,6 +59,7 @@ import sys
 import time
 
 import numpy as np
+import scipy.sparse as sps
 import scipy.sparse.linalg as spla
 
 import taranis as jr
@@ -106,9 +107,19 @@ BOX_LX = 60.0                               # a second box for these (Pm, flow, 
 BOX = ((100.0, "none", 0.0, 1.0), (100.0, "tanh", 0.6, 1.0), (1.0, "sech", 1.0, 0.44))
 CMK = ((0.25, 80.0, 0.2),)                  # (ka, Lx, alpha): C&M eq. 1.6's k-dependence, Pm = 0
 OSC_PM = (0.0, 100.0, 1e3, 3e3, 1e4, 3e4)   # sech R = 6: the oscillating branch vs nu, dense at OSC_NX
-OSC_NX, OSC_IM = 1024, 0.3                  # ... |Im lambda| > OSC_IM separates it from the KH branch
+OSC_NX, OSC_IM = 4096, 0.3                  # ... |Im lambda| > OSC_IM separates it from the KH branch;
+# nx = 1024 is TOO COARSE for the KH branch: it grows spuriously at S_v <= 3e2 there (3e-3 + 0.057i at 1e2)
 DENSE = ((100.0, 0.6),)                     # (Pm, alpha): independent dense route at NX_INDEP
 NX_INDEP = 4096
+# the fully independent route (fd_single_sheet: one sheet, non-periodic, finite differences, no taranis):
+# (name, Pm, flow, V, R, shift hint, viscous operator, half-width L); hints are ~3% above the eigenvalue
+FD_NS, FD_L = (16000, 32000), 20.0
+FD = (("nf100", 100.0, "none", 0.0, 1.0, 5.08e-5, "full", 20.0), ("fa100", 100.0, "tanh", 0.6, 1.0, 1.83e-4, "full", 20.0),
+      ("nf1", 1.0, "none", 0.0, 1.0, 1.13e-4, "full", 20.0), ("fa1", 1.0, "tanh", 0.6, 1.0, 9.68e-5, "full", 20.0),
+      ("nf100_d4", 100.0, "none", 0.0, 1.0, 5.08e-5, "d4", 20.0), ("fa100_d4", 100.0, "tanh", 0.6, 1.0, 1.83e-4, "d4", 20.0),
+      ("osc", 1e4, "sech", 1.0, 6.0, 0.0279 + 0.78j, "full", 20.0), ("osc_L30", 1e4, "sech", 1.0, 6.0, 0.0279 + 0.78j, "full", 30.0),
+      ("osc_d4", 1e4, "sech", 1.0, 6.0, 0.0279 + 0.78j, "d4", 20.0),
+      ("kh1e2", 1e4, "sech", 1.0, 6.0, 0.0035 + 0.057j, "full", 20.0))
 if PROFILE == "smoke":
     S0, NXS, NX_SEED, NX_MAX, NX_HI = 1e4, (1024, 2048, 4096), 512, 8192, 8192
     PM_NF, PM_FA, ALPHA_FA = (0.0, 1.0, 100.0), (1.0, 100.0), (0.6,)
@@ -117,6 +128,8 @@ if PROFILE == "smoke":
     BOX = ((100.0, "tanh", 0.6, 1.0),)
     CMK = ()
     DENSE, NX_INDEP = ((100.0, 0.6),), 1024
+    FD_NS, FD = (4000, 8000), (("nf100", 100.0, "none", 0.0, 1.0, 5.6e-4, "full", 20.0),
+                               ("fa100", 100.0, "tanh", 0.6, 1.0, 1.4e-3, "full", 20.0))
     OSC_PM, OSC_NX = (0.0, 1e4), 512
 
 
@@ -311,6 +324,91 @@ def solve(S, Pm, ka, flow, V_, R, Lx, nx, sigma, k=LADDER_K, rtol_mult=1.0):
                 seconds=time.time() - t0)
 
 
+# ============================================================ an independent route: one sheet, finite differences
+
+def fd_grid(N, L=FD_L, stretch=6.2):
+    # N + 1 points on [-L, L], x = L sinh(stretch xi)/sinh(stretch): dx ~ 5e-5 L/20 at the sheet at N = 2e4,
+    # cosh(stretch) ~ 250 times coarser at the walls
+    xi = np.linspace(-1.0, 1.0, N + 1)
+    return L*np.sinh(stretch*xi)/np.sinh(stretch)
+
+
+def fd_single_sheet(S, Pm, ka, flow, V_, R, sigma, N, L=FD_L, visc="full", nev=4):
+    # Ofman et al.'s eqs. (4)-(5) for ONE sheet F = tanh x on [-L, L], psi = W = Z = 0 at the walls (no box,
+    # no pair, no Fourier grid, no taranis): the generalised eigenproblem in (psi, W, Z = W'' - k^2 W),
+    #   gamma psi = -ikG psi + ikF W + eta (psi'' - k^2 psi)
+    #   gamma Z   = -ikG Z + ik G'' W + ikF (psi'' - k^2 psi) - ik F'' psi + nu (Z'' - k^2 Z)   [visc "full"]
+    #   0         = W'' - k^2 W - Z,
+    # second-order FD on the stretched grid, sparse LU shift-invert (variables interleaved: banded). visc "full"
+    # is nu (d^2 - k^2)^2 W, taranis' nu nabla^4; "d4" is nu W'''' alone, their eq. (4) as printed.
+    # G is the flow itself (the jet V[sech(R x) - 1] needs no frame shift). The nev eigenvalues nearest sigma,
+    # by decreasing Re.
+    if visc not in ("full", "d4"):
+        raise ValueError(f"visc must be 'full' or 'd4', got {visc!r}")
+    x = fd_grid(N, L)
+    hm, hp = np.diff(x)[:-1], np.diff(x)[1:]
+    xi = x[1:-1]
+    n = len(xi)
+    D2 = sps.diags([(2/(hm*(hm + hp)))[1:], -2/(hm*hp), (2/(hp*(hm + hp)))[:-1]], [-1, 0, 1], format="csc")
+    I = sps.identity(n, format="csc")
+    Z0 = sps.csc_matrix((n, n))
+    lap = D2 - ka*ka*I
+    dg = lambda v: sps.diags(v, 0, format="csc")
+    eta, nu = 1.0/S, Pm/S
+    F, Fpp = np.tanh(xi), -2*np.tanh(xi)/np.cosh(xi)**2
+    if flow == "none":
+        G, Gpp = 0*xi, 0*xi
+    elif flow == "tanh":
+        G, Gpp = V_*np.tanh(R*xi), -2*V_*R*R*np.tanh(R*xi)/np.cosh(R*xi)**2
+    elif flow == "sech":
+        sech = 1/np.cosh(R*xi)
+        G, Gpp = V_*(sech - 1), V_*R*R*sech*(1 - 2*sech**2)
+    else:
+        raise ValueError(f"flow must be one of {FLOWS}, got {flow!r}")
+    ik = 1j*ka
+    zw = ik*dg(Gpp) + (nu*ka*ka*D2 if visc == "d4" else 0*I)        # W'''' = (Z + k^2 W)''
+    zz = -ik*dg(G) + nu*(lap if visc == "full" else D2)
+    A = sps.bmat([[-ik*dg(G) + eta*lap, ik*dg(F), Z0],
+                  [ik*(dg(F) @ lap) - ik*dg(Fpp), zw, zz],
+                  [Z0, lap, -I]], format="csc")
+    M = sps.bmat([[I, Z0, Z0], [Z0, Z0, I], [Z0, Z0, Z0]], format="csc")
+    perm = np.arange(3*n).reshape(3, n).T.reshape(-1)
+    P = sps.csc_matrix((np.ones(3*n), (np.arange(3*n), perm)), shape=(3*n, 3*n))
+    lu = spla.splu((P @ (A - sigma*M) @ P.T).tocsc(), permc_spec="NATURAL", diag_pivot_thresh=1.0)
+    op = spla.LinearOperator(A.shape, matvec=lambda v: P.T @ lu.solve(P @ (M @ v)), dtype=complex)
+    mu = spla.eigs(op, k=nev, which="LM", tol=1e-13, return_eigenvectors=False)
+    lam = sigma + 1/mu
+    return lam[np.argsort(-lam.real, kind="stable")]
+
+
+def fd_check(root=None, compute=True):
+    # every FD point at every N of FD_NS (cached): {name: {N: eigenvalues}}
+    out = {}
+    for name, Pm, flow, V_, R, hint, visc, L in FD:
+        out[name] = {}
+        for N in FD_NS:
+            rec = U.cached("ofman_fd", root or DATA_ROOT,
+                           (lambda: dict(vals=fd_single_sheet(S0, Pm, KA, flow, V_, R, hint, N, L, visc)))
+                           if compute else None, name=name, Pm=Pm, flow=flow, V=V_, R=R, hint=str(complex(hint)),
+                           visc=visc, L=L, N=N, S=S0, ka=KA)
+            out[name][N] = np.atleast_1d(rec["vals"])
+    return out
+
+
+def fd_results(root=None):
+    # {name: (the eigenvalue nearest its hint at the finest N, relative change from the previous N, every
+    # eigenvalue found at the finest N)}; {} when not cached
+    try:
+        d = fd_check(root, compute=False)
+    except (KeyError, RuntimeError):
+        return {}
+    out = {}
+    for name, *_, hint, visc, L in FD:
+        near = [complex(v[np.argmin(np.abs(v - hint))]) for v in (d[name][N] for N in FD_NS)]
+        out[name] = (near[-1], abs(near[-1] - near[-2])/abs(near[-1]), d[name][FD_NS[-1]])
+    return out
+
+
 # ============================================================ the ladder
 
 def cfg_of(S=None, Pm=0.0, ka=KA, flow="none", V_=0.0, R=1.0, Lx=LX):
@@ -467,7 +565,7 @@ def cmk_points():
     return out
 
 
-PHASES = ("theory", "nf", "fa", "rvisc", "jet", "box", "rinv", "slope", "cmk", "dense", "osc")
+PHASES = ("theory", "nf", "fa", "rvisc", "jet", "box", "rinv", "slope", "cmk", "dense", "osc", "fd")
 POINTS = dict(nf=nf_points, fa=fa_points, rinv=rinv_points, rvisc=rvisc_points, slope=slope_points,
               jet=jet_points, box=box_points, cmk=cmk_points)
 
@@ -535,6 +633,10 @@ def make_data(root=None, wall_budget=3*3600.0, phases=None, log=print, cap=None)
                     break
                 dense_check(Pm, al, root)
                 log(f"  dense check Pm={Pm:g} alpha={al}: done")
+        elif name == "fd":
+            fd_check(root)
+            for nm, (lam, ch, _) in fd_results(root).items():
+                log(f"  fd {nm}: {lam:.8e} (change {ch:.1e})")
         elif name == "osc":
             for Pm, (h, l) in osc_scan(root).items():
                 log(f"  osc Pm={Pm:g}: oscillating branch {h:.4e}, rest {l:.4e}")

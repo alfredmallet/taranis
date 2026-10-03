@@ -194,7 +194,7 @@ Suggested order:
     visco-resistive layer relation, k_max(Pm, α) by Newton on eigenvalue sensitivities, and what
     viscosity does to the shear suppression (data: **tearing_viscosity_run.py**). Its last section
     compares with **Ofman, Chen, Morrison & Steinolfson 1991** (Phys. Fluids B 3, 1364) on their own
-    Harris-sheet parameters (S = 10⁶, ka = 0.5; data: **tearing_ofman_run.py**, ~2.5 h of solves):
+    Harris-sheet parameters (S = 10⁶, ka = 0.5; data: **tearing_ofman_run.py**, ~4 h of solves):
     the no-flow γ(S_v), their eq. 13c (holds to ≤1.3% at Pm = 1, wrong sign at Pm = 100), the R
     sweeps and the sech jet. Both scripts are resumable; the notebook only reads their caches.
 

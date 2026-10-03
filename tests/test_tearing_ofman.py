@@ -229,6 +229,8 @@ def test_solve_matches_dense_and_parity():
     with checks() as c:
         for flow, V_, R in (("none", 0.0, 1.0), ("tanh", 0.5, 1.0), ("sech", 1.0, 2.0)):
             top = O.dense_top(S, Pm, ka, flow, V_, R, Lx, nx, 4)
+            c.check(f"{flow}: dense_top returns nkeep eigenvalues, by decreasing Re",
+                    len(top) == 4 and np.all(np.diff(top.real) <= 0))
             lam = O.pick(top)
             r = O.solve(S, Pm, ka, flow, V_, R, Lx, nx, complex(lam.real*1.03, lam.imag), k=2)
             got = O.pick(r["values"])
@@ -272,6 +274,43 @@ def test_doppler_sign_by_box_independence():
         c.check("doppler(op, 0) is op itself", O.doppler(op, ka, 0.0) is op)
 
 
+@pytest.mark.fp64
+def test_fd_route_against_taranis():
+    # the fully independent route (one sheet, non-periodic, stretched finite differences, no taranis) against
+    # taranis' dense block (the exact pair, Lx = 40) at S = 1e4: the field-aligned shear at Pm = 100, and the
+    # jet in the sheet frame, whose Im part independently gates the Doppler restoration (without it Im moves
+    # by k<u> ~ 0.4). The FD route with Ofman's printed nu W'''' instead of nu (d^2 - k^2)^2 W is measurably
+    # further from taranis (whose viscosity is nu nabla^4) at every point.
+    O = _run_script()
+    S, ka, Lx, nx = 1e4, 0.5, 40.0, 1024
+    got = {}
+    with checks() as c:
+        for name, Pm, flow, V_, R, tol in (("fa", 100.0, "tanh", 0.6, 1.0, 5e-4), ("nf", 100.0, "none", 0.0, 1.0, 5e-4),
+                                           ("jet", 1.0, "sech", 1.0, 2.0, 2e-4)):
+            lam = O.pick(O.dense_top(S, Pm, ka, flow, V_, R, Lx, nx, 4))
+            hint = complex(lam.real*1.03, lam.imag)
+            f, f4 = (O.fd_single_sheet(S, Pm, ka, flow, V_, R, hint, 3000, visc=v) for v in ("full", "d4"))
+            g, g4 = (complex(v[np.argmin(np.abs(v - lam))]) for v in (f, f4))
+            got[name] = (lam, g)
+            c.check(f"{name}: FD {g:.6e} == taranis {lam:.6e} ({abs(g/lam - 1):.1e}; pair coupling ~3e-4)",
+                    abs(g/lam - 1) < tol)
+            c.check(f"{name}: the FD route's eigenvalues are sorted by Re", np.all(np.diff(f.real) <= 0))
+            c.check(f"{name}: nu W'''' alone is further from taranis ({abs(g4/lam - 1):.1e})", abs(g4/lam - 1) > 5*abs(g/lam - 1))
+        (lf, gf), (ln, gn) = got["fa"], got["nf"]
+        c.check(f"Pm = 100 shear ratio FD {gf.real/gn.real:.6f} vs taranis {lf.real/ln.real:.6f}",
+                abs((gf.real/gn.real)/(lf.real/ln.real) - 1) < 1e-4)
+        lj, gj = got["jet"]
+        um = O.equilibrium_fields(nx, Lx, "sech", 1.0, 2.0)[2]
+        c.check(f"jet Im: FD {gj.imag:.6e} vs taranis {lj.imag:.6e}, against a Doppler error k<u> = {ka*abs(um):.3f}",
+                abs(gj.imag - lj.imag) < 1e-5 and ka*abs(um) > 0.1)
+        for bad in (dict(visc="d2"), dict(flow="jet")):
+            try:
+                O.fd_single_sheet(S, 1.0, ka, bad.get("flow", "none"), 0.0, 1.0, 1e-3, 200, visc=bad.get("visc", "full"))
+                c.check(f"bad {bad} raises", False)
+            except ValueError:
+                c.check(f"bad {bad} raises", True)
+
+
 # ============================================================ (iv) ladder, cache, readers, small-S physics
 
 def test_cfg_keys_points_and_nx_rules():
@@ -307,6 +346,7 @@ def test_cfg_keys_points_and_nx_rules():
         c.check("HI points: one more rung (NX_HI), only at S0/KA/LX",
                 O.is_hi(hi) and not O.is_hi(O.cfg_of(S=1e5, Pm=hi[1], flow=hi[3], V_=hi[4], R=hi[5]))
                 and not O.is_hi(O.cfg_of(Pm=1.0, flow="tanh", V_=hi[4])) and not O.is_hi(hi[:6] + (60.0,))
+                and not O.is_hi(O.cfg_of(Pm=hi[1], ka=0.25, flow=hi[3], V_=hi[4], R=hi[5]))
                 and O.nxs_for(40.0, hi=True) == O.NXS + (O.NX_HI,) and O.nxs_for(40.0, 65536, True) == O.nxs_for(40.0, 65536))
         c.check("ladder uses the HI rule", len([p for p in O.fa_points() + O.rinv_points() if O.is_hi(p)]) == len(O.HI))
         c.check("nx_seed_for", O.nx_seed_for(40.0) == O.NX_SEED and O.nx_seed_for(80.0) == 2*O.NX_SEED)
@@ -327,7 +367,8 @@ def test_cfg_keys_points_and_nx_rules():
                 set(O.theory_pms()) == {p for p in set(O.PM_NF) | set(O.PM_FA) | {j[0] for j in O.JET}
                                         | {b[0] for b in O.BOX} if p > 0})
         c.check("pick: largest growing Re, None when nothing grows",
-                O.pick([1e-3 + 0.1j, 2e-3 - 0.2j, -1.0, 1e-12]) == 2e-3 - 0.2j and O.pick([-1e-3, 1e-10]) is None)
+                O.pick([1e-3 + 0.1j, 2e-3 - 0.2j, -1.0, 1e-12]) == 2e-3 - 0.2j and O.pick([-1e-3, 1e-10]) is None
+                and O.pick([1e-3 + 0.8j, 2e-3 + 0j]) == 2e-3)
 
 
 def test_rung_retry_ladder_and_failures():
@@ -362,9 +403,21 @@ def test_rung_retry_ladder_and_failures():
         return dict(values=np.array([0.99*lam, lam]), residuals=np.array([2e-12, 1e-12]),
                     parity=np.array([-1.0 + 0j, 1.0 + 0j]), u_mean=0.0, seconds=1.0)
     root = tempfile.mkdtemp(prefix="taranis_ofman_ladder_")
-    with _patched(O, solve=fake_solve, dense_top=lambda *a, **k: np.array([2e-3 + 1e-4j, 1e-4 + 0j]),
+    seed_nx = []
+
+    def fake_dense_top(*a, **k):
+        seed_nx.append((a[6], a[7]))                # (Lx, nx) of the seed grid
+        return np.array([2e-3 + 1e-4j, 1e-4 + 0j])
+    with _patched(O, solve=fake_solve, dense_top=fake_dense_top,
                   NXS=(16, 32, 64, 128, 256)), checks() as c:
         r = O.ladder(O.cfg_of(), root, _quiet)
+        c.check("seconds = the sum over the rungs", r["seconds"] == float(len(r["rows"])))
+        n0 = len(sigmas)
+        O.ladder(O.cfg_of(Lx=80.0), root, _quiet)
+        del sigmas[n0:]
+        c.check(f"the dense seed is on nx_seed_for(Lx) ({seed_nx})",
+                seed_nx[0] == (40.0, O.nx_seed_for(40.0)) and seed_nx[-1] == (80.0, O.nx_seed_for(80.0))
+                and O.nx_seed_for(80.0) != O.NX_SEED)
         c.check(f"never within CONV_TOL = 1e-6 on this ladder: runs to the top, not converged (nx {r['nx']})",
                 r["nx"] == 256 and r["converged"] is False and len(r["rows"]) == 5)
         nxs = [row["nx"] for row in r["rows"]]
@@ -388,6 +441,14 @@ def test_rung_retry_ladder_and_failures():
         with _patched(O, CONV_TOL=1e-3):
             r3 = O.ladder(O.cfg_of(Pm=5.0), root, _quiet)
             c.check(f"looser CONV_TOL stops earlier ({r3['nx']})", r3["nx"] == 64 and r3["converged"])
+        def slow_solve(S, Pm, ka, flow, V_, R, Lx, nx, sigma, k=2, rtol_mult=1.0):
+            lam = 1e-3*(1 + 0.0655/nx**2)             # last rung-to-rung change 3e-6: in (CONV_TOL, 10 CONV_TOL)
+            return dict(values=np.array([0.99*lam, lam]), residuals=np.array([1e-12, 1e-12]),
+                        parity=np.array([-1.0 + 0j, 1.0 + 0j]), u_mean=0.0, seconds=1.0)
+        with _patched(O, solve=slow_solve):
+            r6 = O.ladder(O.cfg_of(Pm=19.0), root, _quiet)
+            c.check(f"converged means conv <= CONV_TOL exactly (conv {r6['conv']:.2e} at the top)",
+                    O.CONV_TOL < r6["conv"] < 10*O.CONV_TOL and r6["nx"] == 256 and r6["converged"] is False)
         r4 = O.ladder(O.cfg_of(Pm=7.0), root, _quiet, cap=64)
         c.check("cap stops the ladder", r4["nx"] == 64 and not r4["converged"])
         real_rung = O.rung
@@ -420,15 +481,23 @@ def test_make_data_and_readers_on_small_grids():
     O = _run_script()
     root = tempfile.mkdtemp(prefix="taranis_ofman_readers_")
     with _patched(O, S0=1e3, NXS=(256, 512), NX_SEED=256, PM_NF=(10.0, 30.0), PM_FA=(10.0,), ALPHA_FA=(0.3,),
-                  DENSE=((10.0, 0.3),), NX_INDEP=256), checks() as c:
+                  DENSE=((10.0, 0.3),), NX_INDEP=512), checks() as c:
         c.check("dense_results empty before the dense phase", O.dense_results(root) == {})
         done = O.make_data(root, phases=("nf", "fa", "dense"), log=_quiet)
         dr = O.dense_results(root)
-        top = {a: O.dense_top(1e3, 10.0, 0.5, "tanh" if a else "none", a, 1.0, 40.0, 256) for a in (0.0, 0.3)}
+        top = {a: O.dense_top(1e3, 10.0, 0.5, "tanh" if a else "none", a, 1.0, 40.0, 512) for a in (0.0, 0.3)}
         c.check("dense_results: the fastest growing dense eigenvalue at alpha and at 0",
                 list(dr) == [(10.0, 0.3)] and all(dr[(10.0, 0.3)][a] == O.pick(top[a]) for a in (0.0, 0.3))
                 and dr[(10.0, 0.3)][0.3] != dr[(10.0, 0.3)][0.0])
         c.check("make_data on nf, fa: done", done)
+        c.check("a capped, unconverged ladder leaves its phase INCOMPLETE",
+                O.make_data(root, phases=("nf",), log=_quiet, cap=256) is False)
+
+        def failing_ladder(*a, **k):
+            raise RuntimeError("fake refusal")
+        with _patched(O, ladder=failing_ladder):
+            c.check("an incomplete phase is not hidden by a later complete one",
+                    O.make_data(root, phases=("nf", "dense"), log=_quiet) is False)
         nf = O.nf_results(root)
         c.check("nf_results keyed by Pm", sorted(nf) == [10.0, 30.0])
         fa = O.fa_results(root)
@@ -445,7 +514,8 @@ def test_make_data_and_readers_on_small_grids():
             c.check("unknown phase raises", True)
         c.check("split_branches: fastest oscillating / fastest rest",
                 O.split_branches([0.1 + 0.5j, 0.2 + 0.9j, 0.05 + 0.1j, 0.3 - 0.2j]) == (0.2 + 0.9j, 0.3 - 0.2j)
-                and np.isnan(O.split_branches([0.1 + 0.1j])[0]) and O.split_branches([1 + 1j], im=2.0)[1] == 1 + 1j)
+                and np.isnan(O.split_branches([0.1 + 0.1j])[0]) and O.split_branches([1 + 1j], im=2.0)[1] == 1 + 1j
+                and O.split_branches([0.3 + 0.1j, 0.05 + 2.0j, 0.1 - 0.5j, 0.01 + 0j]) == (0.1 - 0.5j, 0.3 + 0.1j))
         with _patched(O, OSC_PM=(0.0, 100.0), OSC_NX=256):
             osc = O.osc_scan(root)
             B, _ = O.block_matrix(1e3, 100.0, O.KA, "sech", 1.0, 6.0, O.LX, 256)
@@ -536,10 +606,12 @@ HEADLINE = {       # the full campaign's numbers (2026-10-02), see the notebook'
 }
 
 def _full(O, fn):
-    try:
-        return fn(O.DATA_ROOT_FULL)
-    except Exception:
-        return {}
+    # the readers already skip uncached points; anything else they raise is a bug, not "no data"
+    return fn(O.DATA_ROOT_FULL)
+
+
+UNCONVERGED = {("fa", (0.0, 0.4)), ("fa", (0.0, 0.8)), ("rinv", 0.73), ("rinv", 0.9),
+               ("slope", 1e6)}     # the notebook's "*" rows (the S0 slope point IS the R = 0.73 one)
 
 
 @pytest.mark.fp64
@@ -547,11 +619,26 @@ def test_cached_headline_numbers():
     O = _run_script()
     if O.PROFILE != "full":
         pytest.skip("headline numbers are those of the full profile")
-    nf, fa = _full(O, O.nf_results), _full(O, O.fa_results)
-    if len(nf) < len(O.PM_NF) or len(fa) < len(O.PM_FA)*(len(O.ALPHA_FA) + 1):
+    if not os.path.isdir(os.path.join(O.DATA_ROOT_FULL, "solves")):
         pytest.skip("examples/data/tearing-ofman not generated (python examples/tearing_ofman_run.py)")
+    # once the cache exists, a point that does not read back is a FAILURE: a reader, threshold or key
+    # change that drops points must not turn this gate into a skip
+    nf, fa = _full(O, O.nf_results), _full(O, O.fa_results)
+    ri, slp, jt = _full(O, O.rinv_results), _full(O, O.slope_results), _full(O, O.jet_results)
+    bx, ck, rv, dn = _full(O, O.box_results), _full(O, O.cmk_results), _full(O, O.rvisc_results), _full(O, O.dense_results)
     HEAD = HEADLINE
     with checks() as c:
+        sizes = dict(nf=(len(nf), len(O.PM_NF)), fa=(len(fa), len(O.PM_FA)*(len(O.ALPHA_FA) + 1)),
+                     rinv=(len(ri), len(O.R_INV)), rvisc=(len(rv), len(O.R_VISC)), slope=(len(slp), len(O.S_SLOPE) + 1),
+                     jet=(len(jt), len(O.JET)), box=(len(bx), 2*len(O.BOX)), cmk=(len(ck), 2*len(O.CMK)),
+                     dense=(len(dn), len(O.DENSE)))
+        c.check(f"every campaign point reads back from the cache {sizes}", all(a == b for a, b in sizes.values()))
+        unconv = ({("fa", k) for k, r in fa.items() if not r["converged"]}
+                  | {("rinv", k) for k, r in ri.items() if not r["converged"]}
+                  | {(n, k) for n, d in (("nf", nf), ("rvisc", rv), ("slope", slp), ("jet", jt), ("box", bx), ("cmk", ck))
+                     for k, r in d.items() if not r["converged"]})
+        c.check(f"the unconverged points are exactly the documented ones ({sorted(map(str, unconv))})",
+                unconv == UNCONVERGED)
         for Pm, gref in HEAD["nf"].items():
             r = nf[Pm]
             c.check(f"fig 7 Pm={Pm:g}: gamma = {O.gamma(r):.6e} (recorded {gref:.6e}), conv {r['conv']:.1e}",
@@ -573,23 +660,20 @@ def test_cached_headline_numbers():
         c.check("Pm = 100: eigen ratio > 1 and increasing, 13c < 1 and decreasing",
                 all(sr[(100.0, a)] > 1 > O.ratio_13c(a, 100.0) for a in O.ALPHA_FA)
                 and all(sr[(100.0, a)] < sr[(100.0, b)] for a, b in zip(O.ALPHA_FA[:-1], O.ALPHA_FA[1:])))
-        dn = _full(O, O.dense_results)
         if (100.0, 0.6) in dn:
             d = dn[(100.0, 0.6)]
             dr = d[0.6].real/d[0.0].real
             c.check(f"independent dense route (nx {O.NX_INDEP}): Pm=100 ratio {dr:.4f} vs ladder "
                     f"{sr[(100.0, 0.6)]:.4f}", abs(dr/sr[(100.0, 0.6)] - 1) < HEAD["dense_tol"])
-        bx = _full(O, O.box_results)
         k0, k1 = (100.0, "none", 0.0, 1.0), (100.0, "tanh", 0.6, 1.0)
         if all(k + (L,) in bx for k in (k0, k1) for L in (O.LX, O.BOX_LX)):
             rb = O.gamma(bx[k1 + (O.BOX_LX,)])/O.gamma(bx[k0 + (O.BOX_LX,)])
             c.check(f"second box Lx={O.BOX_LX:g}: Pm=100 ratio {rb:.5f} vs {sr[(100.0, 0.6)]:.5f}",
                     abs(rb/sr[(100.0, 0.6)] - 1) < 1e-3)
-        ri, sl, jt = _full(O, O.rinv_results), _full(O, O.slope_results), _full(O, O.jet_results)
         if len(ri) == len(O.R_INV):
-            c.check("inviscid R sweep peaks at R = 0.73 (theirs too)", max(ri, key=lambda R: O.gamma(ri[R])) == 0.73)
-        if len(sl) == len(O.S_SLOPE) + 1:
-            _, e = O.local_slopes(sorted(sl), [O.gamma(sl[S]) for S in sorted(sl)])
+            c.check("inviscid R sweep: R = 0.73 is the grid maximum (near their peak at ~0.7)", max(ri, key=lambda R: O.gamma(ri[R])) == 0.73)
+        if len(slp) == len(O.S_SLOPE) + 1:
+            _, e = O.local_slopes(sorted(slp), [O.gamma(slp[S]) for S in sorted(slp)])
             c.check(f"fig 5a S-exponents {e} (recorded -0.5002, -0.5245)",
                     abs(e[0] + 0.5002) < 2e-4 and abs(e[1] + 0.5245) < 2e-4)
         if (0.0, 0.44) in jt:
@@ -603,6 +687,28 @@ def test_cached_headline_numbers():
         c.check(f"Pm = 1 along R = 1: d ln gamma/d ln Q = {e} ~ 1/3 (13c)", all(0.33 < x < 0.36 for x in e))
         for (Pm, a) in ((0.0, 0.6), (0.0, 0.8)):
             c.check(f"HI point Pm={Pm} alpha={a} reached NX_HI", fa[(Pm, a)]["nx"] == O.NX_HI)
+        # the fully independent FD route (one sheet, no box): the headline ratios, the R = 6 jet at S_v = 1e2
+        fd = _full(O, O.fd_results)
+        c.check(f"every FD point cached and converged in N ({ {k: f'{v[1]:.0e}' for k, v in fd.items()} })",
+                len(fd) == len(O.FD) and all(v[1] < 2e-6 for v in fd.values()))
+        rat = lambda a_, b_: fd[a_][0].real/fd[b_][0].real
+        c.check(f"FD Pm = 100 ratio {rat('fa100', 'nf100'):.6f} vs ladder {sr[(100.0, 0.6)]:.6f}",
+                abs(rat("fa100", "nf100")/sr[(100.0, 0.6)] - 1) < 5e-5)
+        c.check(f"FD Pm = 1 ratio {rat('fa1', 'nf1'):.6f} vs ladder {sr[(1.0, 0.6)]:.6f}",
+                abs(rat("fa1", "nf1")/sr[(1.0, 0.6)] - 1) < 5e-5)
+        c.check(f"the wrong sign survives Ofman's printed nu W'''': FD d4 ratio {rat('fa100_d4', 'nf100_d4'):.4f}",
+                abs(rat("fa100_d4", "nf100_d4")/rat("fa100", "nf100") - 1) < 5e-3)
+        lo = complex(jt[(1e4, 6.0)]["lam"])
+        c.check(f"S_v = 1e2 jet mode: FD (one sheet, L = 20) {fd['osc'][0]:.6e} vs ladder {lo:.6e}; L = 30 identical",
+                abs(fd["osc"][0]/lo - 1) < 1e-3 and abs(fd["osc_L30"][0]/fd["osc"][0] - 1) < 1e-6)
+        c.check(f"... and still growing with nu W'''' ({fd['osc_d4'][0]:.4e})", fd["osc_d4"][0].real > 0.02)
+        c.check(f"S_v = 1e2: no growing eigenvalue near the KH branch in the FD route ({fd['kh1e2'][2]})",
+                np.all(fd["kh1e2"][2].real < 0))
+        osc = _full(O, lambda root: O.osc_scan(root, compute=False))
+        c.check("R = 6 dense scan: the KH branch grows at S_v >= 1e3 and is stable at S_v = 3e2 and 1e2, where only "
+                "the oscillating branch can grow",
+                all(osc[p][1].real > 0 for p in (0.0, 100.0, 1e3)) and all(osc[p][1].real < 0 for p in (3e3, 1e4))
+                and osc[3e3][0].real < 0 and osc[1e4][0].real > 0.02)
 
 
 if __name__ == "__main__":
