@@ -411,6 +411,35 @@ Open: theory for the α = 1 exponents; α_c beyond S = 1e5; α_c(Pm).
    sheets with ends, shear + field-aligned flow (φ₀ = G(ψ₀) is steady).
 4. **3D oblique tearing with shear** (FD-z or `z_spectral`): resonance
    k_y B_y(x) + k_z = 0 at k-dependent surfaces; per-(ky,kz) blocks for 1D equilibria.
+   **DONE 2026-10-03: `examples/tearing-oblique.ipynb` + `examples/tearing_oblique_run.py`, gate
+   `tests/test_tearing_oblique.py`** (18 tests; implementer 58/58 one-line mutations killed, 7 after new
+   gates; fresh review 59 new mutations: 28 killed by the original gate, 46 after new gates, 12 equivalent,
+   1 accepted; cached tests now fail instead of skipping on incomplete data; prose numbers pinned).
+   z_spectral, nz = 4, (ky, kz) blocks `iky=1, iz=±1` of a z-independent x₀, Ly/Lz/diss through the
+   overrides seam. Exact gates: iz = 0 block = dims = 2 block (< 1e-13); x₀ = 0 Alfvén waves; ±kz
+   degeneracy split by iz; J(kz) = J(0) + i·kz·σ_x. ~4.1 h of solves + review runs.
+   - **Exact reduction** (RMHD has no kz in ∇⊥², z_diss_k = 0): the (ky, kz) block of (f, u) is the
+     kz = 0 block of (f − c, u), c = −kz/ky. Aligned flow: λ = λ_2D(f − c, α(f − c)) − i·ky·α·c, so
+     α_loc ≡ α and Im λ = −k u₀(x_s) (to 1%). Confirmed by the reviewer's own Chebyshev code with a
+     non-aligned flow to 3e-8.
+   - **Theory:** kΔ′ → f′(x_s)²[(f₊ − c)⁻² + (f₋ − c)⁻²] (tanh: 2(1 + c²)); self-similar layer maximum
+     γ_max = 0.440877 (A f′ η)^½, so for tanh γ*(c)/γ*(0) → (1 − c⁴)^½. Asymmetric tanh + 0.3 sech²:
+     fastest at c* = 0.344, +2.8% (theory only, no eigen-solve).
+   - **Harris, α = 0:** kz = 0 fastest over k (Baalrud, Bhattacharjee & Huang 2012's nonconstant-ψ
+     result); at fixed k = 0.5 (constant-ψ side) the oblique mode is faster. γ*(c)/γ*(0) = 0.988 / 0.948 /
+     0.856 at c = 0.2 / 0.4 / 0.6 (S = 1e4), 0.978 / 0.910 / 0.781 (S = 1e3); Chebyshev route ≤ 1.6e-4.
+     Eigen/layer → 1 like S^−0.41 (c = 0) to S^−0.32 (c = 0.6): a larger, slower oblique finite-S correction.
+   - **Aligned shear:** shear factor 0.847–0.850 for c = 0–0.6 at α = 0.6; 0.478 / 0.472 at α = 0.9
+     (c = 0 / 0.4). kz = 0 stays fastest (monotone on a fine c grid). Non-aligned V tanh(Rx): at equal
+     α_loc the flow/aligned-twin ratio spans 0.38–1.63 — α_loc does NOT set γ.
+   - **Pm = 100 sech², S = 1e4:** γ*(0.6)/γ*(0) = 2.449 at c = 0 (= item 1), 1.960 at c = 0.4.
+   - **α = 1 low-k branch:** survives obliquely, unevenly in k: at c = 0.05 it keeps 13% of its growth at
+     k = 0.265 and 73% at k = 0.61; maximum ≈ 1.78e-3 at k ≈ 0.54 (a third of c = 0). Same branch
+     (continuation in c and k). [Review correction: the implementer's "lives only within |kz/ky| ≲ 0.03"
+     was wrong.] taranis-only (the Chebyshev code does not resolve α = 1, ν = 0); converged in nx and box.
+   - Caveats/open: pair γ* sit 3–7e-4 (half the split) above an isolated sheet (ratios unaffected); no
+     S = 1e5 k-scans; α = 0.9, c = 0 converged to 3–5e-6; a theory of the oblique finite-S correction;
+     eigen-solves of the asymmetric sheet; c > 0.05 at α = 1.
 
 ## Rung 3a — saturated island amplitude (unchanged from v1)
 
@@ -457,4 +486,4 @@ controlled statistical-sensitivity estimator in plasma turbulence.
 4. Rung 1a notebook (no-shear tearing vs exact theory), then 1b (shear vs Julia
    reference), then rung 1b sensitivities — DONE 2026-09-29.
 4. Overrides seam + reference gate — machinery DONE 2026-09-29; rung 2 science DONE 2026-10-01.
-5. Rung 2b items (item 1 viscosity DONE 2026-10-02; item 2 DEPRIORITISED by Alfred 2026-10-02; items 4 then 3 next — handoff working_notes/handoff_2b_items3-4.md); theory follow-ups of item 1 and of the low-k branch: working_notes/handoff_visc_shear_theory.md, handoff_lowk_alpha1_mode.md; λ₁/m notebook; 3a; 3b.
+5. Rung 2b items (item 1 viscosity DONE 2026-10-02; item 2 DEPRIORITISED by Alfred 2026-10-02; item 4 DONE 2026-10-03; item 3 in review — handoff working_notes/handoff_2b_items3-4.md); theory follow-ups of item 1 and of the low-k branch: working_notes/handoff_visc_shear_theory.md, handoff_lowk_alpha1_mode.md; λ₁/m notebook; 3a; 3b.
