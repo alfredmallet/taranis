@@ -409,6 +409,39 @@ Open: theory for the α = 1 exponents; α_c beyond S = 1e5; α_c(Pm).
    the y-averaged equilibrium. Candidates: Fadeev/Kelvin–Stuart island chain
    ψ₀ = ln(cosh y + ε cos x) (coalescence instability; J₀ = F(ψ₀) exactly steady), finite
    sheets with ends, shear + field-aligned flow (φ₀ = G(ψ₀) is steady).
+   **Fadeev chain DONE 2026-10-03: `examples/tearing-chain.ipynb` + `examples/tearing_chain_run.py`, gate
+   `tests/test_tearing_chain.py`** (25 tests; implementer 62 one-line mutants, 61 killed (3 after new gates),
+   1 equivalent; fresh review 55 new: 21 killed by the original gate, 45 after new gates, 10 equivalent).
+   ψ₀ = ln(cosh x + ε cos y) (sheet normal x, the 1D codes' orientation), Ly = 4π (two chain periods), two
+   sheets at Lx = 20 (tanh pair + image sums). Exact symmetry sectors (T, R, P), with flow (T, PR, XR), in
+   real coordinates; **dense sector eig is the production route** (m ≈ 2900 at 256×128), propagator Arnoldi
+   with k = 1 at 512×256 — k ≥ 2 matrix-free does not converge (the ν = 0 neutral cluster; the reviewer's
+   own shift-invert stalls the same way), and every cached sector has exactly one growing mode.
+   - Reported value: the **P-mean** of the pair members, an estimator exact to first order in the image
+     coupling (members ±3% at Lx = 20, mean within 6e-5 of an isolated sheet) — always printed with the split.
+   - **Independent route** (review: single-sheet FD-in-x × Galerkin-in-y code, walls, no images, no taranis):
+     γ = 0.126205 at S = 1e3, ε = 0.3 vs 512×256 P-mean 0.126213 (production 256×128: −8.7e-4); also
+     ε = 0.1/0.6/0.75 and S = 1e4 within 1.3e-3. Nonlinear `block_of_steps` route at η = 0: 1.8e-3.
+   - ε → 0: sector eigenvalues = rung 1a ky block to 1e-12; R± split λ₀ ± cε, c from one sensitivity:
+     0.780/1.284/2.019/3.168 at S = 1e2–1e5 (∝ S^0.2, no theory).
+   - **Coalescence** (R+, T−: Finn & Kaw's mode): γ = 0.0250/0.0762/0.1261/0.1586/0.1673 at
+     ε = 0.01/0.1/0.3/0.6/0.75 (S = 1e3); autodiff s_S = −0.04…−0.02 for ε ≥ 0.2 (nearly ideal).
+     s_ε ≈ 0.5 only at S = 1e3 — it rises with S (0.63 / 0.70 at 1e4 / 1e5, ε = 0.03) toward Bondeson's
+     ideal γ ∝ w^{3/2} ∝ ε^{3/4} [review correction of "γ ∝ √ε"]. S = 1e4, ε = 0.3: 0.1218.
+   - Alternating mode (R−) stable by ε = 0.2–0.3. T = +1 growth is an inter-chain box artefact,
+     γ ∝ e^{−Lx/4} (1.06e-2 / 2.9e-3 / 6.5e-4 at Lx = 20/25/30; 0 at Lx = 40 resolved — the notebook's
+     printed Lx = 40 entry is under-resolved, flagged in prose).
+   - **Field-aligned flow** φ₀ = αψ₀ (ε = 0.3, S = 1e3, resolved by review): γ(α)/γ(0) = 0.964/0.856/
+     0.671/0.400/0.226 at α = 0.2/0.4/0.6/0.8/0.9 — above 1 − α², approaching it with S (α = 0.6: 0.705/
+     0.671/0.653 at S = 1e2/1e3/1e4). The production 256×128 grid is 2–10% low at α ≥ 0.6 (printed
+     notebook ratios flagged in prose; the headline gate's band passes only because of that, annotated).
+   - Autodiff dγ/dε, dγ/dη (overrides seam), dγ/dα vs Richardson eigenvalue FD: 3e-7–7e-11.
+   - Literature: Finn & Kaw (1976 PPPL report) conjectured a threshold ε₀ > 0; Pritchett & Wu 1979
+     (second-hand), Bondeson 1983 (abstract) and Liao, Lin & Zhu (arXiv:2304.00264, rigorous) refute it.
+     No published growth rate compared.
+   - Open: re-run the flow and Lx = 40 T+ points on resolved grids into the cache (notebook outputs still
+     show the production values); theory for c ∝ S^0.2 and the flow excess over 1 − α²; S ≥ 1e5 at finite ε
+     (needs non-uniform resolution); finite sheets with ends; non-aligned flows.
 4. **3D oblique tearing with shear** (FD-z or `z_spectral`): resonance
    k_y B_y(x) + k_z = 0 at k-dependent surfaces; per-(ky,kz) blocks for 1D equilibria.
    **DONE 2026-10-03: `examples/tearing-oblique.ipynb` + `examples/tearing_oblique_run.py`, gate
@@ -486,4 +519,4 @@ controlled statistical-sensitivity estimator in plasma turbulence.
 4. Rung 1a notebook (no-shear tearing vs exact theory), then 1b (shear vs Julia
    reference), then rung 1b sensitivities — DONE 2026-09-29.
 4. Overrides seam + reference gate — machinery DONE 2026-09-29; rung 2 science DONE 2026-10-01.
-5. Rung 2b items (item 1 viscosity DONE 2026-10-02; item 2 DEPRIORITISED by Alfred 2026-10-02; item 4 DONE 2026-10-03; item 3 in review — handoff working_notes/handoff_2b_items3-4.md); theory follow-ups of item 1 and of the low-k branch: working_notes/handoff_visc_shear_theory.md, handoff_lowk_alpha1_mode.md; λ₁/m notebook; 3a; 3b.
+5. Rung 2b items (item 1 viscosity DONE 2026-10-02; item 2 DEPRIORITISED by Alfred 2026-10-02; items 4 and 3 (Fadeev chain) DONE 2026-10-03 — handoff working_notes/handoff_2b_items3-4.md); theory follow-ups of item 1 and of the low-k branch: working_notes/handoff_visc_shear_theory.md, handoff_lowk_alpha1_mode.md; λ₁/m notebook; 3a; 3b.
