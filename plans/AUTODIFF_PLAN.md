@@ -357,30 +357,44 @@ Open: theory for the α = 1 exponents; α_c beyond S = 1e5; α_c(Pm).
    −Pm. A viscous stability boundary below α = 1 (bisection): 1 − α_c² = 0.0592 / 0.0619 at
    ν = 1e-2, 0.466 / 0.468 at ν = 0.1 — depends mainly on ν in this window. Open: a layer theory
    with both shear and viscosity; the weak complex pairs at ka ≤ 0.1, Pm ≥ 10.
-   **Ofman, Chen, Morrison & Steinolfson 1991 (Phys. Fluids B 3, 1364) comparison — SCRATCH,
-   2026-10-02, ungated** (script + 91 cached solves in `examples/data/tearing-ofman/scratch-2026-10-02/`,
-   untracked; being promoted to a gated notebook section). Their setup: Harris sheet (our exact
-   tanh pair, Lx = 40), S = 1e6, ka = 0.5, S_v = S/Pm; flows G = V tanh(Rx) (R = 1, V = α is our
-   u₀ = αb₀) and the jet V sech(Rx). Shift-invert ladders to nx ≤ 131072; viscous points converge
-   to ≤ 1e-10, inviscid shear to ≤ 3e-4 (α = 0.8: 5e-3).
-   - No flow (their fig 7): γ = 2.482e-4 (Pm 0), 2.132e-4 (0.01), 1.593e-4 (0.1), 1.096e-4 (1),
-     7.39e-5 (10), 4.94e-5 (100), 3.26e-5 (1e3), 2.12e-5 (1e4). Our layer relation (Harris Δ′a = 3,
-     f′ = 1) is 0.6–3.9% above, the gap growing with Pm (outer region viscous: √(ν/γ) ≈ 1.4a at
-     Pm = 100). Fit over their S_v = 1e2–1e7 ≈ 0.18 (theirs 0.168); local slope 0.14 at S_v ~ 1e7–1e8,
-     0.19 at S_v ≲ 1e3 — their 1/6 is the large-Pm limit, not a uniform law.
-   - Field-aligned shear, γ(α)/γ(0) at α = 0.2/0.4/0.6/0.8: Pm = 0: 1.22/1.40/1.42/1.20 (C&M 1989
-     eq. 1.6 of our paper: within 0–20%). Pm = 1: 0.986/0.942/0.857/0.702 — their eq. 13c
-     ((1−α²)^1/3 at Pm = 1) holds to ≤ 1.3%. **Pm = 100: 1.39/2.38/3.60/4.45 vs 13c's
-     0.88/0.72/0.59/0.45 — 13c has the wrong sign at large Pm** (crossover at α²Pm ~ 4, as 13c and
-     our α ~ Pm^−1/2 argument both place it). Confirms the sech² k_max destabilisation at fixed k on
-     their profile.
-   - Non-aligned flows (V = 1, R swept): inviscid fig 6 γ = 4.19/5.77/6.76/5.51e-4 at R = 0.3/0.5/
-     0.73/0.9 (peak at 0.73 as theirs, values ~15–20% below their plot); Pm = 1 (their fig 8)
-     γ = 2.56/2.90/2.91/2.25e-4 at R = 0.6/0.73/0.85/0.95 — NOT monotone in Q = 0.5(1−R²), so their
-     Q^1/3 was not obtained by varying R at V = 1 (unstated in the paper). S slopes at R = 0.73:
-     −0.500, −0.524 (theirs −1/2). Sech jet: R = 6 KH γ = 1.959e-2 (matches); R = 0.44 S_v slope
-     0.173 (Pm 1 → 100); R = 2.5 γ ≈ 4.5e-3 single grid; R = 0.44 inviscid failed (GMRES).
-   - Our JPP paper cites neither this paper nor Chen & Morrison 1990b (PoF B 2, 2575; 13c's source).
+   **Ofman, Chen, Morrison & Steinolfson 1991 (Phys. Fluids B 3, 1364) comparison — DONE 2026-10-02:
+   section 7 of `examples/tearing-viscosity.ipynb` + `examples/tearing_ofman_run.py`, gate
+   `tests/test_tearing_ofman.py`** (11 tests; implementer 60/60 one-line mutations killed, 5 of them after new gates;
+   promoted from the untracked scratch study in `examples/data/tearing-ofman/scratch-2026-10-02/`). Their setup:
+   Harris sheet (our exact tanh pair, Lx = 40), S = 1e6, ka = 0.5, S_v = S/Pm; flows G = V tanh(Rx) (R = 1,
+   V = α is our u₀ = αb₀) and the jet V[sech(Rx) − 1]. One Parameters per (nx, Lx), diss and Ly through the
+   overrides seam (gated against directly built Parameters). Per point: shift-invert ladder nx = 8192–131072
+   (262144 for the three slowest inviscid points), stopped at 1e-6. Viscous points converge to ≤ 2e-9; inviscid
+   shear to ≤ 4e-7, except α = 0.4 (1.2e-5), α = 0.8 (5.1e-5) and R = 0.73 (5.9e-6). The faster pair member is
+   reported: the even mode everywhere except the R = 6 jet at S_v ≤ 1e3. The pair split is ~5e-4.
+   ~3.9 h of solves (3 h wall, two to three processes).
+   - No flow (fig 7): γ = 2.4818e-4 (Pm 0), 2.1320e-4 (0.01), 1.5926e-4 (0.1), 1.0964e-4 (1), 7.3911e-5 (10),
+     4.9371e-5 (100), 3.2640e-5 (1e3), 2.1249e-5 (1e4). The exact layer relation (Harris Δ′a = 3, f′ = 1) is
+     0.6–8.5% above; the gap grows with Pm as the outer region turns viscous. Least-squares slope over their
+     S_v = 1e2–1e7: 0.1751 (theirs 0.168; the layer relation's own is 0.1686). The local slope runs 0.186 → 0.127,
+     crossing 1/6 near S_v ~ 1e6.
+   - Field-aligned shear, γ(α)/γ(0) at α = 0.2/0.4/0.6/0.8. Pm = 1: 0.9860/0.9417/0.8573/0.7020, so eq. 13c
+     ((1−α²)^1/3) holds to ≤ 1.3%. **Pm = 100: 1.386/2.379/3.603/4.445 vs 13c's 0.880/0.724/0.589/0.445 — 13c
+     has the wrong sign at large Pm.** The effect starts where 13c's Pm-factor does (α²Pm ~ 4). The 3.6029 is
+     reproduced by a dense eigvals route at nx = 4096 (to 3e-8) and at Lx = 60 (3.602951). This is the
+     fixed-k Harris confirmation of the sech² k_max destabilisation. Pm = 0: 1.217/1.398/1.419/1.201; C&M 1989
+     (JPP eq. 1.6 as printed) is 0.2–20% high. Its k-dependence fails a second k: at ka = 0.25 γ(0.25)/γ(0.5) =
+     1.372, against 1.581 as printed and 1.118 with (ka)^1/2.
+   - Non-aligned tanh flow, V = 1: inviscid (fig 6) γ = 2.725/4.191/5.765/6.757/5.508e-4 at R = 0.1/0.3/0.5/
+     0.73/0.9, peaking at 0.73 as theirs. S-exponents at R = 0.73 (fig 5a): −0.5002, −0.5245. Pm = 1 (fig 8):
+     γ(Q) has an effective exponent of 0.30 over Q = 0.02–0.14 and turns over at Q ≈ 0.2. So their Q^1/3 holds
+     roughly on their window (the scratch's "not reproduced" was too strong); exact Q^1/3 (0.345) is found along
+     R = 1.
+   - Jet, sheet frame (the box mean restored as a Doppler shift, −ik⟨u⟩; the scratch had left it in, Im ≈ −0.32,
+     and its inviscid R = 0.44 point failed). R = 0.44: γ = 2.831e-4 + 1.8e-6i inviscid, converged to 2e-9.
+     S_v slopes 0.175/0.171, the same as no flow. R = 2.5 / 6: 4.525e-3 / 1.959e-2 (match their plot); their
+     plotted Im parts are a few times smaller than ours (unresolved). R = 6 vs S_v: 1.63e-2 (1e4), 4.06e-3 (1e3,
+     odd member) — no stabilisation by 1e3. At S_v = 1e2 an oscillating mode 2.71e-2 + 0.780i dominates. It is
+     box- and grid-independent, growing for ν ≥ 1e-2 and damped at ν ≤ 3e-3: viscously destabilised and
+     unidentified.
+   - Open: a theory for the Pm ≫ 1 shear destabilisation; the S_v = 1e2 jet mode; Chen & Morrison 1990b's
+     derivation of 13c (not checked). Our JPP paper cites neither this paper nor Chen & Morrison 1990b (PoF B 2,
+     2575; 13c's source).
 2. **Non-proportional profiles**: u₀(x) ≠ αb₀(x) (e.g. different widths, offset shear
    layer). Still 1D, still the dense per-ky path.
 3. **2D equilibria** — where the harness beats any 1D code. ky blocks couple; matrix-free

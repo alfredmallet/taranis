@@ -189,6 +189,15 @@ Suggested order:
     jax device work, `nz` divisible by the GPU count, no `z_spectral`, and z-reducing
     diagnostics need a `comms.shard_call` wrapper).
 
+20. **tearing-viscosity.ipynb** — visco-resistive tearing with field-aligned shear flow through the
+    autodiff eigen-harness (`taranis/stability.py`, plans/AUTODIFF_PLAN.md rung 2b item 1): the exact
+    visco-resistive layer relation, k_max(Pm, α) by Newton on eigenvalue sensitivities, and what
+    viscosity does to the shear suppression (data: **tearing_viscosity_run.py**). Its last section
+    compares with **Ofman, Chen, Morrison & Steinolfson 1991** (Phys. Fluids B 3, 1364) on their own
+    Harris-sheet parameters (S = 10⁶, ka = 0.5; data: **tearing_ofman_run.py**, ~2.5 h of solves):
+    the no-flow γ(S_v), their eq. 13c (holds to ≤1.3% at Pm = 1, wrong sign at Pm = 100), the R
+    sweeps and the sech jet. Both scripts are resumable; the notebook only reads their caches.
+
 To run a 3D example under MPI instead: `pip install -e ".[mpi]"`, convert the notebook to a
 script and `mpirun -n <N> python script.py` with `nz % N == 0` (`comm_backend` then
 auto-resolves to `"mpi4jax"`). Launching under `mpirun` *without* the extra installed is a
