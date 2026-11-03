@@ -204,7 +204,8 @@ All distributed transport goes through `comms.py`: `halo_exchange`, `allreduce_s
   brings up `jax.distributed`, so the first `Runtime.resolve` (directly, or via the first
   `Parameters(comm_backend="jax")`) in a process must precede any jax device work in it;
   `"jax"`+`dims==2` is rejected. Launch flags/env:
-  docs/SAVIO_GPU_SETUP.md; measured scaling in docs/performance.md. The production
+  docs/SAVIO_GPU_SETUP.md (Savio), docs/DELTA_GPU_SETUP.md (NCSA Delta, drafted 2026-11-03,
+  unrun); measured scaling in docs/performance.md. The production
   multi-GPU pair is `slurms/forced_turbulence_multigpu.sh` +
   `examples/multigpu_forced_turbulence.py` — every export the backend needs, and the
   restart-by-resubmitting driver students start from. Two traps that path documents: a
