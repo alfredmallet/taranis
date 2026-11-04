@@ -86,8 +86,19 @@ PY=$TARANIS_ENV/bin/python
 REPO=$HOME/taranis
 DRIVER=$REPO/examples/multigpu_forced_turbulence.py
 
-# srun, NEVER mpirun.  pmix (pmix_v5) and pmi2 both exist on Delta; pmix first, and if
-# MPI_Init aborts under it, resubmit with MPI_MODE=pmi2.
+# srun, NEVER mpirun.  --mpi=pmix (pmix_v5); pmi2 is listed by `srun --mpi=list` but aborts
+# in MPI_Init_thread with this HPC-X build (probe case F).
+# MPI transport (job 23491994, 2026-11-03, slurms/delta_mpi_transport_probe.sh): HPC-X's
+# default UCX layer cannot reach peer ranks on a Slingshot node ("MPI_INIT has failed because
+# at least one MPI process is unreachable"), and every UCX_TLS restriction and --mpi=pmi2 fail
+# too.  OpenMPI's own ob1 with shared memory (vader) + tcp works; tcp is what multi-node will
+# use (MPI is control plane only on the jax backend).  coll/ucc otherwise prints "UCC library
+# doesn't support MPI_THREAD_MULTIPLE" x ranks and falls back -- disable it (and hcoll).
+export OMPI_MCA_pml=ob1
+export OMPI_MCA_btl=self,vader,tcp
+export OMPI_MCA_coll_ucc_enable=0
+export OMPI_MCA_coll_hcoll_enable=0
+
 MPI_MODE=${MPI_MODE:-pmix}
 
 # NO --gpu-bind (the jax/NCCL backend needs every node GPU visible to every process;

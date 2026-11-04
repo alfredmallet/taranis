@@ -33,7 +33,18 @@ NVLIBS=$("$TARANIS_ENV/bin/python" -c "import nvidia,os;print(':'.join(os.path.j
 [ -n "$NVLIBS" ] && export LD_LIBRARY_PATH="$NVLIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 echo "NVLIBS=${NVLIBS:-EMPTY}"
 
-MPI_MODE=${MPI_MODE:-pmix}   # pmix_v5 and pmi2 both exist here; flip if MPI_Init aborts
+# MPI transport (job 23491994, 2026-11-03, slurms/delta_mpi_transport_probe.sh): HPC-X's
+# default UCX layer cannot reach peer ranks on a Slingshot node ("MPI_INIT has failed because
+# at least one MPI process is unreachable"), and every UCX_TLS restriction and --mpi=pmi2 fail
+# too.  OpenMPI's own ob1 with shared memory (vader) + tcp works; tcp is what multi-node will
+# use (MPI is control plane only on the jax backend).  coll/ucc otherwise prints "UCC library
+# doesn't support MPI_THREAD_MULTIPLE" x ranks and falls back -- disable it (and hcoll).
+export OMPI_MCA_pml=ob1
+export OMPI_MCA_btl=self,vader,tcp
+export OMPI_MCA_coll_ucc_enable=0
+export OMPI_MCA_coll_hcoll_enable=0
+
+MPI_MODE=${MPI_MODE:-pmix}   # pmi2 FAILS here (probe case F); pmix only
 
 # One-task compute-node probe: what the job python sees BEFORE any phase runs.
 srun --mpi=$MPI_MODE --ntasks=1 --cpus-per-task=16 "$TARANIS_ENV/bin/python" -c "import os,sys,nvidia,jax; print('probe PYTHONPATH=',os.environ.get('PYTHONPATH')); print('probe CVD=',os.environ.get('CUDA_VISIBLE_DEVICES')); print('probe nvidia=',nvidia.__path__); print('probe devices=',jax.devices())" || true

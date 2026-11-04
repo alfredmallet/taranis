@@ -165,7 +165,8 @@ differences:
 | `module purge; module load anaconda3 gcc openmpi` | `module reset; module load nvhpc-hpcx-cuda12-openmpi4/26.5 miniforge3-python` | CPE stack, no anaconda |
 | `unset PYTHONPATH` | not needed | no anaconda module to leak it — kept harmlessly in the scripts |
 | `export NCCL_P2P_DISABLE=1` | **DROPPED** | that was a Savio PCIe ACS bug; here the GPUs are NVLinked. Confirm with `bench/nccl_repro.py` (rung 2) before trusting any timing |
-| `--mpi=pmix` | `--mpi=pmix` (confirmed, rung 1) | both exist; HPC-X's PMIx client talks to Slurm's pmix_v5. `pmi2` stays as the `MPI_MODE` fallback in the scripts, unused |
+| `--mpi=pmix` | `--mpi=pmix` only | HPC-X's PMIx client talks to Slurm's pmix_v5; `pmi2` aborts in `MPI_Init_thread` (probe case F) |
+| OpenMPI transport defaults | `OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader,tcp`, `coll_ucc_enable=0`, `coll_hcoll_enable=0` | HPC-X's default UCX layer finds no reachable peer on a Slingshot node (job 23491350; probe cases A/C/D/G all fail, `UCX_TLS` restrictions included). ob1+vader is intra-node shared memory, tcp carries multi-node; MPI is control plane only on the jax backend so this costs nothing there. ucc/hcoll off silences a per-rank `MPI_THREAD_MULTIPLE` error from a plugin that falls back anyway |
 | `TARANIS_PRECISION=32` | **`64`** | A100 fp64 is full rate; that is the point of being here |
 | multi-node on TCP | `module load aws-ofi-nccl/1.19.2` + `NCCL_SOCKET_IFNAME=hsn` (module confirmed present; UNVERIFIED with jax's pip NCCL) | the user guide's PyTorch example for Slingshot 11; look for `NET/OFI` in `NCCL_DEBUG=INFO` output, `NET/Socket` means the plugin was not picked up (`NCCL_NET_PLUGIN`). Single-node runs need none of it |
 | `savio4_gpu` is the only pool | `gpuA100x4-preempt` at half price | the driver already restarts from the newest snapshot, so preemption costs one block |
@@ -211,7 +212,12 @@ Each rung is cheap; do not skip one. Record what each printed next to its UNVERI
    SHARED node with `--ntasks=2 --gpus-per-node=1` (instant start) rather than another
    exclusive-node queue wait: `sbatch slurms/delta_mpi_transport_probe.sh` (4 ranks, 1 GPU,
    ~0.25 SU) tries the candidate `OMPI_MCA_pml`/`btl`/`UCX_TLS` settings in one job and
-   prints a per-case `exit=`; the winner goes into the job scripts' exports.
+   prints a per-case `exit=`. **Result (job 23491994, gpua002)**: default, `ucx` with
+   `UCX_TLS=sm,tcp,self` or `posix,sysv,tcp,self`, and `--mpi=pmi2` all fail; `ob1` with
+   `self,vader,tcp` and with `self,vader` pass (4× `rank i of 4 sum 4`). `ucx_info -d` does list
+   posix/sysv/cma/tcp/cuda transports, so the UCX failure is in HPC-X's pml, not a missing
+   transport — not pursued. Exports baked into both job scripts; the NCCL side is still
+   untested until the resubmitted rung 3 runs.
 3. **Backend correctness, 4 GPUs** (~3 SU): `sbatch slurms/delta_backend_check.sh` — the five
    phase mpi4jax vs jax battery with cross-backend restarts, fp64, 64²×32. Every phase must
    end in `ALL PASS`. This is the only real exercise of `comms.Runtime` bringing up
