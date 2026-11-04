@@ -202,6 +202,16 @@ Each rung is cheap; do not skip one. Record what each printed next to its UNVERI
    `slurms/delta_backend_check.sh` — one queue wait for rungs 2 and 3 together. If it hangs, walk the knob ladder in that file's header — but on NVLink
    hardware a hang points at the PMIx/coordinator layer first: try `MPI_MODE=pmi2`, then
    `RMHD_REPRO_NOMPI=1`.
+   **First attempt FAILED 2026-11-03 (job 23491350, node gpua090)**: every phase (the NCCL
+   repro included) died ~5 s in with `MPI_INIT has failed because at least one MPI process is
+   unreachable from another` — HPC-X's default UCX transport finds no fabric it knows on a
+   Slingshot node and does not fall back to shared memory/TCP by itself; a single rank (rung 1)
+   never needs a transport, which is why it passed. The plugin/probe side was fine (all four
+   GPUs visible, no PYTHONPATH). Fix: force a transport via `OMPI_MCA_*` — selected on a
+   SHARED node with `--ntasks=2 --gpus-per-node=1` (instant start) rather than another
+   exclusive-node queue wait: `sbatch slurms/delta_mpi_transport_probe.sh` (4 ranks, 1 GPU,
+   ~0.25 SU) tries the candidate `OMPI_MCA_pml`/`btl`/`UCX_TLS` settings in one job and
+   prints a per-case `exit=`; the winner goes into the job scripts' exports.
 3. **Backend correctness, 4 GPUs** (~3 SU): `sbatch slurms/delta_backend_check.sh` — the five
    phase mpi4jax vs jax battery with cross-backend restarts, fp64, 64²×32. Every phase must
    end in `ALL PASS`. This is the only real exercise of `comms.Runtime` bringing up
