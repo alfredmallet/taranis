@@ -19,7 +19,6 @@ from _rmhd_testing import bootstrap, checks
 
 bootstrap()
 
-import functools
 import importlib
 import os
 import sys
@@ -172,7 +171,6 @@ def test_c_pm_kz_pairs_split_by_iz_and_resonance_sign():
                 np.sum(np.abs(evf - top1) < 1e-9) >= 2 and np.sum(np.abs(ev[1] - top1) < 1e-9) == 1)
         c.check("the kz != 0 tearing value differs from kz = 0's", abs(top1 - ev[0][np.argmax(ev[0].real)]) > 1e-5)
         # aligned flow: lambda(-c) = conj lambda(c)
-        xa = B.x0_of("pair", nx, Lx, "tanh", 0.6, 1.0)
         lp = B.pick(B.dense_top("pair", S, 0.0, k, cc, "tanh", 0.6, 1.0, Lx, nx))
         lm = B.pick(B.dense_top("pair", S, 0.0, k, -cc, "tanh", 0.6, 1.0, Lx, nx))
         c.check(f"aligned flow: lambda(-c) == conj lambda(c) ({lp:.8e}, {lm:.8e})",
@@ -294,8 +292,10 @@ def test_d_selfsimilar_maximum_and_large_S_ratio():
         c.check("asym_rule^2 = A f' (tanh: 2(1 - c^4))", abs(B.asym_rule(0.4)**2 - 2*(1 - 0.4**4)) < 1e-12)
         xp = B.current_peak()
         grid = np.linspace(-3, 3, 60001)
+        # |f''| < 1e-7, not 1e-8: the bounded minimize_scalar leaves f'' = -9.1e-9 on arm64 and
+        # 1.9e-8 on the x86 CI runner (2026-11-04) -- 1e-8 was inside the optimizer's noise floor.
         c.check(f"current_peak = argmax f' ({xp:.6f}; f'' there {B.ASYM.f2(xp):.1e})",
-                abs(B.ASYM.f2(xp)) < 1e-8 and abs(xp - grid[np.argmax(B.ASYM.f1(grid))]) < 2e-4
+                abs(B.ASYM.f2(xp)) < 1e-7 and abs(xp - grid[np.argmax(B.ASYM.f1(grid))]) < 2e-4
                 and abs(B.current_peak(B.TANH)) < 1e-6)
 
 

@@ -160,7 +160,7 @@ def _theory_checks(O, T, V):
                 O.dprime_a(0.5) == 3.0 and abs(O.dprime_a(0.25) - 7.5) < 1e-15)
         c.check("13c: 1 at g = 0 for every Pm", all(O.ratio_13c(0.0, p) == 1.0 for p in (0.01, 1.0, 100.0)))
         c.check("13c at Pm = 1 is (1 - g^2)^(1/3)", abs(O.ratio_13c(0.6, 1.0) - 0.64**(1/3)) < 1e-15)
-        c.check(f"13c hand values (Pm=100 g=0.2: 0.8803240304; Pm=0.01 g=0.8: 0.4450353915)",
+        c.check("13c hand values (Pm=100 g=0.2: 0.8803240304; Pm=0.01 g=0.8: 0.4450353915)",
                 abs(O.ratio_13c(0.2, 100.0) - 0.8803240304007952) < 1e-13
                 and abs(O.ratio_13c(0.8, 0.01) - 0.445035391533413) < 1e-13)
         c.check("13c symmetric under Pm -> 1/Pm only through (1-Pm)^2/(4Pm): Pm=100 and 0.01 equal",

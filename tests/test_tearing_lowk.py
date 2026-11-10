@@ -159,7 +159,9 @@ def test_budget_equals_operator_energy_rates_for_any_vector():
             c.check(f"{tag}: E split: Ep + Em == E (budget)",
                     abs(tot["Ep"] + tot["Em"] - tot["E"]) < 1e-12*tot["E"])
             c.check(f"{tag}: Elsasser energy fractions == Fourier route",
-                    abs(tot["Em"]/tot["E"] - Em_W/E_W) < 1e-10, f"{tot['Em']/tot['E']} {Em_W/E_W}")
+                    abs(tot["Em"]/tot["E"] - Em_W/E_W) < 1e-10
+                    and abs(tot["Ep"]/tot["E"] - Ep_W/E_W) < 1e-10,
+                    f"{tot['Em']/tot['E']} {Em_W/E_W}; {tot['Ep']/tot['E']} {Ep_W/E_W}")
             c.check(f"{tag}: dE/dt / E: budget {rate/tot['E']:+.10e} == operator "
                     f"{dE_W/E_W:+.10e}", abs(rate/tot["E"] - dE_W/E_W) < 1e-9*abs(dE_W/E_W) + 1e-12)
             c.check(f"{tag}: dEp/dt / E: budget == operator",
@@ -704,7 +706,6 @@ def test_kmax_brent_and_gpoint_ladder():
 
 def test_branch_gap_brent_and_alpha_c_brent_on_analytic_family():
     L = _run_script("tearing_lowk_run")
-    state = dict(alpha=None)
 
     def fake_gpoint(S, k, alpha, nx, Lx, pred, nu=0.0, root=None, log=print, compute=True,
                     dense_first=False):

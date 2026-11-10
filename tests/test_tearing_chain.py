@@ -738,7 +738,8 @@ def test_readers():
                 abs(ct[(100.0, 0.3, g)]["mean"] - C.dconv_table(root=root)[(100.0, 0.3)]) < 1e-7
                 and ct[(100.0, 0.3, g)]["res"] <= 1e-4
                 and ct[(100.0, 0.3, g)]["res"] == max(pp[0]["residuals"][0], pp[1]["residuals"][0]))
-        pa = [C.prop_point(100.0, 0.3, sg, g, alpha=0.4, root=root) for sg in C.PR]
+        for sg in C.PR:   # populate the alpha = 0.4 propagator pair conv_table reads
+            C.prop_point(100.0, 0.3, sg, g, alpha=0.4, root=root)
         c.check("conv_table: the alpha point == the dense alpha pair",
                 abs(C.conv_table(root=root)[(100.0, 0.3, g, 0.4)]["mean"] - at[1]["mean"]) < 1e-7)
         for e in (0.0, 1e-3):

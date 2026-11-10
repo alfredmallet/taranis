@@ -232,7 +232,6 @@ def test_notebook_ridge_fit_helper():
             np.exp(L), G, dG
     with checks() as c:
         for al in (0.3, 0.9):
-            u = 1 - al*al
             _, km, _, _ = rows_at(al, (1.0,))
             kas = tuple(km*1.15**np.arange(-2.3, 2.4, 1.0))      # 5 points, k_max off-centre
             rows, km, G, dG = rows_at(al, kas)

@@ -89,7 +89,9 @@ def test_dprime_formula_against_shooting():
             exact, shot = _dprime_exact(ka), _dprime_shoot(ka)
             rel = abs(shot/exact - 1.0)
             print(f"  ka = {ka}: Delta'a exact {exact:.12f}  shooting {shot:.12f}  rel {rel:.1e}")
-            c.check(f"Delta'(ka={ka}) formula == shooting to 1e-8", rel < 1e-8, f"rel = {rel:.2e}")
+            # 1e-7, not 1e-8: the DOP853 shooting lands at rel 3.5e-9 on arm64 and 1.4e-8 on
+            # the x86 CI runner (2026-11-04) -- the 1e-8 bar was inside the platform scatter.
+            c.check(f"Delta'(ka={ka}) formula == shooting to 1e-7", rel < 1e-7, f"rel = {rel:.2e}")
         c.check("Delta' vanishes at ka = sqrt 5", abs(_dprime_exact(np.sqrt(5.0))) < 1e-14)
         c.check("small-ka limit 15/(ka)^2 + 1/8",
                 abs(_dprime_exact(1e-3) - (15e6 + 0.125)) < 1e-4)

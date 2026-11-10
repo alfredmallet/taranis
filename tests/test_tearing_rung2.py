@@ -443,7 +443,7 @@ def test_dispersion_helper_boxes_levels_and_seeds():
 def test_eig_only_eta_override_moves_eta_only():
     # the campaign's FD-gate eigenvalue solver: eta through overrides (nu stays 0), k through Ly
     R = _run_script("tearing_rung2_run")
-    S, k, alpha, nx, Lx = 1e3, 0.5, 0.6, 512, 30.0
+    S, alpha, nx, Lx = 1e3, 0.6, 512, 30.0
     eta2 = 1.3e-3
     ref = _dense_lead(S, 0.55, nx, Lx, alpha, (0.0, eta2))
     got = R.eig_only(S, 0.55, alpha, nx, Lx, ref*1.03, lam_hint=ref, eta=eta2)["lam"]

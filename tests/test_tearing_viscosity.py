@@ -127,11 +127,11 @@ def test_implicit_slopes_on_analytic_gamma():
             c.check(f"S={S:.0e} Pm={Pm}: d ln k*/d ln Pm -> b at O(h^2) ({sl['slope_k_Pm']:.8f}, order {o:.2f})",
                     errs[-1] < 1e-4 and 1.8 < o < 2.2, f"{errs}")
             c.check(f"d ln k*/d ln S|Pm -> -(a + b) ({sl['slope_k_S']:.6f})", abs(sl["slope_k_S"] + a + b) < 1e-4)
-            c.check(f"d ln gamma*/d ln S|Pm == -(p + q) (envelope)", abs(sl["slope_g_S"] + p + q) < 1e-12)
-            c.check(f"d ln gamma*/d ln Pm|S == q", abs(sl["slope_g_Pm"] - q) < 1e-12)
+            c.check("d ln gamma*/d ln S|Pm == -(p + q) (envelope)", abs(sl["slope_g_S"] + p + q) < 1e-12)
+            c.check("d ln gamma*/d ln Pm|S == q", abs(sl["slope_g_Pm"] - q) < 1e-12)
             c.check("dk*/dnu = -gamma_knu/gamma_kk == b k*/nu", abs(sl["dk_dnu"]/(b*ks/nu) - 1) < 1e-3
                     and abs(sl["dk_deta"]/(a*ks/eta) - 1) < 1e-3)
-            c.check(f"d ln k*/d ln(1-alpha^2) -> e, d ln gamma*/d ln(1-alpha^2) == r",
+            c.check("d ln k*/d ln(1-alpha^2) -> e, d ln gamma*/d ln(1-alpha^2) == r",
                     abs(sl["slope_k_u"] - e) < 1e-4 and abs(sl["slope_g_u"] - r) < 1e-12)
             c.check("dk*/dalpha", abs(sl["dk_dalpha"]/(ks*e*(-2*al)/u) - 1) < 1e-3)
             c.check("gamma_kk from gamma agrees", abs(sl["gkk"]/sl["gkk_from_gamma"] - 1) < 2e-3)
@@ -752,7 +752,6 @@ def test_kmax_solve_grid_check_signs():
     # the nx/2 grid check: grid_dk = k*(nx/2) - k*(nx) from one Newton step, grid_dgamma =
     # gamma(nx/2) - gamma(nx), on an analytic gamma whose maximum moves with nx
     V = _run_script()
-    R = V.R
     k0, G, A, nx = 0.47, 0.05, 0.3, 512
     k_lo, G_lo = k0*(1 + 2e-3), G*(1 + 1e-4)
 
