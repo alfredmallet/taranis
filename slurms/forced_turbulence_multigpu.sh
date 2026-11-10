@@ -83,6 +83,7 @@ export TARANIS_TEND=10.0
 export TARANIS_TSNAP=0.5
 export TARANIS_SCHEME=lsrk54
 export TARANIS_SNAPDIR=$SLURM_SUBMIT_DIR/data/turb_multigpu
+export TARANIS_ZDISS=50        # z filter: default 0.25 lets aliased energy pile up at high kz
 
 PY=$HOME/.conda/envs/jax_gpu/bin/python
 REPO=$HOME/taranis

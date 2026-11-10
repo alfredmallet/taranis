@@ -23,6 +23,13 @@ Every knob, with its default:
     TARANIS_EPS        0.3         total energy injection rate, split evenly z+/z-
     TARANIS_DISS       1e-5        nu = eta
     TARANIS_HYPER      3           dissipation order ((-1)^h nu k^(2h))
+    TARANIS_ZDISS      0.25        finite-difference-z filter -z_diss*(dz/2)^4 d_z^4: its
+                                   damping rate is z_diss*sin^4(pi*kz/nz), i.e. z_diss at
+                                   the kz Nyquist and ~0 below kz ~ nz/4.  The default is
+                                   too weak to stop aliased energy piling up at high kz
+                                   in a developed cascade; ~50 damps kz > nz/5 at the
+                                   cascade rate and is free in dt up to ~nz/(2 pi)
+                                   (set_timestep bounds dt by max(1/dz, ..., z_diss))
 
 Restarting is just resubmitting: if `TARANIS_SNAPDIR` already holds snapshots the run
 picks up from the newest one and extends to `TARANIS_TEND`, so a run longer than one
@@ -54,6 +61,7 @@ SNAP_PATH = os.environ.get("TARANIS_SNAPDIR", "data/multigpu_forced_turbulence")
 EPS = _env_float("TARANIS_EPS", 0.3)
 DISS = _env_float("TARANIS_DISS", 1e-5)
 HYPER = _env_int("TARANIS_HYPER", 3)
+ZDISS = _env_float("TARANIS_ZDISS", 0.25)
 BACKEND = os.environ.get("TARANIS_BACKEND", "jax")
 if BACKEND in ("", "auto", "none"):
     BACKEND = None
@@ -76,7 +84,7 @@ from taranis import comms
 # --------------------------------------------------------------------------------------
 params = jr.Parameters(
     nx=NX, ny=NX, nz=NZ, Lx=2 * np.pi, Ly=2 * np.pi, Lz=2 * np.pi, dims=3,
-    eqpars={"diss": (DISS, DISS), "hyper": HYPER},
+    eqpars={"diss": (DISS, DISS), "hyper": HYPER}, z_diss=ZDISS,
     cfl_safety=0.5, comm_backend=BACKEND,
     forcing=True, forcing_mode="elsasser",
     forcing_power_elsasser=(EPS / 2, EPS / 2),   # sum to the total target rate EPS
