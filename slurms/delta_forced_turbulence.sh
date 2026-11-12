@@ -8,7 +8,9 @@
 # snapshot in TARANIS_SNAPDIR.  Setup and the Delta-vs-Savio differences:
 # docs/DELTA_GPU_SETUP.md; the reasoning behind every export: docs/SAVIO_GPU_SETUP.md §4.
 #
-# STATUS 2026-11-03: drafted, not yet run (docs/DELTA_GPU_SETUP.md §4 is the ladder).
+# STATUS 2026-11-11: RAN as ladder rung 4 (job 23738721): 512^2x128 fp64, t=0->10.02, 6580
+# steps in 364 s (<=55 ms/step incl. compile), 21 snapshots on /work/hdd.  Multi-node (rung 5)
+# still unrun.  Clean step timing: slurms/delta_bench.sh.
 #
 # Charging is per GPU-hour on RESERVED resources: 4 A100s = the whole node = 4 SU/h on
 # gpuA100x4 (half that on gpuA100x4-preempt, which the resubmit driver tolerates).  For more
@@ -34,7 +36,7 @@ set -uo pipefail
 # Cray PE: reset, never purge.  No anaconda module on Delta; miniforge3-python is the base.
 module reset
 module load nvhpc-hpcx-cuda12-openmpi4/26.5 miniforge3-python
-TARANIS_ENV=${TARANIS_ENV:-/projects/bihz/$USER/jax_gpu}     # UNVERIFIED path, see doc §2
+TARANIS_ENV=${TARANIS_ENV:-/projects/bihz/$USER/jax_gpu}     # verified (jobs 23738568/23738721), doc §2
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$TARANIS_ENV"
 

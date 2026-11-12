@@ -21,7 +21,7 @@
 
 module reset
 module load nvhpc-hpcx-cuda12-openmpi4/26.5 miniforge3-python
-TARANIS_ENV=${TARANIS_ENV:-/projects/bihz/$USER/jax_gpu}     # UNVERIFIED path, see doc §2
+TARANIS_ENV=${TARANIS_ENV:-/projects/bihz/$USER/jax_gpu}     # verified (job 23738568 ALL PASS), doc §2
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate "$TARANIS_ENV"
 

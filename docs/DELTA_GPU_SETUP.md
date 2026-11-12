@@ -1,7 +1,11 @@
 # taranis on NCSA Delta GPUs — setup and running multi-GPU
 
-**Status (2026-11-03): drafted from the Delta user guide and a login-node survey; NOT yet run
-on a compute node.** Every step marked UNVERIFIED below is a guess that the bring-up ladder
+**Status (2026-11-10): rungs 1–3 of §4 PASSED on compute nodes — 1-GPU serial, 4-GPU NCCL with
+NVLink P2P and no Savio workarounds, and the full mpi4jax-vs-jax backend battery with
+cross-backend restarts (job 23738568) — and rung 4, one-node production at 512²×128 fp64
+(job 23738721, 2026-11-11): 6580 steps in 364 s, ≤55 ms/step including compile, 21
+snapshots on /work/hdd. Production on one Delta node WORKS. Next: a clean ms/step + 1/2/4-GPU
+scaling with `bench/bench_phase1.py`, then rung 5 multi-node (aws-ofi-nccl, UNRUN).** Every step marked UNVERIFIED below is a guess that the bring-up ladder
 (§4) is meant to settle; fix the text as each rung passes. The reasoning behind every
 environment export and launch flag is in `docs/SAVIO_GPU_SETUP.md` §3–§6 and is not
 repeated here — this file carries only what Delta does differently, plus a complete recipe.
@@ -110,8 +114,35 @@ ceiling is 0.11.2; it warns at import). Pin jax and rebuild mpi4jax against it:
 
 ```bash
 pip install "jax[cuda12]==0.11.2"
-python -m pip install --no-cache-dir --force-reinstall --no-deps --no-binary=mpi4jax mpi4jax   # same CUDA_HOME/OMPI_CC exports as above
+# --no-build-isolation is REQUIRED: mpi4jax's extension takes its XLA FFI headers from the
+# jaxlib pip can see at build time, and pip's isolated build env resolves the NEWEST jaxlib
+# (0.12.x, FFI API 0.5) regardless of what the runtime env holds (0.11.2, API 0.4) — see
+# rung 3 below (job 23492171). PIP_CONSTRAINT=<jax==0.11.2 pin> was tried 2026-11-10 with
+# pip 26.2.2 and did NOT reach the build env (it still installed jaxlib-0.12.0.1 there). So
+# build in the env itself, after installing mpi4jax's build deps into it:
+pip install "setuptools>=82.0.1" wheel "nanobind>=2.0.0"
+# same CUDA_HOME/CUDA_PATH/CUDA_ROOT and OMPI_CC exports as above — without CUDA_HOME the
+# link fails with "cannot find -lcudart" (2026-11-03 and again 2026-11-10)
+python -m pip install --no-cache-dir --no-build-isolation --force-reinstall --no-deps --no-binary=mpi4jax -v mpi4jax 2>&1 | grep -E "jaxlib/include|CUDA INFO|error|Successfully"
+# every -I.../jaxlib/include must be under $TARANIS_ENV/lib/python3.12/site-packages, never
+# /tmp/pip-build-env-*. CUDA INFO must name EITHER cuda/12.9 OR the env's own
+# site-packages/nvidia/cuda_runtime (libs [':libcudart.so.12'], rpath into the env) — the
+# latter is what the 2026-11-10 rebuild resolved, and is the same libcudart the jax CUDA
+# plugin loads, so it is the better outcome. Verified building both bridges 2026-11-10.
+python -c "import jax, jaxlib; print(jax.__version__, jaxlib.__version__)"   # 0.11.2 0.11.2
 ```
+
+Then, on a compute node (1 GPU, shared, instant — never on a login node, §2), verify the
+rebuilt extension against the runtime jax BEFORE spending an exclusive-node queue wait:
+`srun ... $PY -c 'import mpi4jax, jax; print(jax.devices())'`. A header mismatch is NOT a
+warning: mpi4jax registers its FFI handlers during XLA backend init, so a bad build raises
+`XLA FFI handler registration for mpi_*_ffi ... handler's API version (0.5) is incompatible
+with the framework's API version (0.4)` from `jax.devices()` and poisons EVERY backend in the
+process — CUDA and CPU, the `"jax"` comm backend included (`_mpi_compat` imports mpi4jax at
+module scope whenever it is importable). The rung-1 `CUDA bridge OK` import check does not
+catch this (the mismatch surfaces at backend init, not at import). **The
+`--no-build-isolation` rebuild PASSED this check 2026-11-10**: `0.11.2 0.11.2` on the login
+node, `0.11.2 [CudaDevice(id=0)]` with no FFI error from the 1-GPU shared-node `srun`.
 
 **Check `which pip` before every install.** With base auto-activation on, a fresh login shell
 sits in the read-only system `(base)` env and pip fails with `Permission denied:
@@ -181,7 +212,11 @@ backend that is the Savio "invalid device ordinal" failure — do not add it.
 grid, now at fp64), 1024²×256 is 2.2 GB/GPU → ~22 GB with workspace and fits; 1024²×512 does
 not on one node. Expect roughly the Savio fp32 step time at the same grid (A100 fp64 moves
 twice the bytes at twice the bandwidth), so ~80 ms/step at 512²×128 and ~0.6 s/step at
-1024²×256 — UNVERIFIED, measure. `nz` must be divisible by the total GPU count.
+1024²×256 was the guess. **Measured 2026-11-11 (rung 4, job 23738721): ≤55.3 ms/step at
+512²×128 fp64 on 4 A100s** — 6580 steps in 364.0 s wall INCLUDING the first compile and 20
+orbax save-waits of 1.1–2.0 s, so the steady-state step is somewhere under ~50 ms; faster than
+Savio's 4×A5000 at the same grid in fp32 (77 ms/step, docs/performance.md). The 1024²×256
+figure is still a guess. `nz` must be divisible by the total GPU count.
 
 ## 4. Bring-up ladder
 
@@ -216,18 +251,75 @@ Each rung is cheap; do not skip one. Record what each printed next to its UNVERI
    `UCX_TLS=sm,tcp,self` or `posix,sysv,tcp,self`, and `--mpi=pmi2` all fail; `ob1` with
    `self,vader,tcp` and with `self,vader` pass (4× `rank i of 4 sum 4`). `ucx_info -d` does list
    posix/sysv/cma/tcp/cuda transports, so the UCX failure is in HPC-X's pml, not a missing
-   transport — not pursued. Exports baked into both job scripts; the NCCL side is still
-   untested until the resubmitted rung 3 runs.
+   transport — not pursued. Exports baked into both job scripts.
+   **PASSED 2026-11-03 (job 23492171, node gpua061)** as phase 0 of the resubmitted backend
+   check: all four ranks `init ok ... global=4`, then `psum OK got=10.0 want=10.0 PASS` ×4,
+   `phase 0 exit=0`, in 29.5 s wall. NCCL 2.32.3+cuda12.9 on driver 13.0 chose
+   `P2P/CUMEM/read` on every channel (`isAllDirectP2p 1`) with NO `NCCL_P2P_DISABLE` — the
+   Savio PCIe workaround is confirmed unnecessary here. The `WatchTasksAsync failed ...
+   Connection refused` warnings on stderr come after the PASS lines, at coordinator teardown,
+   and are harmless.
 3. **Backend correctness, 4 GPUs** (~3 SU): `sbatch slurms/delta_backend_check.sh` — the five
    phase mpi4jax vs jax battery with cross-backend restarts, fp64, 64²×32. Every phase must
    end in `ALL PASS`. This is the only real exercise of `comms.Runtime` bringing up
    `jax.distributed`, the `shard_call` boundary and the global snapshot layout on this
    machine.
+   **First attempt FAILED 2026-11-03 (job 23492171, gpua061, same job as the rung-2 PASS)**:
+   phases 1, 2, 4a, 4b all died in 7–14 s before any stepping, every rank with
+   `jax.errors.JaxRuntimeError: INVALID_ARGUMENT: XLA FFI handler registration for
+   mpi_<op>_ffi on platform CUDA ... handler's API version (0.5) is incompatible with the
+   framework's API version (0.4)` for every mpi4jax op, then `RuntimeError: Unable to
+   initialize backend 'cpu'` from `jax.devices()` (`comms.get_mesh`, and the test's own
+   header print). Phases 3 and 5 then tracebacked on `os.listdir` of the never-written
+   `/work/hdd/bihz/alfyma/taranis/test_backend_delta/mpi4jax` (a secondary symptom; the
+   compare should say "no output from phase N" instead — not yet changed). Cause: the
+   2026-11-03 mpi4jax rebuild after the jax pin compiled its extension against jaxlib 0.12.x
+   headers, which pip's isolated build env pulled in, while the runtime jaxlib is 0.11.2 —
+   so the pin was right and the rebuild recipe was wrong. The `"jax"` backend phases fell
+   with it because the broken handlers register during backend init for every platform.
+   Not a Delta/NCCL/MPI problem: phase 0 in the same job proves the GPU, NCCL, PMIx and
+   transport layers. Fix: the `--no-build-isolation` rebuild + 1-GPU `jax.devices()` check in
+   §2, both done and passed 2026-11-10.
+   **PASSED 2026-11-10 (job 23738568, node gpua034)** — every phase `ALL PASS`, fp64, 64²×32:
+   phase 0 `psum OK` ×4 again; phase 1 mpi4jax headers `platform=gpu
+   local_devices=[CudaDevice(id=0)] global_devices=1` on all four ranks (one visible GPU per
+   rank is what `--gpu-bind=single:1` is for); phase 2 jax headers `global_devices=4` with
+   distinct `CudaDevice(id=0..3)`; phase 3 rel 1.6e-16…3.7e-16 (tol 1e-12), final t
+   1.0048195168440754 identical; phases 4a/4b restarted cross-backend from each other's
+   snapshots on `/work/hdd`; phase 5 rel 5.8e-16…8.1e-16 (tol 1e-10), final t
+   2.0074275650375384 identical. ~28 s per 4-rank phase wall (mostly compile; 64² is tiny).
+   stderr noise to ignore: the `WatchTasksAsync ... Connection refused`/`CANCELLED` lines at
+   each phase's coordinator teardown, mpi4jax's `Not using CUDA-enabled MPI` warning (HPC-X
+   IS CUDA-aware — §5 open item), and orbax's `Waiting for previous save to complete took
+   1.8 s` (snapshot cadence of the test, not a production setting). The `"jax"` comm backend,
+   `comms.Runtime`'s `jax.distributed` bring-up under PMIx, the `shard_call` boundary and the
+   global snapshot layout are therefore all verified on Delta.
 4. **Production, one node** (4 SU/h): `sbatch slurms/delta_forced_turbulence.sh` at its
-   default 512²×128 fp64 for an hour. Check the per-rank header lines (`platform=cuda`, one
+   default 512²×128 fp64 for an hour. Check the per-rank header lines (`platform=gpu`, one
    distinct local device each, `global_devices=4`), then the ms/step against the §3
    estimate and `bench/hlo_audit.py` for the latency-hiding overlap. Then raise `TARANIS_NX`
    / `TARANIS_NZ`.
+   **PASSED 2026-11-11 (job 23738721)** at the defaults, from rest: headers `[rank i/4]
+   backend=jax platform=gpu local_devices=[CudaDevice(id=i)] global_devices=4 precision=64
+   grid=512^2x128` with distinct ids, `z split 4 ways: nz_local = 32`, `nblock=20`, `lsrk54`;
+   `Ending simulation at t = 10.024…`, `E_kin=4.5655e-01 E_mag=4.7630e-01`, snapshots 0–20 on
+   `/work/hdd`, `wall 364.0 s`, `DONE`, 7m02s job wall; ~0.4 SU. `.err` holds only the known
+   noise (Lmod reset warning, orbax `Waiting for previous save` 1.1–2.0 s at each of the 20
+   snapshots — the test cadence `TARANIS_TSNAP=0.5` is one snapshot per ~16 s, not a
+   production setting — and the `WatchTasksAsync` teardown lines). **Step count and ms/step
+   come from the per-block `t` lines** `simulate_scan` prints (one per scanned block of
+   `nblock=20` steps): 329 blocks = 6580 steps → 55.3 ms/step including compile and save-waits
+   (§3). dt went from the quiescent 0.0128 in the first block to ~0.0013 once the turbulence
+   developed (median 0.0013 over the run). The clean steady-state number and the 1/2/4-GPU
+   NVLink scaling curve come from **`sbatch slurms/delta_bench.sh`** (written 2026-11-11, UNRUN;
+   ~1.5 SU): `bench/bench_phase1.py` on the same 3d_forced lsrk54 case as the Savio tables —
+   jax at 1/2/4 GPUs fp64, the 4-GPU variants (latency-hiding flag off, unrolled stages,
+   unforced, fp32 twin), mpi4jax at 1/4 (+ one CUDA-aware-MPI shot), an HLO audit and a
+   profile. `grep ms/step` the `.out`; record in docs/performance.md "NCSA Delta" and fix §3.
+   One oddity: this job's `python=$(which python)` header echoed the BASE miniforge python
+   (`/sw/rh9.4/python/miniforge3/bin/python`) after `conda activate`, where job 23738568's
+   identical lines echoed the env's — harmless because every launch uses the explicit
+   `PY=$TARANIS_ENV/bin/python`, never bare `python`; keep it that way.
 5. **Multi-node** (16 SU/h at 4 nodes): `--nodes=4 --ntasks-per-node=4 --gpus-per-node=4`,
    with the Slingshot NCCL plugin lines uncommented. Compare 4→16 scaling with Savio's 4.15×
    on TCP (docs/performance.md).

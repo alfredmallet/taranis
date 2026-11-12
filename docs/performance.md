@@ -172,6 +172,26 @@ backend holds it flat while quadrupling throughput. Roughly **9× cheaper per ti
 GPU at fp32**. Savio's workstation GPUs run fp64 at 1/32 rate, so fp64 production stays on
 CPU there; on full-rate-fp64 hardware (A100/GH200/H100) the economics carry over.
 
+### NCSA Delta, 4×A100 SXM 40 GB NVLink, fp64, 512²×128, forced (2026-11-11, job 23738721)
+
+First production run of the `"jax"` backend on Delta (`slurms/delta_forced_turbulence.sh`,
+`docs/DELTA_GPU_SETUP.md` §4 rung 4), from rest to t = 10.02, lsrk54, `nblock=20`,
+`TARANIS_TSNAP=0.5`:
+
+| | |
+|---|---|
+| steps (329 scanned blocks × 20) | 6580 |
+| wall, `simulate_scan` call | 364.0 s |
+| ms/step, **including** the first compile and 20 orbax save-waits of 1.1–2.0 s | **55.3** |
+| steady-state ms/step | < ~50 (bound, not measured) |
+| SU for the run (4 SU/h on `gpuA100x4`) | ~0.4 |
+
+Against the table above, Delta fp64 on 4 A100s beats Savio fp32 on 4 A5000s (77 ms/step) at
+the same grid, consistent with the A100's full-rate fp64 and ~2× memory bandwidth. Not yet
+measured on Delta: a compile-free steady-state ms/step, the 1→2→4 GPU curve on NVLink
+(`bench/bench_phase1.py`, run as `slurms/bench_xla_flags_2080.sh` does), the latency-hiding
+flags, and anything multi-node.
+
 ## Tuning knobs, measured
 
 | Knob | Effect | Guidance |
