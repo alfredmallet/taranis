@@ -32,9 +32,11 @@ import jax.numpy as jnp
 import taranis as jr
 from taranis import _precision, grids
 from taranis.physics import (EquationRecipe, Term, _halo_start_enabled, construct_rhs,
-                             equation_registry, gdi, rmhd)
+                             equation_registry, flrmhd, gdi, rmhd)
 from taranis.run import block_of_steps
 from taranis.timestepping import get_scheme
+
+from _flrmhd_testing import flr_ref, kgrid_ksq
 
 # jitted exactly like run.py's non-"jax" path (params/nblock/scheme/stepper static)
 _advance = jax.jit(block_of_steps, static_argnums=(2, 3, 4, 5))
@@ -104,6 +106,24 @@ def test_grads_are_named_in_the_documented_order():
         c.check("GDI grad field names and order are (gphi, gN, gvort)",
                 grads._fields == ("gphi", "gN", "gvort"), f"{grads._fields}")
         _check_grad_entries(c, "GDI", grads, want, kgrid, params)
+
+        # FLRMHD (plans/FLRMHD_PLAN.md F1.11): the advecting potential phi_e = (1 + rho_s^2 G)
+        # phi, psi, the density nhat = -G phi and the current, with G and rho_s^2 G built
+        # here from the quadrature Gamma_0 (tests/_flrmhd_testing.py), not from kgrid.eq
+        rho_i, Z, tau = 0.4, 2.0, 0.7
+        params, kgrid = _ctx(dims=2, nx=32, ny=32, eqtype="FLRMHD",
+                             eqpars=dict(rho_i=rho_i, tau=tau, Z=Z))
+        state = make_state(params, ic=_ic)
+        grads = equation_registry["FLRMHD"].grad_func(state, kgrid, params)
+        phik, psik = state.fields[0], state.fields[1]
+        ref = flr_ref(kgrid_ksq(params), rho_i, Z/tau)
+        want = {"gphie": jnp.asarray(ref["pe"]) * phik, "gpsi": psik,
+                "gn": -jnp.asarray(ref["G"]) * phik, "gjpar": -kgrid.ksq * psik}
+        c.check("FLRMHD grads are an FLRGrads and a tuple",
+                isinstance(grads, flrmhd.FLRGrads) and isinstance(grads, tuple))
+        c.check("FLRMHD grad field names and order are (gphie, gpsi, gn, gjpar)",
+                grads._fields == ("gphie", "gpsi", "gn", "gjpar"), f"{grads._fields}")
+        _check_grad_entries(c, "FLRMHD", grads, want, kgrid, params)
 
 
 def _check_grad_entries(c, eq, grads, want, kgrid, params):

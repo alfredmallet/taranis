@@ -164,10 +164,18 @@ def _reject_overrides(kgrid):
                          "that seam is for taranis.stability only. Build the solver's kgrid "
                          "with setup_kgrids(params), and a Parameters with the values you want")
 
+def _check_scheme(params,scheme):
+    # an equation set may refuse a scheme family in a configuration (FLRMHD: CB-IMEX on its
+    # z_spectral wave L). Plain python on static arguments, so the graph is untouched
+    check = equation_registry[params.eqtype].scheme_check_func
+    if check is not None:
+        check(params,scheme)
+
 def block_of_steps(x,kgrid,params,nblock,scheme,stepper):
     # public driver: particles off, state in -> state out; on, (state, pstate) in ->
     # ((state, pstate), ys) out.
     _reject_overrides(kgrid)
+    _check_scheme(params,scheme)
     if params.particles is not None:
         return _advance_block(x,kgrid,params,nblock,scheme,stepper)
     return _advance_block((x,None),kgrid,params,nblock,scheme,stepper)[0][0]
@@ -242,6 +250,7 @@ def simulate_scan(state,kgrid,params,nblock,t_snap,t_end,mngr,schemestr='lsrk33'
     stepper,scheme = get_scheme(schemestr)
     _check_pstate(params,pstate)
     _reject_overrides(kgrid)
+    _check_scheme(params,scheme)
     state = _refresh_forcing_scale(state, kgrid, params)
     # donate_argnums=(0,): caller's input `state` buffer is consumed/reused for the output, since we always reassign `state` from the return value below.
     if params.comm_backend == "jax":
@@ -288,6 +297,7 @@ def simulate(initial_state,kgrid,params,t_snap,t_end,mngr,schemestr='lsrk33',sav
     stepper,scheme = get_scheme(schemestr)
     _check_pstate(params,pstate)
     _reject_overrides(kgrid)
+    _check_scheme(params,scheme)
     set_timestep = equation_registry[params.eqtype].set_timestep_func
     rhs = construct_rhs(equation_registry[params.eqtype])
     # kgrid is an explicit argument (not a closure) so the jax backend can hand it to

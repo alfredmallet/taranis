@@ -2,6 +2,7 @@ from typing import NamedTuple,Tuple,Callable,Optional,Union
 from . import rmhd
 from . import gdi
 from . import cmhd
+from . import flrmhd
 from .. import _precision
 
 class Term(NamedTuple):
@@ -26,6 +27,13 @@ class EquationRecipe(NamedTuple):
     # built in grids.setup_kgrids; timesteppers apply exp(L*tau) through propagators
     # not in the RHS. no linear term: None.
     linear_matrix_func: Optional[Callable] = None
+    # equation-specific k-local arrays: (kgrid, params) -> NamedTuple of arrays, stored in
+    # K_Grids.eq by grids.setup_kgrids (before the linear operator is built, so
+    # linear_matrix_func may read kgrid.eq). none: None.
+    kgrid_func: Optional[Callable] = None
+    # (params, scheme) -> None, raising for a timestepping scheme this equation set refuses
+    # in this configuration; called by run.py's drivers in plain python. no restriction: None.
+    scheme_check_func: Optional[Callable] = None
 
 
 # backends where pre-issuing the halo might overlap comms with compute.
@@ -98,4 +106,16 @@ equation_registry = {
                            nfields = 7,
                            linear_matrix_func = cmhd.linear_matrix
                            ),
+    # FLR-MHD (plans/FLRMHD_PLAN.md): RMHD's (phi, psi) with k-local FLR factors (kgrid.eq).
+    # 2D and z_spectral; the FD-z term is rung F6.
+    "FLRMHD": EquationRecipe(set_timestep_func = flrmhd.set_timestep,
+                             term_funcs = (Term(flrmhd.NonlinearTerm),
+                                           Term(flrmhd.ForcingTerm, active=flrmhd.forcing_active)),
+                             grad_func = flrmhd.grad,
+                             nfields = 2,
+                             forcing_scale_func = flrmhd.forcing_scale,
+                             linear_matrix_func = flrmhd.linear_matrix,
+                             kgrid_func = flrmhd.factors,
+                             scheme_check_func = flrmhd.check_scheme
+                             ),
 }

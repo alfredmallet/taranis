@@ -23,6 +23,8 @@
 #   RMHD     diss (scalar, or (nu, eta)), z_diss_k (z_spectral), z_diss (FD-z)
 #   GDI      Ln, nu_in, v0, gpar_fac, diss (scalar), D_par (dims=3)
 #   CMHD     cs0, diss (scalar, or (D_rho, nu, eta))
+#   FLRMHD   diss (scalar, or (nu_phi, nu_psi)), z_diss_k (z_spectral); rho_i, tau, Z when the
+#            static rho_i > 0 (rho_i = 0 is the trace-time RMHD branch)
 # Values are cast to the FIELD real dtype (_precision.ftype) by setup_kgrids, like every other
 # kgrid array: a strong float64 scalar must not upcast an fp32 field graph.
 import inspect
@@ -40,6 +42,8 @@ _STATIC_EQPARS = {
              "gamma": "the polytropic index selects trace-time branches (gamma == 1)",
              "density_var": "selects the evolved density variable (a trace-time branch)",
              "expansion": "the expanding box is time-dependent and structural"},
+    "FLRMHD": {"hyper": "the dissipation exponent: an integer power fixed at trace time",
+               "z_hyper": "the kz dissipation exponent: an integer power fixed at trace time"},
 }
 
 
@@ -66,6 +70,19 @@ def _static_cmhd(params, key):
     return cs0 if key == "cs0" else diss
 
 
+_FLRMHD_INDEX = {"rho_i": 0, "tau": 1, "Z": 2, "diss": 3, "z_diss_k": 5}
+
+
+def _static_flrmhd(params, key):
+    from .physics import flrmhd
+    return flrmhd._eqpars(params)[_FLRMHD_INDEX[key]]
+
+
+def _flr_finite(p):
+    # rho_i = 0 is flrmhd's trace-time RMHD branch: the FLR factors are then not in J
+    return p.eqpars.get("rho_i", 0) != 0
+
+
 def _is3d(p):
     return p.spatial_dimensions == 3
 
@@ -81,8 +98,9 @@ def _zspec(p):
 class _Key:
     # one overridable parameter: its static value, the value shapes its read site takes,
     # and the configurations it is live in (why not, otherwise)
-    def __init__(self, static, shapes, live=None, dead_reason=""):
+    def __init__(self, static, shapes, live=None, dead_reason="", positive=False):
         self.static, self.shapes, self.live, self.dead_reason = static, shapes, live, dead_reason
+        self.positive = positive      # a concrete value must be > 0 (not for a direction)
 
 
 def _length(key):
@@ -108,6 +126,15 @@ def _table(eqtype):
     elif eqtype == "CMHD":
         t["cs0"] = _Key(_static_cmhd, lambda p: ((),))
         t["diss"] = _Key(_static_cmhd, lambda p: ((), (1,), (3,)))
+    elif eqtype == "FLRMHD":
+        t["diss"] = _Key(_static_flrmhd, lambda p: ((), (1,), (p.nfields,)))
+        t["z_diss_k"] = _Key(_static_flrmhd, lambda p: ((),), live=_zspec,
+                             dead_reason="z_diss_k is the z_spectral kz filter")
+        dead = "rho_i = 0 is the RMHD branch (trace-time): the FLR factors are not in J"
+        t["rho_i"] = _Key(_static_flrmhd, lambda p: ((),), live=_flr_finite, dead_reason=dead)
+        for k in ("tau", "Z"):
+            t[k] = _Key(_static_flrmhd, lambda p: ((),), live=_flr_finite, dead_reason=dead,
+                        positive=True)
     return t
 
 
@@ -185,7 +212,8 @@ def validate(params, overrides, direction=False):
         arr = jnp.asarray(value).astype(_precision.ftype)
         if not _is_tracer(arr) and not bool(np.all(np.isfinite(np.asarray(arr)))):
             raise ValueError(f"overrides: {key!r} must be finite, got {value!r}")
-        if (key in _LENGTHS or key == "cs0") and not direction and not _is_tracer(arr):
+        if ((key in _LENGTHS or key == "cs0" or entry.positive) and not direction
+                and not _is_tracer(arr)):
             if not bool(np.all(np.asarray(arr) > 0)):
                 raise ValueError(f"overrides: {key!r} must be > 0, got {value!r}")
         out[key] = arr

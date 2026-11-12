@@ -38,6 +38,10 @@ class K_Grids(NamedTuple):
     # whose wavenumbers and lin were built from those values. Physics read sites branch on it
     # in plain python and read through overrides.getp; run.py rejects a kgrid carrying one.
     overrides: Optional[dict] = None
+    # equation-specific k-local arrays: the NamedTuple the recipe's kgrid_func returns
+    # (FLRMHD: flrmhd.FLRFactors), None for a recipe without one. Built by setup_kgrids
+    # before lin, so a linear_matrix_func may read it; replicated like lin.
+    eq: Optional[tuple] = None
 
 def dealias_mask(params):
     # 2/3-rule elliptical dealiasing mask, in mode-index space (Lx/Ly[/Lz] cancel out).
@@ -74,12 +78,7 @@ def setup_kgrids(params, overrides=None):
         Lx, Ly = _ov.getp(params, overrides, "Lx"), _ov.getp(params, overrides, "Ly")
         if params.spatial_dimensions == 3:
             Lz = _ov.getp(params, overrides, "Lz")
-    kx = ft.fftfreq(params.nx, dtype=_precision.ftype) * params.nx * 2 * jnp.pi / Lx
-    ky = ft.rfftfreq(params.ny, dtype=_precision.ftype) * params.ny * 2 * jnp.pi / Ly
-    kx_grid = kx.reshape(-1, 1)
-    ky_grid = ky.reshape(1, -1)
-
-    ksq = kx_grid**2 + ky_grid**2
+    kx_grid, ky_grid, ksq = _perp_ksq(params, Lx, Ly)
     inv_ksq = jnp.where(ksq > 0, 1.0/ksq, 0.0)
     dealias = dealias_mask(params)
 
@@ -97,10 +96,7 @@ def setup_kgrids(params, overrides=None):
     z_envcos = None
     z_envsin = None
     if params.forcing:
-        kunit = min(2*jnp.pi/params.Lx, 2*jnp.pi/params.Ly)
-        nmin, nmax = params.fshell
-        kmag_over_dk = jnp.sqrt(ksq) / kunit
-        fmask = (kmag_over_dk >= nmin) & (kmag_over_dk < nmax)
+        fmask = _forcing_shell(ksq, params)
         if not bool(jnp.any(fmask)):
             raise ValueError(f"forcing shell fshell={params.fshell} contains no modes on this grid "
                              f"(nx={params.nx}, ny={params.ny}, Lx={params.Lx}, Ly={params.Ly}); "
@@ -118,10 +114,42 @@ def setup_kgrids(params, overrides=None):
                     dealias=dealias, yfac=yfac, kz=kz, fmask=fmask,
                     z_envcos=z_envcos, z_envsin=z_envsin, fidx_x=fidx_x, fidx_y=fidx_y,
                     overrides=overrides)
+    kgrid = _attach_equation_arrays(kgrid, params)
     kgrid = _attach_linear_operator(kgrid, params)
     if params.comm_backend == "jax":
         kgrid = _kgrid_to_global(kgrid, params)  # global (z-sharded) arrays for shard_map
     return kgrid
+
+def _perp_ksq(params, Lx, Ly):
+    # (kx, ky, ksq) at field precision, broadcast-shaped (nkx,1), (1,nky), (nkx,nky)
+    kx = ft.fftfreq(params.nx, dtype=_precision.ftype) * params.nx * 2 * jnp.pi / Lx
+    ky = ft.rfftfreq(params.ny, dtype=_precision.ftype) * params.ny * 2 * jnp.pi / Ly
+    kx_grid = kx.reshape(-1, 1)
+    ky_grid = ky.reshape(1, -1)
+    return kx_grid, ky_grid, kx_grid**2 + ky_grid**2
+
+def _forcing_shell(ksq, params):
+    # the forcing shell nmin <= k_perp/kunit < nmax of params.fshell on the FIELD-precision
+    # ksq: kgrid.fmask. (At fp32 in a non-2*pi box a mode whose k_perp/kunit rounds below an
+    # integer shell edge falls outside it.)
+    kunit = min(2*jnp.pi/params.Lx, 2*jnp.pi/params.Ly)
+    nmin, nmax = params.fshell
+    kmag_over_dk = jnp.sqrt(ksq) / kunit
+    return (kmag_over_dk >= nmin) & (kmag_over_dk < nmax)
+
+def forcing_shell(params):
+    # (nkx,nky) boolean: the modes setup_kgrids puts in kgrid.fmask for this Parameters'
+    # box, grid and fshell -- built by the same two functions, so it IS the solver's shell.
+    # Works with forcing on or off (setup-time helpers such as flrmhd.elsasser_powers).
+    return _forcing_shell(_perp_ksq(params, params.Lx, params.Ly)[2], params)
+
+def _attach_equation_arrays(kgrid, params):
+    # the recipe's own k-local arrays (kgrid_func), if it has any: K_Grids.eq
+    from .physics import equation_registry   # local import: physics imports grids
+    kgrid_func = equation_registry[params.eqtype].kgrid_func
+    if kgrid_func is None:
+        return kgrid
+    return kgrid._replace(eq=kgrid_func(kgrid, params))
 
 def _attach_linear_operator(kgrid, params):
     # builds the linear operator L (dt f = L f + N(f)) and the propagator it selects
@@ -139,12 +167,14 @@ def _attach_linear_operator(kgrid, params):
 
 # K_Grids entries carrying a z axis (axis 0); everything else is perpendicular-only.
 _Z_KGRID_FIELDS = ("z_envcos", "z_envsin")
+# K_Grids entries that are pytrees of arrays rather than one array (None: no leaves)
+_TREE_KGRID_FIELDS = ("lin", "eq")
 
 def kgrid_specs(kgrid):
     # shard_map in_specs for a K_Grids: z-envelopes z-sharded, every other entry -- the
     # linear operator's leaves included -- replicated
     def spec(name, val):
-        if name == "lin":
+        if name in _TREE_KGRID_FIELDS:
             return jax.tree.map(lambda _: P(), val)
         if val is None:
             return None
@@ -154,7 +184,7 @@ def kgrid_specs(kgrid):
 def _kgrid_to_global(kgrid, params):
     # Process-local kgrid arrays -> global jax.Arrays matching kgrid_specs ("jax" backend).
     def to_global(name, val):
-        if name == "lin":
+        if name in _TREE_KGRID_FIELDS:
             return jax.tree.map(lambda v: comms.to_global(v, params), val)
         if val is None:
             return None

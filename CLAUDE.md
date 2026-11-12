@@ -8,9 +8,10 @@ docs/performance.md (measurements and tuning) and docs/checkpointing.md.
 
 A pseudospectral solver for reduced MHD (RMHD) and related plasma fluid models, in JAX.
 Spectral (rfft2) in the perpendicular (x,y) plane, 4th-order finite-difference in z,
-MPI-decomposed along z only. Implemented equation sets: RMHD, 2D GDI, and compressible
-MHD (CMHD, `z_spectral` + single-process only); the architecture supports adding others
-without touching the core solver.
+MPI-decomposed along z only. Implemented equation sets: RMHD, 2D GDI, compressible
+MHD (CMHD, `z_spectral` + single-process only) and FLR-MHD (FLRMHD, 2D or `z_spectral`,
+single-process only); the architecture supports adding others without touching the core
+solver.
 
 ## Setup / running
 
@@ -121,7 +122,13 @@ until 2026-08-01, and old records are folded into `eqpars` with a warning by
 
 Equation sets register in `physics/__init__.py::equation_registry`:
 `EquationRecipe(set_timestep_func, term_funcs, grad_func, nfields,
-forcing_scale_func=None, halo_start_func=None, linear_matrix_func=None)` per `eqtype`.
+forcing_scale_func=None, halo_start_func=None, linear_matrix_func=None, kgrid_func=None,
+scheme_check_func=None)` per `eqtype`. `kgrid_func(kgrid, params)` returns a NamedTuple of
+equation-specific k-local arrays that `setup_kgrids` stores in the optional slot
+`K_Grids.eq` BEFORE building the linear operator (so `linear_matrix_func` may read it);
+`None` for RMHD/GDI/CMHD, whose graphs it therefore never enters. `scheme_check_func(params,
+scheme)` lets a recipe refuse a scheme family; `run.py`'s three drivers call it in plain
+python (`_check_scheme`), so a stepper called DIRECTLY bypasses it.
 `term_funcs` entries are `physics.Term(func, active=...)` (a bare callable is accepted and
 wrapped, meaning always active) and `construct_rhs` sums only the terms whose
 `active(params)` is true — plain python at TRACE time, `params` being static, so an
@@ -501,6 +508,78 @@ Fully spectral polytropic compressible MHD, `nfields=7` in state order
 - Not built: forcing, particles in CMHD fields, MPI/z-decomposition, FD-z, `dims==2`,
   shock capturing, density_var-aware and EBM-aware diagnostics, and a barotropic
   `gamma > 1` under expansion (exactly self-consistent, deferred — plan §5).
+
+### FLR-MHD (`physics/flrmhd.py`, plans/FLRMHD_PLAN.md — F0–F3 landed 2026-11-12; F7 script only, production runs not done)
+
+The low-beta, isothermal-electron model valid through k_perp rho_i ~ 1 in which the
+helicity barrier was found (Meyrand, Squire, Schekochihin & Dorland 2021). Derivations of
+record: docs/numerics.md § "FLR-MHD" — change the docs first, then the module. Rules:
+
+- **It is RMHD with three k-local substitutions**, `nfields=2`, evolved `(phi, psi)` with
+  RMHD's variables and bracket signs: vorticity `lap phi -> nhat = -G phi` with
+  `G = (2/rho_i^2)(1 - Gamma_0(k_perp^2 rho_i^2/2))`; the advecting potential in BOTH
+  brackets `phi -> phi_e = pe*phi`, `pe = 1 + rho_s^2 G`, `rho_s^2 = Z rho_i^2/(2 tau)`;
+  inversion `inv_ksq -> 1/G`. The factors `FLRFactors(G, inv_G, pe, a, kappa, vph)` live in
+  `kgrid.eq` (built once by `flrmhd.factors`); 10 transforms per RHS, as RMHD. `rmhd.py` is
+  imported from and never edited for FLR-MHD.
+- **Scope, enforced in `flrmhd._check_supported`/`check_scheme`**: `dims==2`, or `dims==3`
+  with `z_spectral=True` (so `size==1`); FD-z raises `NotImplementedError` (plan rung F6,
+  deferred — with it the `"eq"` entry of `grids._TREE_KGRID_FIELDS` is UNEXERCISED until
+  then); particles rejected; **CB-IMEX + z_spectral rejected** (the L is the kinetic-Alfvén
+  wave operator, stiffer than RMHD's — the standing no-IMEX-on-a-wave-L rule).
+- **eqpars**: required `rho_i` (>= 0, box units), `tau` (= T_0i/T_0e > 0), `diss` (scalar
+  or `(nu_phi, nu_psi)`), `hyper`; optional `Z` (default 1), `z_diss_k`, `z_hyper` (default
+  2 = RMHD's kz^4; **3 is the paper's kz^6**; warns where it is dead). Only `rho_i` and
+  `Z/tau` enter the dynamics. The paper's "rho_i = 0.02 L_perp" means
+  `rho_i = 0.02 L/(2 pi)`, i.e. `rho_i = 0.02` in a 2 pi box.
+- **`rho_i = 0` is a trace-time branch that IS RMHD** — bitwise in 2D and in z_spectral with
+  `nu_phi != nu_psi`, and to ~1e-14 with equal dissipation (FLRMHD always uses
+  `Putzer2Operator`, RMHD's equal-diss path `SeparableL`). The imbalanced-RMHD control and
+  the planned closure runs go through this branch, not through `eqtype="RMHD"`.
+- **Invariants**: `E = (1/2) sum[G pe |phi|^2 + ksq |psi|^2]` and the generalized helicity
+  `H = sum G Re(phi* psi)`, with `Theta^+- = kappa*phi +- psi`, `d_t Theta^+- = +-i kz v_ph
+  Theta^+-`, `v_ph^2 = a*pe`. **`E^+` and `E^-` are NOT separately conserved at finite
+  rho_i** (`E^+ - E^- = sum_k v_ph(k) H_k`, and the nonlinearity moves `H_k` across k):
+  only E and H have exact transfer/flux identities — never write a per-channel one.
+  Time-discrete drift of E and H is asymptotically at the scheme order p; the order ~5 seen
+  for rk44/lsrk54 at test sizes is pre-asymptotic, so the gate asserts
+  `p-0.4 <= order <= p+1.4`, never a tight window.
+- **Timestep**: the nonlinear CFL rate is `(|grad phi_e| + v_ph,max |grad psi|)/dx` with
+  `v_ph,max = flrmhd._vph_max(params)` a setup-time float over DEALIASED modes (not
+  overridable). The waves are in L and exact under IF at any dt.
+- **Forcing** reuses the RMHD O-U machinery and RNG stream unchanged, acting on
+  `chi = kappa*phi` (momentum) or `Theta^+-` (elsasser): energy injection is exact per
+  step. `flrmhd.elsasser_powers(eps, sigma_eps, params)` gives the `(eps_+, eps_-)` for a
+  requested helicity-injection imbalance, on the solver's own shell
+  (`grids.forcing_shell`); it raises when `|sigma_eps|*vbar > 1`. **Helicity injection is
+  controlled only in the TIME MEAN** (converging on `forcing_tau`): instantaneous
+  `eps_H/eps` scatters, so read the realised value from `diagnostics.flrmhd.injection`,
+  never assume the request. The paper's negative-damping forcing (exact `eps_H`, RNG-free)
+  is plan rung F3b, not built.
+- **Diagnostics**: `diagnostics/flrmhd.py` (`energy`, `helicity`, `imbalance`,
+  `perp_spectra`, `kperp_kz_spectrum`, `dissipation`, `injection`, `budget`, `transfer`,
+  `fluxes` — both take `kcut=` for the sub-filter transfer — and `spectral_break`), in
+  `__all__` with no top-level re-exports. **The RMHD diagnostics are silently WRONG on an
+  FLRMHD state at rho_i > 0** (`diagnostics.energy` returns the RMHD energy): use the
+  flrmhd module. Its functions reject a non-FLRMHD or overridden kgrid but cannot detect a
+  kgrid from a DIFFERENT FLRMHD `Parameters`. `injection`'s self term is zero under
+  `forcing_norm_per_step=False` except for a channel at its scale cap.
+- **Latent hazard, not fixed**: with `nu_phi == nu_psi`, `Putzer2Operator.s` vanishes on
+  the whole kz = 0 (and zeroed Nyquist) plane, so the tangent of `lin.s`/`apply_exp` along
+  ANY overridden parameter is non-finite there (RMHD with an equal pair-shaped `diss`
+  override has the same). Nothing reaches it today — the stability harness differentiates
+  `apply_L` only — but anything that differentiates through the propagator must fix it
+  first (it needs `propagators.py`).
+- Gates: `tests/test_flrmhd_operators.py`, `test_flrmhd_linear.py`,
+  `test_flrmhd_conservation.py`, `test_flrmhd_forcing.py`, `test_flrmhd_diagnostics.py`;
+  `tests/_flrmhd_testing.py` holds the numpy-only references and must never import the
+  module under test.
+- Science: `examples/helicity_barrier_run.py` (`TARANIS_HB_PROFILE` = smoke/m1/full; runs
+  `imb`/`bal`/`rmhd`, resumable by rerunning) + `examples/helicity-barrier.ipynb` are built
+  and smoke-tested, NOT run: no barrier has been reproduced in taranis yet, and the script's
+  dissipation coefficients are unchecked guesses (the paper does not tabulate them).
+- Not built: FD-z/MPI/`"jax"`, negative-damping forcing, a propagator backend cheaper than
+  putzer2, particles in FLR fields.
 
 ### Test particles (`taranis/particles/`, plans/TESTPART_PLAN.md — Phase A landed 2026-08-18, Phase B (3D, single-process) 2026-08-19)
 

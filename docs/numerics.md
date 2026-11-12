@@ -1272,6 +1272,473 @@ params.json, so the differing-record check blocks cross-mode restarts; `initiali
 user function must return s in field 0 in this mode (document at the helper). No
 migration of old snapshots — a log-converter is trivial if ever wanted.
 
+## FLR-MHD (`physics/flrmhd.py`, plans/FLRMHD_PLAN.md)
+
+Status: this section is the derivation record of rungs F0–F3: the recipe in 2D and
+`z_spectral` (F1), the O-U forcing (F3) and `diagnostics/flrmhd.py` (F2) implement
+against it, and their gates are built FROM the expressions here. FLR-MHD is the low-β finite-Larmor-radius extension of
+RMHD of Meyrand, Squire, Schekochihin & Dorland (2021, JPP 87, 535870301;
+arXiv:2009.02828), valid on both sides of `k⊥ρ_i ~ 1`; it is the model in which the
+helicity barrier was found. Scope: `eqtype="FLRMHD"`, two fields `(φ, ψ)` — the SAME
+variables and bracket conventions as the RMHD recipe — `dims==2` and `dims==3` +
+`z_spectral`, single process.
+
+### Equations in Gaussian units and the map to (φ, ψ)
+
+Gaussian (CGS) units throughout this subsection. Background: `B₀ = B₀ẑ` (G), species
+densities `n_0a` (cm⁻³) and temperatures `T_0a` (erg), ion charge `q_i = Ze`,
+`τ = T_0i/T_0e`, and
+
+```
+Ω_i = Z e B₀/(m_i c)                    ρ_i = c·√(2 m_i T_0i)/(Z e B₀)   (v_th,i = √(2T_0i/m_i))
+v_A = B₀/√(4π n_0i m_i)                 n_0e = Z n_0i
+```
+
+The fields are the electrostatic potential `ϕ` (statV), the parallel vector potential
+`A∥` (G·cm) and the electron density perturbation `δn_e/n_0e`. With the E×B flow
+`u⊥ = (c/B₀) ẑ×∇⊥ϕ` and the field-line tilt `b⊥ = −(1/B₀) ẑ×∇⊥A∥` (note the sign), the
+paper's Eqs. (2.1)–(2.3), dissipation omitted, are
+
+```
+(∂/∂t + u⊥·∇⊥) δn_e/n_0e = −(c/(4π e n_0e)) (∂/∂z + b⊥·∇⊥) ∇⊥²A∥
+(∂/∂t + u⊥·∇⊥) A∥        = −c ∂ϕ/∂z + (c T_0e/e) (∂/∂z + b⊥·∇⊥) δn_e/n_0e
+δn_e/n_0e                = −(Z/τ) (1 − Γ̂₀) eϕ/T_0e
+```
+
+where `Γ̂₀ = I₀(α̂)·exp(−α̂)`, `α̂ = −ρ_i²∇⊥²/2`, i.e. `Γ₀(α)` at `α = k⊥²ρ_i²/2` in
+Fourier space. Limits: `1 − Γ₀ → k⊥²ρ_i²/2` (`k⊥ρ_i ≪ 1`, RMHD) and `→ 1` (`k⊥ρ_i ≫ 1`,
+electron RMHD / kinetic Alfvén waves). The third equation is quasineutrality with the
+gyrokinetic ion response; the first is electron continuity (parallel electron flow =
+parallel current), the second the parallel electron momentum equation (Ohm's law with
+the isothermal electron pressure gradient along the perturbed field).
+
+Code variables (lengths in box units, velocities in units of `v_A`, so `v_A = 1`):
+
+```
+φ  = c ϕ/B₀                    stream function of u⊥ = ẑ×∇φ             (cm²/s)
+ψ  = −A∥/√(4π m_i n_0i)        flux function,  b⊥ = δB⊥/√(4π m_i n_0i) = ẑ×∇ψ  (cm²/s)
+n̂  = Ω_i δn_e/n_0e             density in vorticity units               (1/s)
+```
+
+— `φ`, `ψ` exactly as in the RMHD recipe (`A_z = −ψ`). With the bracket
+`{a,b} = ∂ₓa ∂_y b − ∂_y a ∂ₓb` (the paper's `[a,b]`): `u⊥·∇f = {φ,f}` and
+`v_A b⊥·∇f = {ψ,f}`. Three coefficient identities do the rest:
+
+```
+(Z/τ) e B₀/(c T_0e)            = 2/(ρ_i² Ω_i)             (quasineutrality)
+Ω_i c √(4π m_i n_0i)/(4π e n_0e) = v_A                     (continuity)
+c T_0e/(e Ω_i √(4π m_i n_0i))  = (Z ρ_i²/(2τ)) v_A ≡ ρ_s² v_A      (Ohm)
+```
+
+`ρ_s² = Zρ_i²/(2τ) = Z T_0e/(m_i Ω_i²)` is the ion sound radius squared. So, at
+`v_A = 1`,
+
+```
+n̂_k = −G(k⊥) φ_k ,          G(k⊥) = (2/ρ_i²)·(1 − Γ₀(k⊥²ρ_i²/2))
+∂ₜn̂ = −{φ, n̂} + {ψ, ∇⊥²ψ} + ∂_z ∇⊥²ψ
+∂ₜψ = −{φ_e, ψ} + ∂_z φ_e ,     φ_e = φ − ρ_s² n̂ = (1 + ρ_s²G) φ
+```
+
+Two structural facts the implementation rests on:
+
+- `{φ, n̂} = {φ_e, n̂}` identically (`{n̂, n̂} = 0`), so both brackets are advected by the
+  same potential `φ_e` and the RHS needs gradients of exactly four fields
+  `(φ_e, ψ, n̂, j = ∇⊥²ψ)` — the transform count of RMHD (8 inverse + 2 forward).
+- FLR-MHD is RMHD with three k-local substitutions: vorticity `∇⊥²φ → n̂ = −Gφ`,
+  advecting potential `φ → φ_e` in both brackets, inversion `1/k⊥² → 1/G`.
+
+Only `ρ_i` (in box units) and `Z/τ` enter the dynamics. `Ω_i` drops out: it is needed
+only to convert `n̂` back to `δn_e/n_0e = n̂/Ω_i`, an amplitude of the RMHD ordering
+(like `B₀` for the test particles). eqpars: `rho_i`, `tau`, optional `Z` (default 1),
+`diss`, `hyper`, optional `z_diss_k` and `z_hyper` (the latter warns at `setup_kgrids`
+when set away from its default where it is dead: 2D, or `z_diss_k == 0`).
+
+### The FLR factors and their small-α evaluation
+
+`flrmhd.factors` (the recipe's `kgrid_func`, stored once in `kgrid.eq` by
+`setup_kgrids`) builds six real `(nkx, nky)` arrays from one function,
+`S(α) = (1 − Γ₀(α))/α` with `α = k⊥²ρ_i²/2`:
+
+```
+G     = k⊥²·S                       → k⊥²   (α → 0);    → 2/ρ_i²        (α → ∞)
+inv_G = (1/k⊥²)/S ,  0 at k⊥ = 0
+pe    = 1 + ρ_s²G = 1 + (Z/τ)·α·S    → 1;                → 1 + Z/τ
+a     = k⊥²/G = 1/S                  → 1;                → α
+κ     = √(G·pe)/k⊥ = √(S·pe)         → 1
+v_ph  = k⊥·√(pe/G) = √(pe/S)         → 1;                → (1/2 + Z/(2τ))^{1/2} k⊥ρ_i
+```
+
+Everything is a function of `S` and `α` alone, so no factor is ever a product of two
+separately rounded ones (`a` is `1/S`, never `k⊥²·inv_G`), and `k⊥ = 0` needs no special
+case beyond `inv_G`'s zero: `S(0) = 1` gives `pe = a = κ = v_ph = 1` there.
+
+`1 − I₀(α)e^{−α}` cancels at small α (relative error ≈ ε/α: 1e-8 at α = 1e-8), so `S`
+has two branches, switched at `α = 1`:
+
+```
+α < 1 :  S = Σ_{n≥1} (−1)^{n+1} c_n α^{n−1} ,   c_n = (2n)!/(2ⁿ (n!)³)
+         = 1 − (3/4)α + (5/12)α² − (35/192)α³ + (21/320)α⁴ − …      (28 terms, Horner)
+α ≥ 1 :  S = (1 − i0e(α))/α                      (jax.scipy.special.i0e)
+```
+
+Measured against 40-digit `mpmath` (jax 0.10.0, fp64): the series is within 2.2e-16 of
+the reference on `[1e-14, 1]` from 24 terms on, the closed form within 2.2e-16 on
+`[1, 1e3]`. The series argument is clamped to the switch point inside the `where`, so
+the unselected branch stays finite and its tangent is finite under the overrides seam.
+The factors are computed in float64 at every `TARANIS_PRECISION` and cast to the field
+real dtype. The leading corrections, used by the gates:
+`G = k⊥²(1 − (3/8)k⊥²ρ_i² + …)` and `v_ph² = 1 + (3/4 + Z/τ)·k⊥²ρ_i²/2 + …`.
+
+`v_ph` above is the paper's `v_ph = (k⊥ρ_i/√2)·[1/(1 − Γ₀) + Z/τ]^{1/2}`. Reference
+values at `Z/τ = 2`: `v_ph(k⊥ρ_i = 0.1, 1, 10) = 1.007, 1.552, 12.37`.
+
+### Linear waves and the generalized Elsasser potentials
+
+Linearizing about rest (`n̂ = −Gφ`, so `∂ₜφ = −(1/G)∂ₜn̂`):
+
+```
+∂ₜφ = i·kz·a·ψ ,     ∂ₜψ = i·kz·pe·φ          ⇒   ω² = kz²·a·pe = kz²·v_ph²
+```
+
+In Gaussian units `ω = ± k_z v_A v_ph(k⊥)`: the Alfvén wave at `k⊥ρ_i ≪ 1`, the kinetic
+Alfvén wave `ω ≈ k_z v_A k⊥ρ_i (1/2 + Z/(2τ))^{1/2}` at `k⊥ρ_i ≫ 1`. With `χ = κφ`:
+
+```
+∂ₜχ = i·kz·v_ph·ψ ,   ∂ₜψ = i·kz·v_ph·χ
+Θ± = χ ± ψ = κφ ± ψ ,        ∂ₜΘ± = ± i·kz·v_ph·Θ±
+```
+
+`Θ±` are the paper's generalized Elsasser potentials,
+`Θ±_k = −Ω_i (v_ph/k⊥²) δn_e/n_0e ∓ A∥/√(4π m_i n_0i)`, under the map above
+(`−(v_ph/k⊥²) n̂ = (v_ph G/k⊥²) φ = κφ`). A `Θ⁺` Fourier coefficient advances as
+`exp(+i·kz·v_ph·t)`, i.e. `Θ⁺` propagates toward **−z** — as RMHD's `z⁺ = φ + ψ` does
+under `∂ₜψ = ∂_zφ`.
+
+Under `z_spectral` the waves live in the linear operator, on `(φ, ψ)`:
+
+```
+L = [[ d_φ ,        i·kz·a(k⊥) ],
+     [ i·kz·pe(k⊥) ,    d_ψ    ]] ,      d_f = −ν_f·k⊥^{2h} − ν_z·kz^{2h_z}
+```
+
+with `kz` the Nyquist-zeroed `rmhd._kz_deriv`, `(ν_φ, ν_ψ) = eqpars["diss"]`,
+`h = hyper`, `ν_z = z_diss_k`, `h_z = z_hyper` (default 2 = RMHD's `kz⁴`; 3 is the
+paper's `ν_6z kz⁶`). Because `n̂ = −Gφ` is k-local, the paper's dissipation operator on
+`δn_e` is this same diagonal on `φ`. `L` is a dense 2×2, so the backend is putzer2
+(`s² = ((d_φ − d_ψ)/2)² − kz²v_ph²`), exact for any `ν_φ ≠ ν_ψ` and hoistable; the
+separable backend does not apply because the phase `kz·v_ph(k⊥)·τ` is full-grid.
+`L(−kx,−kz,ky) = conj L(kx,kz,ky)` holds (`a`, `pe` depend on `k⊥²` only). In 2D there
+is no `kz` and `L` is the dissipation diagonal, exactly as for 2D RMHD.
+
+With `ν_φ = ν_ψ` — the paper's and the production case — `s² = −kz²v_ph²` vanishes on
+the whole `kz = 0` plane (and the zeroed Nyquist plane), not only at `k⊥ = 0` as in
+RMHD. `apply_exp` is safe there (the Taylor branch of `sinh(sτ)/s`); the
+`jnp.sqrt(s²)` in `putzer2_precompute` has an infinite derivative at 0, so the tangent
+of `lin.s` — and of `apply_exp` — along ANY overridden parameter is non-finite on those
+planes: the kgrid is rebuilt under the trace, and `0·∞` is NaN even for a parameter
+`s²` does not depend on there (measured 2026-11-11 for every live key — `rho_i`, `tau`,
+`Z`, `diss`, `z_diss_k`, `Lx`, `Lz`: exactly the `kz = 0` and Nyquist planes of `lin.s`,
+and both fields of `apply_exp` on them). It is not FLR-specific either: RMHD with a
+pair-shaped equal `diss` override (the putzer2 backend at `ν = η`) has `s² = −kz²` and
+the same non-finite tangent on the same planes (measured). Nothing reachable today hits it — the stability harness's `J v = apply_L(v) +
+jvp(N)` and its `_dparam_action` go through `apply_L`, which never reads `s`, so
+`dJ/dp` is finite on those modes for every live key (gated explicitly) — but a
+parameter derivative taken THROUGH `apply_exp` (the learned-closure step) must fix it
+first, in `propagators.py`. Recorded, not fixed.
+
+CB-IMEX is rejected for FLRMHD + `z_spectral` (`flrmhd.check_scheme`, called by the
+`run.py` drivers): the standing no-L-stable-solve-on-a-wave-L rule, and this `L` is
+stiffer than RMHD's by `v_ph`. In 2D, where `L` is pure dissipation, IMEX is allowed.
+
+### Invariants and their discrete status
+
+Volume averages on the shared `perp_reduce` normalization. Energy and generalized
+helicity (the paper's `E = ¼Σ(|k⊥Θ⁺|² + |k⊥Θ⁻|²)`, `H = ¼Σ(|k⊥Θ⁺|² − |k⊥Θ⁻|²)/v_ph`):
+
+```
+E = ½ Σ_k [ G·pe·|φ_k|² + k⊥²|ψ_k|² ]
+  = ½⟨G|φ|²⟩ + (ρ_s²/2)⟨n̂²⟩ + ½⟨|∇ψ|²⟩          (E×B/ion + electron pressure + magnetic)
+  = ½⟨|∇χ|² + |∇ψ|²⟩ = E⁺ + E⁻ ,       E± = ¼⟨|∇Θ±|²⟩
+H = Σ_k G·Re(φ_k* ψ_k) = −⟨n̂ψ⟩ = Σ_k (E⁺_k − E⁻_k)/v_ph(k⊥)
+```
+
+In Gaussian units `E` is the energy per unit mass in units of `v_A²` (multiply by
+`n_0i m_i v_A² = B₀²/4π` for erg/cm³). `ρ_i → 0`: `E → ½⟨|∇φ|² + |∇ψ|²⟩` and
+`H → ⟨∇φ·∇ψ⟩ = ⟨u·b⟩`, the RMHD energy and cross-helicity. Per mode
+`v_ph|H_k| ≤ E_k`, with equality for a pure `Θ⁺` or `Θ⁻` state: `H = ±E/v_ph`.
+
+**`E⁺` and `E⁻` are NOT separately conserved at finite `ρ_i`.** Per mode
+`E⁺_k − E⁻_k = v_ph(k⊥)·H_k`, so
+
+```
+E⁺ − E⁻ = Σ_k v_ph(k⊥)·H_k
+```
+
+and the conserved quantities are `E = E⁺ + E⁻` and `H = Σ_k H_k` — the UNWEIGHTED sum.
+The nonlinearity conserves `Σ_k H_k` while moving `H_k` across `k⊥`, i.e. between
+wavenumbers of different `v_ph`, so the `v_ph`-weighted sum `E⁺ − E⁻` changes: a
+forward transfer of positive `H` toward `k⊥ρ_i ≳ 1` (larger `v_ph`) raises `E⁺ − E⁻`
+and hence, `E` being fixed, converts `E⁻` into `E⁺`. Only at `ρ_i = 0` (`v_ph ≡ 1`,
+`E⁺ − E⁻ = H`) are the two Elsasser energies separate invariants, as in RMHD. Measured
+on the gate states: `Σ_k T₊` is 7e-4 … 8e-3 of `Σ|T_E|` where `Σ_k T_E` and `Σ_k T_H`
+are at round-off. So `E±` have no flux in the strict sense — `Π±` at the last bin edge
+is not a residual, and channel-resolved budgets carry an exchange term.
+
+Continuum conservation: `dE/dt = −⟨φ_e ∂ₜn̂⟩ − ⟨∇⊥²ψ ∂ₜψ⟩` and
+`dH/dt = −⟨ψ ∂ₜn̂ + n̂ ∂ₜψ⟩` vanish term by term by the cyclic bracket identity
+`⟨a{b,c}⟩ = ⟨b{c,a}⟩`, the self-adjointness of `G`, and integration by parts in z.
+
+Discrete status: the 2/3-dealiased bracket is a Galerkin truncation, so both quadratic
+invariants are conserved by the semi-discrete nonlinear RHS to round-off (gated at
+1e-13 relative to `Σ|T|`), and by the linear operator at `ν = 0` exactly
+(`exp(Lτ)` is unitary in the `(χ, ψ)` norm). Time stepping then drifts both; under
+`z_spectral` the only drift is the nonlinear term's. What is known about the drift
+ORDER: a Runge–Kutta scheme of order `p` conserves a quadratic invariant of a nonlinear
+system only to its local order, so the drift over a fixed time is asymptotically
+`O(dt^p)`. The extra order sometimes quoted for even `p` (RK4 on an oscillator has
+`|R|² = 1 − (ωdt)⁶/72`) is a property of LINEAR skew dynamics only — classical RK4 on
+the rigid body converges to order 4. What is measured (F1.7, fp64, dt = 0.01 … 0.00125
+at fixed T, E and H, 2D and `z_spectral`): `lsrk33` 2.89–3.10; `rk44` 4.9–5.05 with no
+trend over the range tried; `lsrk54` 4.83–5.15 at the gate's dt, falling under
+refinement (4.88 → 4.60 in the F1 review's sweep). The order-5 behaviour of the two
+fourth-order schemes is therefore pre-asymptotic. An interpretation, not an established
+result: at these dt the drift is dominated by the near-linear part of the error, whose
+leading term is conservative, and the genuinely nonlinear `O(dt⁴)` term has a small
+constant. The gate asserts `p − 0.4 ≤ order ≤ p + 1.4` plus an absolute bound
+(relative drift ≤ 1e-6 at the finer dt), not an order of `p + 1`.
+
+Dissipation rates (`h`, `h_z` as above):
+`ε_⊥ = Σ k⊥^{2h}[ν_φ G pe|φ|² + ν_ψ k⊥²|ψ|²]`, `ε_z = ν_z Σ kz^{2h_z}·2E_k`,
+`ε_H,⊥ = (ν_φ + ν_ψ) Σ k⊥^{2h} H_k`, `ε_H,z = 2ν_z Σ kz^{2h_z} H_k`.
+
+### The ρ_i = 0 branch
+
+`eqpars["rho_i"] = 0` is a supported value and IS RMHD: `flrmhd.factors` branches at
+trace time and returns `(k⊥², 1/k⊥², 1, 1, 1, 1)` — `G` and `inv_G` are the kgrid's own
+`ksq` and `inv_ksq` arrays — so the recipe is term for term `rmhd.NonlinearTerm` and,
+in `(φ, ψ)`, RMHD's `L`. The graphs still differ (multiplies by the unit factors; the
+dense putzer2 `L` where RMHD at ν = η selects the separable backend), so agreement with
+the RMHD recipe is gated at 1e-12, with the bitwise status measured and recorded in the
+plan's landing note rather than assumed. `rho_i` is overridable through the stability
+seam only when the static value is > 0.
+
+### Timestep
+
+Linearizing about uniform `u₀`, `b₀`: `ω = k⊥·u₀ ± v_ph(k⊥)(kz + k⊥·b₀)`. A
+perturbation is carried along the perturbed field at `v_ph`, not at 1, so the nonlinear
+CFL rate is `(|u| + v_ph,max|b⊥|)·k_max`:
+
+```
+max_vy = max(|∂ₓφ_e| + v_ph,max|∂ₓψ|) ,   max_vx = max(|∂_yφ_e| + v_ph,max|∂_yψ|)
+dt = min( cfl_safety / max(max_vx/dx, max_vy/dy) ,  rmhd._quiescent_dt )
+```
+
+`v_ph,max = flrmhd._vph_max(params)` is a setup-time python float: the maximum of
+`v_ph` over the 2/3-DEALIASED perpendicular modes (`v_ph` is monotonic, so it is the
+value at the dealias edge; `(2.28, 2.74, 6.3, 12.4)` at `k_max ρ_i = (1.7, 2.1, 5, 10)`,
+`Z/τ = 2`). `∇φ_e` (not `∇φ`) is what the recipe has and is the conservative choice.
+At `ρ_i = 0`, `v_ph,max = 1` and this is `rmhd.set_timestep`. Under `z_spectral` the
+linear waves are exact at any dt; a finite-difference-z path would add `v_ph,max/dz`.
+`_vph_max` is timestep-only and is NOT part of the overrides seam.
+
+### Forcing in the FLR energy (rung F3)
+
+In `(χ, ψ) = (κφ, ψ)` the FLR energy is RMHD's `½⟨|∇χ|² + |∇ψ|²⟩` and `Θ± = χ ± ψ`.
+The O-U envelopes are therefore defined as forcing on `χ` (`forcing_mode="momentum"`) or
+on `Θ±` (`"elsasser"`):
+
+```
+∂ₜχ ∋ f_χ ,  ∂ₜψ ∋ f_ψ          momentum:  f_χ = s·f_raw ,           f_ψ = 0
+                                 elsasser:  f_χ = ½(s₊f₊ + s₋f₋) ,   f_ψ = ½(s₊f₊ − s₋f₋)
+∂ₜφ ∋ f_φ = f_χ/κ(k⊥)
+```
+
+`flrmhd.ForcingTerm` is literally `rmhd.ForcingTerm` evaluated on the state
+`(κφ, ψ)` with its `φ` row divided by `κ`, and `flrmhd.forcing_scale` is
+`rmhd._forcing_scale_from(stack([κφ, ψ]), f_raw, …)`: `selfnorm_scale`, `safe_scale`,
+the cap, the factor 2 of the elsasser entries and the RNG stream are RMHD's, unchanged.
+That is correct because the energy is the same quadratic form in `Θ±`: over one
+forward-Euler step
+
+```
+ΔE± = dt·½⟨∇Θ±·∇(s±f±)⟩ + dt²·¼⟨|∇(s±f±)|²⟩ = ½(s±P±·dt + ½s±²F₂±·dt²) ,
+P± = ⟨∇Θ±·∇f±⟩ ,   F₂± = ⟨|∇f±|²⟩
+```
+
+and the scale solves `s±P±dt + ½s±²F₂±dt² = 2ε±dt`, i.e. `ΔE± = ε±dt` exactly and
+`ε = ε₊ + ε₋`. In the momentum mode `P = ⟨∇χ·∇f_raw⟩`, `F₂ = ⟨|∇f_raw|²⟩` and
+`ΔE = ε·dt`. In terms of the evolved field the same statement reads
+`ΔE = dt·Σ G·pe·Re(φ*f_φ) + dt·Σ k⊥²Re(ψ*f_ψ) + dt²·E[f_φ, f_ψ]` — the form the gate
+checks, with the weights built independently. At `ρ_i = 0`, `κ = 1` and a forced FLRMHD
+run is the forced RMHD run (same seed: `forcing_state` and `forcing_key` bitwise).
+In Gaussian units `ε` is a power per unit mass in units of `v_A³/L₀` (`L₀` the length
+unit; multiply by `n_0i m_i v_A³/L₀` for erg cm⁻³ s⁻¹).
+
+**Helicity injection.** `H = Σ_k (E⁺_k − E⁻_k)/v_ph(k⊥)`, so the forcing injects
+`ε_H = Σ_k (ε₊,k − ε₋,k)/v_ph(k⊥)`. The O-U normalization controls the two channel
+TOTALS `ε±`, not their distribution over the shell, so `ε_H` is controlled up to the
+shell's spread of `v_ph`. With the shell mean
+
+```
+1/v̄ = Σ_shell w_k/v_ph(k) / Σ_shell w_k ,     w_k = yfac·k⊥²
+```
+
+(`w_k` is the weight of mode k in the O-U self-energy `F₂`, the envelopes being
+statistically uniform over the shell), a requested imbalance `σ_ε = ε_H/ε` is
+
+```
+ε± = ε·(1 ± σ_ε·v̄)/2                  flrmhd.elsasser_powers(eps, sigma_eps, params)
+```
+
+— the pair to pass as `forcing_power_elsasser`. `|σ_ε|·v̄ ≤ 1` is required (`ε± ≥ 0`;
+a ValueError otherwise): the largest imbalance a shell can inject is `1/v̄`, which is 1
+only in the RMHD limit. At the boundary itself one channel is zero; the bound is
+compared with a few ulp of slack and that channel clamped at 0, because the product
+`|σ_ε|·v̄` of a `σ_ε` meant to be `1/v̄` rounds to `1 − 1.1e-16`, `1` or `1 + 2.2e-16`.
+The shell the mean runs over is `grids.forcing_shell(params)` — the function
+`setup_kgrids` fills `kgrid.fmask` with, on the FIELD-precision `k⊥`, so `v̄` is taken
+over the modes that are really forced. That matters at fp32 in a box that is not `2π`:
+there the field-precision `k⊥/k_unit` of an on-edge mode can round below the integer
+shell edge and the mode is not forced (the float64 shell differs from the solver's in 6
+of the 20 box/shell combinations of the gate, with `v̄` off by up to 23%).
+
+Exact when `v_ph` is constant over the shell. Otherwise it is the TIME MEAN of `ε_H`
+that is controlled, to within the shell's `v_ph` spread (0.7% at `k_min ρ_i = 0.1`,
+`fshell = (1, 2)`; measured mean `ε_H/ε` off the request by 7e-5 in 2D and 7.5e-4 under
+`z_spectral` over 200 forcing times) — NOT the instantaneous value. The O-U
+normalization fixes each channel's TOTAL per step, cross term plus self term; where in
+the shell that total lands is not fixed, and the two terms are distributed differently
+over it. On most steps both cross terms are positive and `ε_H/ε` sits near the request.
+On the steps where an envelope is anti-correlated with its field — a cross term `s±P±`
+NEGATIVE, 13–18% of the steps in the review's runs — the scale is large, the cross and
+self terms are separately much larger than their sum, and their different
+`1/v_ph`-weightings no longer cancel: those steps carry the largest excursions (rms
+0.05–0.11 about 0.6, extremes −0.36 and 1.69 in the F3.4 runs). The mean converges on
+the forcing correlation time `forcing_tau` (each envelope decorrelates on it, so the
+average over `N` forcing times has `~N^(-1/2)` of the per-step scatter): a diagnostic
+`ε_H/ε` needs a window of many `forcing_tau`, and a single step's value means nothing.
+`diagnostics.flrmhd.injection` reports the realised value exactly. The momentum mode
+forces `Θ⁺` and `Θ⁻` with the SAME envelope and has no control of `ε_H` at all.
+
+Everything else is the RMHD forcing: `forcing_norm_per_step`, the lagged scale and its
+restart rule (bitwise at both settings), `forcing_shell_noise`, the `cfl_every > 1`
+overshoot from rest. The negative-damping forcing of the paper is not built (plan
+rung F3b, deferred).
+
+### Diagnostics, flux and budget conventions (rung F2, `diagnostics/flrmhd.py`)
+
+**`diagnostics.energy` / `perpspec` / `parspec` (the RMHD ones, re-exported at the top
+level) are WRONG on an FLRMHD state at `ρ_i > 0`** — they return `½⟨|∇φ|²⟩`,
+`½⟨|∇ψ|²⟩`, the RMHD energy of the same arrays, silently: the state has RMHD's shape
+and dtype. Use `diagnostics.flrmhd.energy` (which reduces to them at `ρ_i = 0`).
+
+Everything is on the shared `perp_reduce` volume-average normalization (ky-doubling,
+`/nz·(nx·ny)²`, `nz²` under `z_spectral`), in code units (`v_A = 1`, lengths in box
+units); the weights are `kgrid.eq`'s, so `ρ_i = 0` is RMHD here too. Every function
+refuses a kgrid without FLR factors (another equation set's) and one carrying
+overrides; a kgrid built from a DIFFERENT FLRMHD `Parameters` (another `ρ_i`, `τ`, `Z`
+or box on the same grid shape) cannot be detected and gives silently inconsistent
+numbers — pass `setup_kgrids(params)` of the same `params`.
+
+- `energy` → `dict(E_ion = ½⟨G|φ|²⟩, E_e = (ρ_s²/2)⟨n̂²⟩ = ½Σ(pe − 1)G|φ|², E_mag =
+  ½⟨|∇ψ|²⟩, E_plus, E_minus = ¼⟨|∇Θ±|²⟩, total)`; `total = E_ion + E_e + E_mag =
+  E_plus + E_minus`. `helicity` → `H = Σ G·Re(φ*ψ)`. `imbalance` → `dict(sigma_H =
+  H/E, sigma_c = (E⁺ − E⁻)/(E⁺ + E⁻))`: the two agree only when the energy sits at
+  `k⊥ρ_i ≪ 1` (`v_ph ≈ 1`); the paper's `σ_c` is the second.
+- `perp_spectra` → `(k, E_plus(k), E_minus(k), E_H(k))`, spectral densities on
+  `_binned` bins of width `dk = bin_factor·k_unit`: `Σ(E_plus + E_minus)·dk = E` and
+  `Σ E_H·dk = H`, with `E_H(k)` binned from the per-mode `(E⁺_k − E⁻_k)/v_ph(k) =
+  G·Re(φ*ψ)` — the `1/v_ph` is per MODE, never per bin. The bins run to
+  `max(perpspec's k_max, the largest dealiased k⊥)`: identical to `perpspec`'s in a
+  square box, extended in a non-square one, where `perpspec`'s range stops short of
+  the dealiased band along the longer-wavenumber axis and the sums would not close.
+- `kperp_kz_spectrum` → `(k, kz, E(kz, k), D(kz, k))`: energy and dissipation per
+  `(|kz|, k⊥ bin)` (NOT divided by bin widths: `ΣE = total`, `ΣD = ε_⊥ + ε_z`, and the
+  sum over `kz` of `E` is `(E_plus + E_minus)·dk` of `perp_spectra`), `kz ≥ 0` with the
+  `±kz` planes folded. Single process; `dims=2` returns one `kz = 0` row.
+  **`z_spectral`-only** (asserted): it reads axis 1 as `kz` and its normalization is the
+  `z_spectral` one (`nz²`); a finite-difference-z path (rung F6) must z-transform first.
+- `dissipation` → `dict(eps_perp, eps_z, epsH_perp, epsH_z)`, the formulas of
+  "Invariants" above with the solver's own `kz` (Nyquist-zeroed, as in `L`).
+- `injection` → `dict(eps_plus, eps_minus, eps, eps_H, self_plus, self_minus, self,
+  self_H)` from one call of the solver's `flrmhd.ForcingTerm` `F = (f_φ, f_ψ)`: the
+  `eps*` are the instantaneous cross terms (`eps_± = ½⟨∇Θ±·∇F_Θ±⟩`, `F_Θ± = κf_φ ±
+  f_ψ`; `eps_H = Σ G·Re(φ*f_ψ + ψ*f_φ)`), and the `self*` are the second-order
+  coefficients such that the step of length `dt` that starts from this state injects
+
+  ```
+  ΔE = eps·dt + self·dt² ,     ΔH = eps_H·dt + self_H·dt²
+  ```
+
+  up to the scheme's `O(dt)` relative difference from forward Euler (the self term
+  needs the step's `dt`, which a state does not carry). What `self*` is depends on the
+  normalization path, because it is the injection's first-order change DURING the step:
+  - `forcing_norm_per_step=True` (default): `F` is frozen over the step (the scale read
+    is `state.forcing_scale`, the one the NEXT step uses), so `self*` are the quadratic
+    forms of `F` — `E±[F]`, `E[F]`, `H[F] = Σ(E⁺_k[F] − E⁻_k[F])/v_ph` — and `ΔE` is
+    the per-step target exactly.
+  - `forcing_norm_per_step=False`: the scale is re-solved at EVERY stage as
+    `target/P(f_stage)`, so the instantaneous power is the target throughout the step
+    and the step injects `eps·dt`: **`self* = 0`**. Adding the quadratic form of `F`
+    there — the per-step formula — overshoots `ΔE` at first order (measured 2.5e-2,
+    1.2e-2, 5.3e-3 at `dt = 0.004, 0.002, 0.001`; the cross term alone is the target
+    to round-off). The exception is a channel whose scale sits at its cap
+    (`rmhd._scale_epilogue`: `|target/P| > √(2·target/(F₂·dt_q))`, i.e. `P ≈ 0` — a
+    start from rest, or an envelope momentarily orthogonal to the field): the capped
+    scale does not depend on the state, `F` IS frozen over the step, and that
+    channel's quadratic form is its self term (from rest at fixed dt the capped step
+    injects `self·dt² = target·dt`). `injection` recognises a capped channel by its
+    cross term missing the target (relative `√eps` of the field precision; momentum
+    mode has one scale, so both channels together). With that rule the run-integrated
+    sum closes to 7.5e-4, 8.8e-5, 1.2e-4 (E, 2D gate case) at those `dt` with 12–16% of the steps
+    capped. `ΔH` has no such exact statement in this mode (`eps_H` is not pinned
+    during the step): it is first order, 3.2e-3 … 4.4e-4.
+- `transfer` → `(k, T_plus(k), T_minus(k), T_H(k))` and `fluxes` → `(K, Pi, Pi_plus,
+  Pi_minus, Pi_H)`, from ONE call of the solver's own `flrmhd.NonlinearTerm` `N` (so
+  the diagnostic cannot drift from the solver):
+
+  ```
+  T±(k) = ½k⊥² Re(Θ±* N_Θ±) ,  N_Θ± = κN_φ ± N_ψ ,   T_E = T₊ + T₋ ,   T_H(k) = (T₊ − T₋)/v_ph(k)
+  Π_X(K) = −Σ_{k⊥ < K} T_X(k)
+  ```
+
+  `Σ_k T_E = Σ_k T_H = 0` (round-off; `Σ_k T₊` and `Σ_k T₋` are separately nonzero at
+  `ρ_i > 0`). **Π > 0 is transfer toward small scales.**
+  `T` is returned as a spectral density (like the spectra); `fluxes` returns `K` = the
+  UPPER bin edges and `Π(K)` the minus cumulative sum over the modes with `k⊥ < K`
+  (bins are `[lo, hi)`), so `Π` at the last edge is the round-off residual of the
+  conservation law. Under `z_spectral` at `ν = 0` the linear operator changes no
+  `E_k`, `H_k`, so `d/dt Σ_{k<K} E_k = −Π(K)` — the gate, against the stepper.
+- **Sub-filter transfer, `transfer(..., kcut=)` / `fluxes(..., kcut=)`** (one extra
+  RHS): with `f^<` the state low-passed to `k⊥ < kcut`, `T^sf_X(k) = T_X[f](k) −
+  T_X[f^<](k)` for `k⊥ < kcut` and 0 above — the rate at which interactions involving
+  at least one sub-filter mode change the retained band's `E±`, `H` at wavenumber k:
+  the a-priori target of a closure at filter scale `kcut`. Because the truncated
+  system is itself conservative in `E` and `H` (`Σ_k T_X[f^<] = 0` for `X = E, H`),
+  `Σ_{k<kcut} T^sf_X = −Π_X(kcut)`: `fluxes(kcut=)` returns the cumulative sub-filter
+  flux, which equals the full `Π(kcut)`, `Π_H(kcut)` at and beyond `K = kcut` when
+  `kcut` is a bin edge. The retained band is `k⊥ < kcut` STRICTLY, the bins' own
+  `[lo, hi)` convention: in a square box at the default `bin_factor = 2` modes sit
+  exactly on the edges (`(2,0)`, `(0,4)`, …) and belong to the bin above. NOT per channel: FLR-MHD conserves `E` and `H`, not `E⁺` and
+  `E⁻` separately (`H = Σ(E⁺_k − E⁻_k)/v_ph(k)` is not `E⁺ − E⁻`), so `Σ_k T±` does
+  not vanish, `Π±` at the last edge is not a round-off residual, and the channel
+  sub-filter fluxes differ from the full `Π±(kcut)`; only at `ρ_i = 0` do they agree.
+- `budget` → `dict(eps, eps_perp, eps_z, dEdt, eps_H, epsH_perp, epsH_z, dHdt,
+  closure_E, closure_H)`: `dEdt = ε − ε_⊥ − ε_z`, `dHdt = ε_H − ε_H,⊥ − ε_H,z`
+  (instantaneous; `ε`, `ε_H` are `injection`'s cross terms), all `E` sinks
+  non-negative, the `H` rates carrying the sign of `H_k`. `closure_X` is the rate of
+  `X` under the solver's own full right-hand side (`apply_L` + `construct_rhs`, forcing
+  included) minus `dXdt`: round-off by construction; nonzero means the formulas here
+  and the solver's operators disagree. Over a run, `ΔE = Σ(dEdt·dt + self·dt²)` up
+  to the scheme's `O(dt)` difference from forward Euler (gated by its order).
+- `spectral_break(k, E)` → `dict(k_break, slope_lo, slope_hi, resid)`: least-squares
+  continuous two-slope fit of `log E` against `log k` (host numpy), the break scanned
+  over a fine grid inside the fit range. The sensitivity of `k*` to the estimator on
+  real spectra is not established.
+
+Under `comm_backend="jax"` (not available to FLRMHD until FD-z lands) every z-reducing
+call here would need `comms.shard_call`, as the RMHD diagnostics do.
+
 ## Linear stability: parameter derivatives (`taranis/overrides.py`, AUTODIFF rung 2)
 
 The harness linearizes `dt f = L(p) f + N(f; p)` and differentiates J with respect to a
