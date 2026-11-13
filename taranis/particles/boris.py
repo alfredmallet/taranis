@@ -50,6 +50,46 @@ def boris_kick(v, E, B, qm, dt):
     return jnp.stack([vpx + h * E[0], vpy + h * E[1], vpz + h * E[2]])
 
 
+def boris_kick_corr(v, E, B, qm, dt):
+    # half electric kick, rotation by B with corrected angle
+    #(t_corr = tan(qm*B*dt/2)*bhat, s_corr = 2t_corr/(1+|t_corr|^2)),
+    #half electric kick
+    h = 0.5 * qm * dt
+    vmx = v[0] + h * E[0]
+    vmy = v[1] + h * E[1]
+    vmz = v[2] + h * E[2]
+    #corrected rotation about B
+    Bmag = jnp.sqrt(B[0]*B[0] + B[1]*B[1] + B[2]*B[2])
+    #exact angle, computationally slow
+    #t_corr = jnp.tan(h*Bmag)
+    #Faster: use Taylor expansion for tan(x) = x + x^3/3 + 2*x^5/15 + O(x^7))
+    # ~= x*(1 + x^2/3*(1 + 2*x^2/5))
+    arg = h*Bmag
+    argsq = arg*arg
+    t_corr = arg*(1.0 - argsq/3.0*(1.0 + 0.4*argsq))
+    bhatx = B[0]/Bmag
+    bhaty = B[1]/Bmag
+    bhatz = B[2]/Bmag
+    t_corrx = t_corr*bhatx
+    t_corry = t_corr*bhaty
+    t_corrz = t_corr*bhatz
+    s_corr = 2.0 / (1.0 + t_corrx * t_corrx + t_corry * t_corry +
+                    t_corrz * t_corrz)
+    s_corrx = s_corr * tx
+    s_corry = s_corr * ty
+    s_corrz = s_corr * tz
+    # v' = v- + v- x t_corr
+    px = vmx + (vmy * t_corrz - vmz * t_corry)
+    py = vmy + (vmz * t_corrx - vmx * t_corrz)
+    pz = vmz + (vmx * t_corry - vmy * t_corrx)
+    # v+ = v- + v' x s
+    vpx = vmx + (py * s_corrz - pz * s_corry)
+    vpy = vmy + (pz * s_corrx - px * s_corrz)
+    vpz = vmz + (px * s_corry - py * s_corrx)
+    #second half electric kick
+    return jnp.stack([vpx + h * E[0], vpy + h * E[1], vpz + h * E[2]])
+
+
 def drift(x, v, dt):
     return jnp.stack([x[0] + v[0] * dt, x[1] + v[1] * dt, x[2] + v[2] * dt])
 
@@ -62,7 +102,8 @@ def project_perp(E, B):
     return jnp.stack([E[0] - f * B[0], E[1] - f * B[1], E[2] - f * B[2]])
 
 
-_kick = jax.vmap(boris_kick, in_axes=(0, 0, 0, None, None))
+#kick is now corrected boris kick
+_kick = jax.vmap(boris_kick_corr, in_axes=(0, 0, 0, None, None))
 _drift = jax.vmap(drift, in_axes=(0, 0, None))
 _project = jax.vmap(project_perp, in_axes=(0, 0))
 
