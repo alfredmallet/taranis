@@ -20,6 +20,10 @@
 # E_perp projection (push_tracked(..., project=True)): each gathered E sample is replaced
 # by its component perpendicular to the gathered B before the kick, so the particle sees
 # E.B = 0 exactly (Xia et al. 2013, ApJ 776, 90, eq. 21).
+#
+# Corrected Boris push (push_tracked(..., kick_corr=True)): each boris push is
+# performed with a corrected rotation angle for higher accuracy under larger
+# time steps relative to particle gyrofrequency
 import jax
 import jax.numpy as jnp
 
@@ -102,13 +106,13 @@ def project_perp(E, B):
     return jnp.stack([E[0] - f * B[0], E[1] - f * B[1], E[2] - f * B[2]])
 
 
-#kick is now corrected boris kick
-_kick = jax.vmap(boris_kick_corr, in_axes=(0, 0, 0, None, None))
+_kick = jax.vmap(boris_kick, in_axes=(0, 0, 0, None, None))
+_kick_corr = jax.vmap(boris_kick_corr, in_axes=(0, 0, 0, None, None))
 _drift = jax.vmap(drift, in_axes=(0, 0, None))
 _project = jax.vmap(project_perp, in_axes=(0, 0))
 
 
-def _kick_tracked(v, s, nez, qm, dt, dw, project=False):
+def _kick_tracked(v, s, nez, qm, dt, dw, project=False, kick_corr=False):
     # one half-kick from a single field sample s (N, 2+nez+3): E = (s0, s1, sum of the nez
     # E_z pieces), B = the last three columns. With `project` (static) the E sample is
     # replaced by its component perpendicular to B before the kick, and the work columns
@@ -118,7 +122,10 @@ def _kick_tracked(v, s, nez, qm, dt, dw, project=False):
     B = s[:, -3:]
     if project:
         E = _project(E, B)
-    vn = _kick(v, E, B, qm, dt)
+    if kick_corr:
+        vn = _kick_corr(v, E, B, qm, dt)
+    else:
+        vn = _kick(v, E, B, qm, dt)
     h = 0.5 * qm * dt
     ez = [E[:, 2]] if project else [s[:, 2 + i] for i in range(nez)]
     cols = [h * (E[:, 0] * (v[:, 0] + vn[:, 0]) + E[:, 1] * (v[:, 1] + vn[:, 1]))]
@@ -127,7 +134,7 @@ def _kick_tracked(v, s, nez, qm, dt, dw, project=False):
 
 
 def push_tracked(x, v, F, nez, qm, dt, params, substeps=1, gather=interp.gather,
-                 project=False):
+                 project=False, kick_corr=False):
     # advance particles (x, v) both (N,3) float64 by dt in the stacked field array F
     # (fields.assemble_stacked's layout: E_perp, nez E_z pieces, B; frozen over the call),
     # with ONE gather per half-kick. substeps (static) splits dt into equal pieces.
@@ -139,21 +146,24 @@ def push_tracked(x, v, F, nez, qm, dt, params, substeps=1, gather=interp.gather,
     # the B sample of the last half-kick, i.e. at the returned position.
     # `project` (static) removes the E component along B at every sample; the projected
     # E_z is then a mixture of the E_z pieces, so it needs a single one (nez == 1).
+    #`kick_corr' (static) uses corrected boris kick
     assert nez == 1 or not project, (
         f"push_tracked(project=True) needs exactly one E_z piece, got nez={nez}: the "
         f"projection mixes the pieces, so their work could not be attributed separately")
     h = dt / substeps
     dw = jnp.zeros((x.shape[0], 1 + nez), dtype=jnp.float64)
     for _ in range(substeps):
-        v, dw = _kick_tracked(v, gather(F, x, params), nez, qm, 0.5 * h, dw, project)
+        v, dw = _kick_tracked(v, gather(F, x, params), nez, qm, 0.5 * h, dw,
+                              project=project, kick_corr=kick_corr)
         x = _drift(x, v, h)
         s = gather(F, x, params)
         v, dw = _kick_tracked(v, s, nez, qm, 0.5 * h, dw, project)
     return x, v, dw, s[:, -3:]
 
 
-def push(x, v, E3, B3, qm, dt, params, substeps=1, gather=interp.gather):
+def push(x, v, E3, B3, qm, dt, params, substeps=1, gather=interp.gather,
+         kick_corr=False):
     # push_tracked from separate E3, B3 arrays (each (3, nz, nx, ny)), discarding the work
     # split: E_z is a single piece here.
     return push_tracked(x, v, jnp.concatenate([E3, B3]), 1, qm, dt, params,
-                        substeps=substeps, gather=gather)[:2]
+                        substeps=substeps, gather=gather, kick_corr=kick_corr)[:2]
