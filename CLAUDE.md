@@ -84,7 +84,10 @@ docs/numerics.md; tests: `tests/test_z_spectral.py`.
 re-save is a no-op, a differing existing record is a hard error. **Collective under
 MPI** — never call from a subset of ranks. `Parameters.from_snapshot(snap_path,
 **changes)` re-runs `__init__`; changes win, unknown keys warn, precision mismatch
-warns. Both are explicit calls — nothing writes params.json automatically.
+warns. Both are explicit calls — nothing writes params.json automatically. Everything rank 0
+does in `save` is inside one `try` whose failure becomes the broadcast `err`, so a
+malformed/unreadable existing record or a failed write is a `ValueError` on EVERY rank
+rather than a hang in the `bcast` — keep new rank-0 work inside it.
 
 `Parameters` (`config.py`) is **not a pytree**. It is only closed over or passed static,
 so every attribute is a compile-time constant — plain `if params.foo:` is correct and
@@ -191,6 +194,12 @@ Everything read-only and user-facing lives in `diagnostics/<eq>.py` — `diagnos
 `theory_cross_phase`) and `diagnostics.cmhd` (`energies`, `mach_numbers`, `rho_min`,
 `divB_max`, `spectra`, `energy_budget`), with `diagnostics/core.py` for the shared
 machinery (`_binned`).
+Perpendicular bin ranges come from `diagnostics.core._perp_bins(params)` (RMHD `perpspec`,
+both GDI spectra, FLRMHD): `min(nx,ny)//2` fundamental units, extended to the largest
+DEALIASED k⊥ — identical bins in a square box, and in a rectangular box/grid the only
+thing keeping the finer direction's retained modes from falling off the last edge (they
+used to vanish silently: `Ly = 10 Lx` lost a `kx = 4` mode entirely). Never rebuild
+`kmax` by hand. `parspec` accepts odd `nz`.
 `diagnostics.<eqtype>` is the naming convention; the registry stays a solver contract, so
 there is no diagnostics hook on `EquationRecipe` — diagnostics are plain imports, and the
 dependency runs diagnostics -> physics, never back. The RMHD names plus `_binned` are
@@ -338,6 +347,19 @@ during spin-up before recovering, so **prefer developed states** for N>1 and che
 early energy trace if you do start from rest. Snapshot/t_end overshoot grows to N steps. The forcing update still runs every step; `nblock` counts
 steps, rounded up to whole blocks.
 
+**The drivers fail loudly** (2026-11-13). `simulate`/`simulate_scan` call
+`run._check_cadence` before anything is traced — `t_snap` finite and > 0, `t_end` finite, a
+fixed `dt` finite and > 0, `nblock` an integer ≥ 1; each used to loop forever — and
+`run._finite_checker`'s `check(state)` on the host after every jitted block, BEFORE the
+snapshot write: a non-finite `t` or any non-finite field element raises
+`taranis.NumericalFailure` (a `FloatingPointError`) and the dead state is not saved. It
+used to be saved and reported as a normal end, because a NaN `t` ends `t < t_end` exactly
+like reaching `t_end`, and a fixed-dt run keeps a finite `t` over NaN fields. The count is
+ONE collective decision (python `comm.allreduce` under mpi4jax, a jitted `shard_call` +
+psum under `"jax"`), so every rank raises together — keep it collective. Cost: one pass
+over the fields per block (`simulate_scan`) or per snapshot (`simulate`), outside the
+jitted step, so no solver graph changes. `block_of_steps` is unchecked.
+
 **Buffer donation consumes input states** (`donate_argnums=(0,)`): a state passed to
 `simulate`/`simulate_scan` is invalidated ("Array has been deleted"). Continue from the
 returned state; read diagnostics before the call.
@@ -362,6 +384,10 @@ momentum mode and `eps_plus + eps_minus` in elsasser mode, so `(p/2, p/2)` match
 `forcing_power=p`. `rmhd._forcing_scale_from` carries the factor 2 this needs (E_tot =
 (E+ + E-)/2); before 2026-07-31 the elsasser entries meant half this.
 
+- **The forcing shell must lie inside the 2/3 dealiasing region** — `setup_kgrids` raises
+  otherwise (2026-11-13; `webgpu/solver2d.js` too). The forcing is added to the RHS
+  unmasked, so a shell mode past the cut populates a mode `initialize` removed, and its
+  products alias into retained modes.
 - `shared_physics` (`ou_update`, `reconstruct_envelope`, `perp_inner_product`,
   `perp_mean_square`) is equation-agnostic; `rmhd.ForcingTerm` does the RMHD power
   normalization and (phi,psi) mapping.
@@ -504,8 +530,11 @@ Fully spectral polytropic compressible MHD, `nfields=7` in state order
   optimized-HLO histogram; plan §5 C4. The standing gate is that `density_var` absent and
   `"rho"` agree bitwise). **`diagnostics/cmhd.py` is rho-ONLY and NOT density_var-aware**:
   it reads `state.fields[0]` as `rho`, so on an lnrho state its energies/Mach
-  numbers/spectra/budget are WRONG, not merely differently normalized. Unscale by hand
-  (`rho = e^s`) until a helper lands (plan §11).
+  numbers/spectra/budget would be WRONG, not merely differently normalized — every
+  function that reads field 0 therefore raises `NotImplementedError` under
+  `density_var="lnrho"` (`_check_rho_state`, 2026-11-13; `divB_max` never reads field 0
+  and stays available; expansion is NOT refused — comoving-primed is the recorded choice).
+  Convert by hand (`rho = e^s`) until a helper lands (plan §11).
 - Gates: `tests/test_cmhd_linear.py`, `test_cmhd_conservation.py`,
   `test_cmhd_diagnostics.py`, `test_cmhd_expansion.py` (the EBM gates),
   `test_cmhd_lnrho.py` (the ln ρ gates), and

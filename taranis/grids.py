@@ -101,6 +101,17 @@ def setup_kgrids(params, overrides=None):
             raise ValueError(f"forcing shell fshell={params.fshell} contains no modes on this grid "
                              f"(nx={params.nx}, ny={params.ny}, Lx={params.Lx}, Ly={params.Ly}); "
                              f"the run would proceed silently unforced")
+        # the forcing is added to the RHS unmasked, so a shell mode beyond the 2/3 cut would
+        # populate a mode initialize() removed; its products then alias INTO retained modes,
+        # which masking the nonlinear term afterwards cannot undo
+        perp_dealias = dealias if dealias.ndim == 2 else dealias[0]
+        n_out = int(jnp.sum(fmask & ~perp_dealias))
+        if n_out:
+            raise ValueError(f"forcing shell fshell={params.fshell} has {n_out} of "
+                             f"{int(jnp.sum(fmask))} modes outside the 2/3 dealiasing region "
+                             f"(nx={params.nx}, ny={params.ny}, Lx={params.Lx}, Ly={params.Ly}): "
+                             f"forcing them would alias into the retained modes. Lower the "
+                             f"shell or raise the resolution")
         # static shell index set (concrete here, outside jit) for shell-restricted noise;
         # only carried when opted in (params.forcing_shell_noise)
         if params.forcing_shell_noise:

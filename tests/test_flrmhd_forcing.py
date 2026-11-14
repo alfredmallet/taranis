@@ -335,6 +335,17 @@ def test_elsasser_powers_shell_is_the_solvers():
             same, vb = True, 0.0
             for fshell in shells:
                 params = _flr(rho_i, fshell=fshell, **kw)              # forcing off
+                if kw.get("dims") == 3 and fshell == (2, 7):
+                    # at 16^2 this shell reaches one mode past the 2/3 cut, which the
+                    # solver refuses to force (setup_kgrids): there is no fmask to match
+                    try:
+                        _solver_shell(rho_i, fshell=fshell, **kw)
+                        refused = False
+                    except ValueError as e:
+                        refused = "dealiasing" in str(e)
+                    c.check(f"{label}: fshell={fshell} leaves the dealiased band and is "
+                            f"refused by setup_kgrids", refused)
+                    continue
                 fmask = _solver_shell(rho_i, fshell=fshell, **kw)
                 shell, vbar = flrmhd._forcing_shell_vbar(params)
                 same &= shell.dtype == bool and shell.shape == fmask.shape and bool(
@@ -347,7 +358,7 @@ def test_elsasser_powers_shell_is_the_solvers():
                 ep, em = flrmhd.elsasser_powers(1.0, 0.5/want, params)
                 vb = max(vb, abs((ep - em)/0.5 - 1))
             c.check(f"{label}: the helper's shell == kgrid.fmask of the forced kgrid for "
-                    f"{len(shells)} shells, and vbar == the independent mean over that mask "
+                    f"every admissible shell of {len(shells)}, and vbar == the independent mean over that mask "
                     f"(worst rel {vb:.1e})", same and vb < 1e-13, f"{same}, {vb:.3e}")
         print(f"      (the float64 shell differs from kgrid.fmask in {ndiff} of "
               f"{len(boxes)*len(shells)} box/shell combinations at this precision; vbar over "

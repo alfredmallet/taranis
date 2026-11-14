@@ -306,51 +306,57 @@ class Parameters():
         # every rank validates (no collective), so a bad dict raises everywhere
         stamp = _overrides.to_record(self, overrides) if overrides else None
         if self.rank == 0:
-            # round-trip through JSON up front
-            rec = json.loads(json.dumps(self._init_args, default=_json_scalar))
-            rec["_precision"] = _precision.precision
-            if stamp:
-                rec[_OVERRIDES_KEY] = stamp
-            if os.path.exists(path):
-                with open(path) as f:
-                    old = json.load(f)
-                old.pop("_created", None)
-                # pre-eqpars records keep diss/hyper at top level: same information, so
-                # fold them in (and refresh the file) rather than report a differing record
-                moved = _fold_legacy_eqpars(old)
-                # a record written by older code lacks newer ctor args: backfill them with
-                # the current signature defaults (JSON-normalized) so adding a Parameters
-                # argument never invalidates existing run directories
-                sig_defaults = {k: v.default for k, v in inspect.signature(type(self).__init__).parameters.items()
-                                if v.default is not inspect.Parameter.empty}
-                backfilled = sorted(k for k in rec if k not in old and k in sig_defaults)
-                for k in backfilled:
-                    # transport keys (comm_backend) document what actually ran, not a generic
-                    # ctor default — backfill from this save's resolved value so an old record
-                    # gains e.g. "serial"/"mpi4jax" instead of a misleading null
-                    old[k] = rec[k] if k in _TRANSPORT_KEYS else \
-                        json.loads(json.dumps(sig_defaults[k], default=_json_scalar))
-                # comm_backend is a transport choice, not a physics/grid parameter: a run
-                # must be restartable across backends: recorded but not compared
-                diffs = {k: (old.get(k, "<absent>"), rec.get(k, "<absent>"))
-                         for k in sorted(set(old) | set(rec))
-                         if k not in _TRANSPORT_KEYS and old.get(k, "<absent>") != rec.get(k, "<absent>")}
-                if diffs:
-                    err = (f"{path} already records different parameters "
-                           f"(saved, current): {diffs}. If the change is intended, delete "
-                           f"{filename} and re-save; to reuse the recorded values, "
-                           f"Parameters.from_snapshot(..., **changes) with the new values.")
-                elif backfilled or moved:
-                    # semantically identical: refresh the file so it records the new keys
-                    old["_created"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            # everything rank 0 does here is inside the try: an exception raised before the
+            # bcast below (unreadable or malformed params.json, a failed write) would leave
+            # every other rank waiting in it forever
+            try:
+                # round-trip through JSON up front
+                rec = json.loads(json.dumps(self._init_args, default=_json_scalar))
+                rec["_precision"] = _precision.precision
+                if stamp:
+                    rec[_OVERRIDES_KEY] = stamp
+                if os.path.exists(path):
+                    with open(path) as f:
+                        old = json.load(f)
+                    old.pop("_created", None)
+                    # pre-eqpars records keep diss/hyper at top level: same information, so
+                    # fold them in (and refresh the file) rather than report a differing record
+                    moved = _fold_legacy_eqpars(old)
+                    # a record written by older code lacks newer ctor args: backfill them with
+                    # the current signature defaults (JSON-normalized) so adding a Parameters
+                    # argument never invalidates existing run directories
+                    sig_defaults = {k: v.default for k, v in inspect.signature(type(self).__init__).parameters.items()
+                                    if v.default is not inspect.Parameter.empty}
+                    backfilled = sorted(k for k in rec if k not in old and k in sig_defaults)
+                    for k in backfilled:
+                        # transport keys (comm_backend) document what actually ran, not a generic
+                        # ctor default — backfill from this save's resolved value so an old record
+                        # gains e.g. "serial"/"mpi4jax" instead of a misleading null
+                        old[k] = rec[k] if k in _TRANSPORT_KEYS else \
+                            json.loads(json.dumps(sig_defaults[k], default=_json_scalar))
+                    # comm_backend is a transport choice, not a physics/grid parameter: a run
+                    # must be restartable across backends: recorded but not compared
+                    diffs = {k: (old.get(k, "<absent>"), rec.get(k, "<absent>"))
+                             for k in sorted(set(old) | set(rec))
+                             if k not in _TRANSPORT_KEYS and old.get(k, "<absent>") != rec.get(k, "<absent>")}
+                    if diffs:
+                        err = (f"{path} already records different parameters "
+                               f"(saved, current): {diffs}. If the change is intended, delete "
+                               f"{filename} and re-save; to reuse the recorded values, "
+                               f"Parameters.from_snapshot(..., **changes) with the new values.")
+                    elif backfilled or moved:
+                        # semantically identical: refresh the file so it records the new keys
+                        old["_created"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                        with open(path, "w") as f:
+                            json.dump(old, f, indent=1)
+                    # else: identical record already present, nothing to write
+                else:
+                    os.makedirs(str(snap_path), exist_ok=True)
+                    rec["_created"] = time.strftime("%Y-%m-%d %H:%M:%S")
                     with open(path, "w") as f:
-                        json.dump(old, f, indent=1)
-                # else: identical record already present, nothing to write
-            else:
-                os.makedirs(str(snap_path), exist_ok=True)
-                rec["_created"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                with open(path, "w") as f:
-                    json.dump(rec, f, indent=1)
+                        json.dump(rec, f, indent=1)
+            except Exception as e:   # noqa: BLE001 -- re-raised on every rank below
+                err = f"{path}: {type(e).__name__}: {e}"
         if self.size > 1:
             err = self.comm.bcast(err, root=0)  # also orders every rank after the write
         if err is not None:

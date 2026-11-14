@@ -1656,10 +1656,11 @@ numbers — pass `setup_kgrids(params)` of the same `params`.
 - `perp_spectra` → `(k, E_plus(k), E_minus(k), E_H(k))`, spectral densities on
   `_binned` bins of width `dk = bin_factor·k_unit`: `Σ(E_plus + E_minus)·dk = E` and
   `Σ E_H·dk = H`, with `E_H(k)` binned from the per-mode `(E⁺_k − E⁻_k)/v_ph(k) =
-  G·Re(φ*ψ)` — the `1/v_ph` is per MODE, never per bin. The bins run to
-  `max(perpspec's k_max, the largest dealiased k⊥)`: identical to `perpspec`'s in a
-  square box, extended in a non-square one, where `perpspec`'s range stops short of
-  the dealiased band along the longer-wavenumber axis and the sums would not close.
+  G·Re(φ*ψ)` — the `1/v_ph` is per MODE, never per bin. The bins are
+  `diagnostics.core._perp_bins`, shared with `perpspec` and the GDI spectra:
+  `min(nx,ny)//2` fundamental units, extended to the largest dealiased k⊥, so the sums
+  close in a non-square box too (before 2026-11-13 `perpspec` stopped at the shorter
+  range and silently dropped the finer direction's retained modes).
 - `kperp_kz_spectrum` → `(k, kz, E(kz, k), D(kz, k))`: energy and dissipation per
   `(|kz|, k⊥ bin)` (NOT divided by bin widths: `ΣE = total`, `ΣD = ε_⊥ + ε_z`, and the
   sum over `kz` of `E` is `(E_plus + E_minus)·dk` of `perp_spectra`), `kz ≥ 0` with the

@@ -7,7 +7,7 @@ import numpy as np
 
 from ..physics import shared_physics
 from ..physics.gdi import _closure_terms, _eqpars, _L_entries
-from .core import _binned
+from .core import _binned, _perp_bins
 
 
 def energy_enstrophy(state, kgrid, params):
@@ -50,8 +50,7 @@ def perp_spectrum(state, kgrid, params, bin_factor=2.0):
     N2 = jnp.real(jnp.conj(Nk)*Nk)*kgrid.yfac
     spec_N = shared_physics.perp_reduce(N2, params, axis=0)
     spec_phi = shared_physics.perp_reduce(0.5*shared_physics.perp_gradsq(phik, phik, kgrid), params, axis=0)
-    kunit = min(2*jnp.pi/params.Lx, 2*jnp.pi/params.Ly)
-    kmax = min(params.nx//2, params.ny//2)*kunit
+    kunit, kmax = _perp_bins(params)
     return _binned(jnp.sqrt(kgrid.ksq), (spec_N, spec_phi), kunit, kmax, bin_factor)
 
 
@@ -63,8 +62,7 @@ def cross_phase_spectrum(state, kgrid, params, bin_factor=2.0, kz_index=0):
     N2 = jnp.abs(Nk)**2 * yfac
     phi2 = jnp.abs(phik)**2 * yfac
     cross = jnp.conj(phik)*Nk * yfac
-    kunit = min(2*jnp.pi/params.Lx, 2*jnp.pi/params.Ly)
-    kmax = min(params.nx//2, params.ny//2)*kunit
+    kunit, kmax = _perp_bins(params)
     kbins, N2b, phi2b, cross_re, cross_im = _binned(
         jnp.sqrt(kgrid.ksq), (N2, phi2, jnp.real(cross), jnp.imag(cross)), kunit, kmax, bin_factor)
     amp_ratio = jnp.sqrt(N2b/phi2b)

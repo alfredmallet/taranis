@@ -21,7 +21,7 @@ import numpy as np
 
 from ..physics import construct_rhs, equation_registry, flrmhd, gdi, rmhd
 from ..physics.shared_physics import perp_reduce
-from .core import _binned
+from .core import _binned, _perp_bins
 
 
 # ------------------------------------------------------------------------ per-mode kernels
@@ -98,13 +98,8 @@ def _nonlinear(fields, state, kgrid, params):
 
 
 def _bins(params, bin_factor):
-    # (kunit, kmax) of the perpendicular bins: perpspec's range, extended to the largest
-    # dealiased k_perp where that lies beyond it (a non-square box), so that binned sums of a
-    # dealiased quantity always equal its total
-    kunit = min(2*np.pi/params.Lx, 2*np.pi/params.Ly)
-    kmax = min(params.nx//2, params.ny//2)*kunit
-    _, _, ksq, _, _, perp_dealias = gdi._perp_grids_np(params)
-    return kunit, max(kmax, float(np.sqrt(np.max(ksq[perp_dealias]))))
+    # (kunit, kmax) of the perpendicular bins: the shared range (core._perp_bins)
+    return _perp_bins(params)
 
 
 def _binned_perp(modal, kgrid, params, bin_factor):

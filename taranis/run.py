@@ -233,6 +233,58 @@ def _finish(state,params,t_start):
         print("Ending simulation at t = "+str(state.t)+". It took "+str(mngr_time)+"s")
     return state
 
+def _check_cadence(params,t_snap,t_end,nblock=None):
+    # arguments under which a driver could never advance (and would loop forever, saving the
+    # same state): a snapshot cadence, end time or fixed dt that is not finite and positive,
+    # or a non-positive block size. Plain python on host values, before anything is traced.
+    def bad(x):
+        return not (np.isfinite(x) and x > 0)
+    if bad(float(t_snap)):
+        raise ValueError(f"t_snap must be finite and > 0, got {t_snap!r}: the driver could "
+                         f"never reach its next snapshot target")
+    if not np.isfinite(float(t_end)):
+        raise ValueError(f"t_end must be finite, got {t_end!r}")
+    if not params.adaptive_timestep and bad(float(params.dt)):
+        raise ValueError(f"adaptive_timestep=False needs a finite dt > 0, got "
+                         f"dt={params.dt!r}: time would never advance")
+    if nblock is not None and not (isinstance(nblock,(int,np.integer)) and nblock >= 1):
+        raise ValueError(f"nblock must be an integer >= 1, got {nblock!r}")
+
+class NumericalFailure(FloatingPointError):
+    # raised by simulate/simulate_scan when the solution has gone non-finite
+    pass
+
+def _finite_checker(kgrid,params):
+    # check(state) for the drivers, called on the host between jitted blocks and BEFORE a
+    # snapshot write. A NaN time ends the drivers' `t < t_end` loops just like reaching
+    # t_end does, and a fixed-dt run keeps a finite t over NaN fields -- either way the run
+    # used to save the dead state and report a normal end.
+    # The non-finite count is over the WHOLE domain, one collective decision, so every rank
+    # raises together (a rank-local raise would strand the others); t is replicated.
+    # Built once per driver call: the "jax" counter is a jitted shard_call.
+    if params.comm_backend == "jax":
+        # global z-sharded arrays: count per shard inside the mesh context and psum
+        count_jit = jax.jit(comms.shard_call(
+            lambda s,kg: comms.allreduce_sum(jnp.sum(~jnp.isfinite(s.fields)),params),
+            params,kgrid,out_specs=P()))
+        count = lambda state: int(count_jit(state,kgrid))
+    else:
+        def count(state):
+            n = int(jnp.sum(~jnp.isfinite(state.fields)))
+            return params.comm.allreduce(n) if params.size > 1 else n
+    def check(state):
+        t = float(state.t)
+        n = count(state)
+        if np.isfinite(t) and n == 0:
+            return
+        raise NumericalFailure(
+            f"the solution went non-finite (t = {t}, {n} non-finite field elements); no "
+            f"snapshot of this state was written, so the last good one is the previous "
+            f"snapshot. Usual causes: a timestep too large for the nonlinear term (lower "
+            f"cfl_safety, or cfl_every, under adaptive dt; lower dt when fixed), or "
+            f"under-resolved dissipation.")
+    return check
+
 def _check_pstate(params,pstate):
     # a particle carry is required exactly when params.particles is set
     if params.particles is not None and pstate is None:
@@ -251,6 +303,8 @@ def simulate_scan(state,kgrid,params,nblock,t_snap,t_end,mngr,schemestr='lsrk33'
     _check_pstate(params,pstate)
     _reject_overrides(kgrid)
     _check_scheme(params,scheme)
+    _check_cadence(params,t_snap,t_end,nblock)
+    check_finite = _finite_checker(kgrid,params)
     state = _refresh_forcing_scale(state, kgrid, params)
     # donate_argnums=(0,): caller's input `state` buffer is consumed/reused for the output, since we always reassign `state` from the return value below.
     if params.comm_backend == "jax":
@@ -278,6 +332,7 @@ def simulate_scan(state,kgrid,params,nblock,t_snap,t_end,mngr,schemestr='lsrk33'
         if params.particles is not None and save:
             _append_moments(mngr.directory,ys)
         state,pstate = carry
+        check_finite(state)
         block_count+=1
         saved_current=False
         if params.rank==0 and block_count%print_every==0:
@@ -298,6 +353,8 @@ def simulate(initial_state,kgrid,params,t_snap,t_end,mngr,schemestr='lsrk33',sav
     _check_pstate(params,pstate)
     _reject_overrides(kgrid)
     _check_scheme(params,scheme)
+    _check_cadence(params,t_snap,t_end)
+    check_finite = _finite_checker(kgrid,params)
     set_timestep = equation_registry[params.eqtype].set_timestep_func
     rhs = construct_rhs(equation_registry[params.eqtype])
     # kgrid is an explicit argument (not a closure) so the jax backend can hand it to
@@ -336,6 +393,7 @@ def simulate(initial_state,kgrid,params,t_snap,t_end,mngr,schemestr='lsrk33',sav
     while state.t<t_end:
         carry = sim_to_next_snap_jit(carry,min(t_last_snapshot+t_snap,t_end))
         state,pstate = carry
+        check_finite(state)
         snap = _write_snapshot(snap,state,params,mngr,save,"snapshot",pstate)
         t_last_snapshot=float(state.t)
     mngr.wait_until_finished()

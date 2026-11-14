@@ -64,6 +64,8 @@ function makeGrid(p) {
     }
   }
   if (shell.length === 0) throw new Error("forcing shell contains no modes on this grid");
+  // the forcing is added unmasked: a shell mode beyond the 2/3 cut would alias into retained modes
+  if (shell.some(e => gridB[4 * e.m] < 0.5)) throw new Error("forcing shell reaches outside the dealiasing region");
   return { nkx, nky, nm, gridA, gridB, shell, kunit };
 }
 

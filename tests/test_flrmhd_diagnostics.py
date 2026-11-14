@@ -225,8 +225,8 @@ def test_rho_i_zero_is_the_rmhd_diagnostics():
                     f"(rel {_rel(sp + sm, s_phi + s_psi):.1e})",
                     k.shape == k0.shape and np.array_equal(k, k0)
                     and _rel(sp + sm, s_phi + s_psi) <= TOL)
-        # a non-square box: perpspec's range stops short of the dealiased band, the FLR
-        # spectra's does not (the documented difference)
+        # a non-square box: both share diagnostics.core._perp_bins, which runs to the
+        # largest dealiased k_perp, so both sums close (perpspec used to stop short)
         params = _flr(0.0, **_NSQ)
         kgrid = jr.setup_kgrids(params)
         state = _state(params, seed=4)
@@ -234,12 +234,14 @@ def test_rho_i_zero_is_the_rmhd_diagnostics():
         k0, s_phi, s_psi = (np.asarray(v, dtype=float) for v in dg.perpspec(state, kgrid, params))
         dk = k[1] - k[0]
         E = float(dgf.energy(state, kgrid, params)["total"])
-        c.check(f"non-square box: perp_spectra has {k.size} bins against perpspec's {k0.size}, "
-                f"agrees on the common ones, and sums to E ({abs((sp + sm).sum()*dk/E - 1):.1e}) "
-                f"where perpspec's sum is short by {1 - (s_phi + s_psi).sum()*dk/E:.1e}",
-                k.size > k0.size and _rel((sp + sm)[:k0.size - 1], (s_phi + s_psi)[:-1]) <= TOL
+        c.check(f"non-square box: perp_spectra and perpspec share {k.size} bins, agree per bin "
+                f"({_rel(sp + sm, s_phi + s_psi):.1e}), and both sum to E "
+                f"({abs((sp + sm).sum()*dk/E - 1):.1e}, "
+                f"{abs((s_phi + s_psi).sum()*dk/E - 1):.1e})",
+                np.array_equal(k, k0)
+                and _rel(sp + sm, s_phi + s_psi) <= TOL
                 and abs((sp + sm).sum()*dk/E - 1) <= TOL
-                and 1 - (s_phi + s_psi).sum()*dk/E > 1e-6)
+                and abs((s_phi + s_psi).sum()*dk/E - 1) <= TOL)
 
 
 # ---------------------------------------------------------------------------- gate F2.2

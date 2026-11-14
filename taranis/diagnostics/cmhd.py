@@ -32,11 +32,24 @@ import numpy as np
 
 from .. import grids
 from ..physics import shared_physics
-from ..physics.cmhd import _enthalpy, _eqpars, _kz_deriv, linear_matrix
+from ..physics.cmhd import _density_var, _enthalpy, _eqpars, _kz_deriv, linear_matrix
 from .core import _binned
 
 
 # --------------------------------------------------------------------------- helpers
+
+def _check_rho_state(params):
+    # these observers read field 0 as rho. Under density_var="lnrho" it is s = ln rho, and
+    # every number here would be wrong without any sign of it (a uniform rho = 1 reads as
+    # rho = 0) -- refuse rather than return it. Expansion is NOT refused: there the results
+    # are the comoving-primed quantities, a recorded choice (plans/CMHD_PLAN.md §5 C3b).
+    if _density_var(params) == "lnrho":
+        raise NotImplementedError(
+            "diagnostics.cmhd is rho-only: this run has eqpars['density_var'] = 'lnrho', so "
+            "field 0 is s = ln(rho) and the result would be silently wrong. Convert by hand "
+            "(rho = exp(s) in real space) until a density_var-aware helper lands "
+            "(plans/CMHD_PLAN.md §11).")
+
 
 def _real_fields(state, params):
     # (rho, u, B) in real space: rho (nz,nx,ny), u and B (3,nz,nx,ny). One ifft over the
@@ -85,6 +98,7 @@ def energies(state, kgrid, params):
     could be (it is quadratic), and is deliberately not -- computing it on the same
     real-space path keeps the spectra sum rule an independent Parseval check rather than a
     near-tautology."""
+    _check_rho_state(params)
     cs0, _, _, gamma = _eqpars(params)
     rho, u, B = _real_fields(state, params)
     kinetic = 0.5*jnp.mean(rho*(u*u).sum(0))
@@ -106,6 +120,7 @@ def mach_numbers(state, kgrid, params):
     turbulence run wants to monitor. At gamma = 1, M_s reduces to u_rms/cs0.
 
     Costs 7 inverse transforms."""
+    _check_rho_state(params)
     cs0, _, _, gamma = _eqpars(params)
     rho, u, B = _real_fields(state, params)
     u2 = (u*u).sum(0)
@@ -122,6 +137,7 @@ def rho_min(state, kgrid, params):
     drive rho through zero, after which rho**(gamma-1) and log(rho) are NaN and c_s in
     set_timestep poisons dt. Watching this number is how a campaign sees that coming instead
     of finding a NaN. Costs 1 inverse transform."""
+    _check_rho_state(params)
     rho, _, _ = _real_fields(state, params)
     return float(jnp.min(rho))
 
@@ -184,6 +200,7 @@ def spectra(state, kgrid, params, bin_factor=2.0, isotropic=False):
 
     Costs 4 inverse transforms (rho, u) and 3 forward (w); B and rho are read straight out
     of state.fields."""
+    _check_rho_state(params)
     rho = grids.ifft(state.fields[0], params)
     u = grids.ifft(state.fields[1:4], params)
     rhok, Bk = state.fields[0], state.fields[4:7]
@@ -248,6 +265,7 @@ def energy_budget(state, kgrid, params):
     (there "total" IS dE/dt). Both keys are returned because the two conventions are one
     sign apart and a diagnostic that can be read backwards is a bug waiting to happen.
     Costs 14 transforms."""
+    _check_rho_state(params)
     cs0, _, _, gamma = _eqpars(params)
     rho, u, B = _real_fields(state, params)
     L = linear_matrix(kgrid, params)

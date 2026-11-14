@@ -3,13 +3,12 @@ import jax.numpy as jnp
 import jax.numpy.fft as ft
 from .. import _precision
 from ..physics.shared_physics import perp_gradsq, perp_reduce, perp_inner_product
-from .core import _binned
+from .core import _binned, _perp_bins
 
 def perpspec(state,kgrid,params,bin_factor=2.0):
     # perpendicular energy spectrum, z-averaged.
     spec = lambda fk: perp_reduce(0.5*perp_gradsq(fk,fk,kgrid),params,axis=0)
-    kunit = min(2 * jnp.pi / params.Lx, 2 * jnp.pi / params.Ly)
-    kmax = min(params.nx//2,params.ny//2)*kunit
+    kunit, kmax = _perp_bins(params)
     return _binned(jnp.sqrt(kgrid.ksq),(spec(state.fields[0]),spec(state.fields[1])),
                    kunit,kmax,bin_factor)
 
@@ -22,7 +21,9 @@ def parspec(state,kgrid,params,bin_factor=2.0):
     def spec(fk):
         fkz = fk if params.z_spectral else ft.fft(fk,axis=0)
         full = jnp.sum(0.5*perp_gradsq(fkz,fkz,kgrid),axis=(1,2)) * norm
-        return full[:half+1].at[1:half].add(full[half+1:][::-1])
+        # fold kz < 0 onto kz > 0: an even nz has an unpaired Nyquist at index half, an odd
+        # nz pairs every nonzero mode (half+1 == (nz+1)//2 there)
+        return full[:half+1].at[1:(params.nz+1)//2].add(full[half+1:][::-1])
     kz = ft.rfftfreq(params.nz, dtype=_precision.ftype) * params.nz * 2 * jnp.pi / params.Lz
     kunit = 2 * jnp.pi / params.Lz
     return _binned(kz,(spec(state.fields[0]),spec(state.fields[1])),kunit,half*kunit,bin_factor)
