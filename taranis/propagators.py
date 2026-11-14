@@ -40,7 +40,7 @@ from typing import NamedTuple
 
 from . import _precision
 
-# Taylor branch for sinh(z)/z at small |z| (z = s*tau)
+# series branch for sinh(z)/z at small |z| (z = s*tau)
 _TOL_Z2_FP64 = 1e-4   # |z| < 1e-2
 _TOL_Z2_FP32 = 1e-2   # |z| < 1e-1
 
@@ -149,7 +149,8 @@ class DiagonalOperator(NamedTuple):
 
 class Putzer2Operator(NamedTuple):
     # nfields=2: exp(L*tau) = e^(m*tau)[cosh(s*tau) I + (sinh(s*tau)/s)(L - m I)] with
-    # m = tr L/2 and s^2 = m^2 - det L (Putzer/Sylvester).
+    # m = tr L/2 and s^2 = m^2 - det L (Putzer/Sylvester), evaluated from the two
+    # eigenvalue exponentials exp((m +- s)*tau) so a stiffly damped L cannot overflow.
     # m and s = sqrt(s^2) are precomputed at setup (putzer2_precompute).
     # all of the arithmetic is complex (waves)
     L: jnp.ndarray          # (2, 2, nz-or-1, nkx, nky)
@@ -167,39 +168,44 @@ class Putzer2Operator(NamedTuple):
         return Putzer2Operator(self.L*factor, self.m*factor, self.s*factor)
 
     def _coeffs(self, tau):
-        # (cosh(z), tau*sinh(z)/z) at z = s*tau, from w = exp(z): cosh = (w + 1/w)/2 and
-        # sinh(z)/z = (w - 1/w)/(2z), with a Taylor branch for the 0/0 at small |z| (which
-        # is also where w - 1/w loses digits to cancellation).
-        # overflow note: cosh/sinh overflow at |Re(s*tau)| ~ 710 (fp64) /
-        # 88 (fp32). unreachable under adaptive dt but a large FIXED dt with
-        # a strongly damped L can hit it, giving instant NaNs.
+        # (C, S) = e^(m*tau) * (cosh(z), tau*sinh(z)/z) at z = s*tau, from the two
+        # eigenvalue exponentials e+- = exp((m +- s)*tau):
+        #   C = (e+ + e-)/2,    S = (e+ - e-)/(2s)
+        # The prefactor is folded INTO the exponents on purpose. cosh(z) alone overflows at
+        # |Re(s*tau)| ~ 710 (fp64) / 88 (fp32) while e^(m*tau) underflows, and inf*0 is NaN
+        # for a perfectly bounded exp(L*tau) -- reachable under adaptive dt, because the
+        # exponent is evaluated at EVERY mode, the never-populated corners past the dealias
+        # cut included (0*NaN is NaN). e+- are the propagator's own eigenvalues, so they
+        # overflow only if the solution itself does.
+        # Small |z|: S is 0/0 at a defective mode and e+ - e- cancels near it, so it takes
+        # the series S = C*tau*tanh(z)/z there (C is a sum, accurate; no third exp).
+        # Both are even in s (s -> -s swaps e+ and e-).
         z = self.s*tau
         z2 = z*z
-        w = jnp.exp(z)
-        winv = 1.0/w
+        mt = self.m*tau
+        ep = jnp.exp(mt + z)
+        em = jnp.exp(mt - z)
+        C = 0.5*(ep + em)
         small = jnp.abs(z2) < _tol_z2()
-        z_safe = jnp.where(small, jnp.ones_like(z), z)   # keeps the 0/0 branch NaN-free
-        sinhc = jnp.where(small,
-                          1.0 + z2*(1.0/6.0 + z2*(1.0/120.0 + z2/5040.0)),
-                          0.5*(w - winv)/z_safe)
-        return 0.5*(w + winv), tau*sinhc
+        s_safe = jnp.where(small, jnp.ones_like(z), self.s)   # keeps the 0/0 branch NaN-free
+        tanhc = 1.0 + z2*(-1.0/3.0 + z2*(2.0/15.0 - z2*(17.0/315.0)))
+        S = jnp.where(small, (C*tau)*tanhc, 0.5*(ep - em)/s_safe)
+        return C, S
 
     def exp_op(self, tau):
-        cosh_z, sinh_over_s = self._coeffs(tau)
-        pref = jnp.exp(self.m*tau)
-        # M = pref*(cosh I + (sinh/s)(L - m I)); its four entries, to apply to a (2, ...) stack
-        d = cosh_z - sinh_over_s*self.m
-        return Putzer2Exp(m00=pref*(d + sinh_over_s*self.L[0,0]),
-                          m01=pref*(sinh_over_s*self.L[0,1]),
-                          m10=pref*(sinh_over_s*self.L[1,0]),
-                          m11=pref*(d + sinh_over_s*self.L[1,1]))
+        C, S = self._coeffs(tau)
+        # M = C I + S (L - m I); its four entries, to apply to a (2, ...) stack
+        d = C - S*self.m
+        return Putzer2Exp(m00=d + S*self.L[0,0],
+                          m01=S*self.L[0,1],
+                          m10=S*self.L[1,0],
+                          m11=d + S*self.L[1,1])
 
     def apply_exp(self, arr, tau):
         return self.exp_op(tau).apply(arr)
 
     def solve_shifted(self, arr, a):
-        # closed-form inverse of the 2x2 M = I - a*L. Pole note (mirrors apply_exp's
-        # overflow note): det(I - a*L) = 0 when a growing eigenvalue satisfies
+        # closed-form inverse of the 2x2 M = I - a*L. Pole note: det(I - a*L) = 0 when a growing eigenvalue satisfies
         # lambda = 1/a (a = a_ii*dt in the IMEX steppers, so lambda*dt ~ 2-3). 
         # unreachable under an adaptive dt (gamma_max*dt ~ O(1) with safety < 1)
         # possible with large fixed dt: symptom is instant NaNs/huge values.

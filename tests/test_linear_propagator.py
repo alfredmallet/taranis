@@ -491,7 +491,7 @@ def test_coeffs_match_the_previous_sqrt_cosh_sinh_form():
         for tau in (1.0, 0.017, 43.0):
             s = jnp.asarray(z/tau, dtype=_precision.ctype)
             s2 = jnp.asarray((z/tau)**2, dtype=_precision.ctype)
-            prop = propagators.Putzer2Operator(None, None, s)
+            prop = propagators.Putzer2Operator(None, jnp.zeros_like(s), s)
             got_c, got_s = prop._coeffs(tau)
             ref_c, ref_s = _coeffs_old(s2, tau)
             # d(cosh z)/dz = sinh z and d(tau*sinh(z)/z)/dz ~ tau*cosh(z)/z, both bounded
@@ -524,7 +524,7 @@ def test_coeffs_at_the_taylor_cutoff_match_an_accurate_reference():
         sides = {}
         for side, frac in (("Taylor side", 0.999), ("w = exp(z) side", 1.001)):
             s = jnp.asarray(np.sqrt(frac)*zb*np.exp(1j*phases)/tau, dtype=_precision.ctype)
-            got_c, got_s = propagators.Putzer2Operator(None, None, s)._coeffs(tau)
+            got_c, got_s = propagators.Putzer2Operator(None, jnp.zeros_like(s), s)._coeffs(tau)
             sides[side] = (got_c, got_s)
             # reference at the z the kernel really evaluates at: s is stored at field
             # precision, so this measures the evaluation, not the input quantization
@@ -576,6 +576,41 @@ def test_exp_op_matches_the_previous_evaluation():
             err = max(_within(g, r, sens, rtol) for g, r in zip(got, ref))
             c.check(f"exp(L*tau) entries match the previous evaluation ({label}, "
                     f"tau={tau})", err < 1.0, f"worst tolerance ratio {err:.3f}")
+
+
+def test_stiffly_damped_exponential_never_overflows():
+    # A bounded exp(L*tau) whose cosh(s*tau) alone is far past overflow (710 fp64 / 88 fp32):
+    # the old e^(m*tau)*cosh form returned inf*0 = NaN here. Reachable under adaptive dt --
+    # the exponent is evaluated at every mode, the empty corners past the dealias cut
+    # included, and 0*NaN is NaN. Checked against the exact diagonal answer and, for the
+    # coupled (wave + one-sided damping, the nu != eta z_spectral shape) cases, by the
+    # semigroup property exp(L*tau) = exp(L*tau/2)^2 and the determinant e^(tr L*tau).
+    rtol, label = _tols()
+    rates = (2.0e3, 1.0e5, 1.0e9, 1.0e30)
+    with checks() as c:
+        for tau in (0.1, 1.0, 37.0):
+            diag = _putzer([np.array([[0.0, 0.0], [0.0, -r]]) for r in rates])
+            got = _columns(diag, len(rates), tau)
+            ref = np.zeros_like(got)
+            ref[0, 0] = 1.0
+            ref[1, 1] = np.exp(-np.array(rates)*tau)
+            err = float(np.max(np.abs(got - ref)))
+            c.check(f"diag(0, -r) exponential is exact and finite ({label}, tau={tau})",
+                    np.all(np.isfinite(got)) and err < rtol, f"abs err {err:.3e}")
+            for kz in (1.0, 16.0):
+                mats = [np.array([[-r, 1j*kz], [1j*kz, 0.0]]) for r in rates]
+                mats += [np.array([[0.0, 1j*kz], [1j*kz, -r]]) for r in rates]
+                prop = _putzer(mats)
+                full = _columns(prop, len(mats), tau)
+                half = _columns(prop, len(mats), 0.5*tau)
+                sq = np.einsum("ijn,jkn->ikn", half, half)
+                err = float(np.max(np.abs(full - sq)))
+                c.check(f"damped wave: finite and exp(L tau) = exp(L tau/2)^2 ({label}, "
+                        f"tau={tau}, kz={kz})",
+                        np.all(np.isfinite(full)) and err < rtol, f"abs err {err:.3e}")
+                c.check(f"damped wave: bounded by 1 ({label}, tau={tau}, kz={kz})",
+                        float(np.max(np.abs(full))) <= 1.0 + rtol,
+                        f"max |entry| {float(np.max(np.abs(full))):.6f}")
 
 
 if __name__ == "__main__":

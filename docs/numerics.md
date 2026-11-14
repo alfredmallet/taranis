@@ -298,12 +298,21 @@ is perpendicular-only); a `SeparableL` NamedTuple selects the separable backend.
   `exp(Lτ) = e^{mτ}[cosh(sτ)·I + (sinh(sτ)/s)·(L − m·I)]` with `m = tr L/2` and
   `s = sqrt(m² − det L)` (Putzer/Sylvester). No eigendecomposition and no eigenvector
   storage, and it is smooth through the defective points where an eigenbasis does not
-  exist. `s` is formed once at setup (`kgrid.lin.s`) and the two hyperbolic functions
-  come from a single exponential per stage: with `z = s·τ` and `w = e^z`,
-  `cosh z = (w + 1/w)/2` and `sinh(z)/z = (w − 1/w)/(2z)`, so a stage costs 2 complex
-  exps and 1 complex reciprocal per mode rather than the complex `sqrt`/`cosh`/`sinh`
-  it used to (which XLA lowered into ~10 real `exp`, 5 `cos`, 5 `sin`, 7 `sqrt` and
-  9 divides per mode).
+  exist. `s` is formed once at setup (`kgrid.lin.s`) and a stage evaluates the two
+  **eigenvalue exponentials** `e± = exp((m ± s)τ)`, from which
+  `C = e^{mτ}cosh(sτ) = (e⁺ + e⁻)/2` and `S = e^{mτ}sinh(sτ)/s = (e⁺ − e⁻)/(2s)`, and
+  `exp(Lτ) = C·I + S·(L − m·I)`. That is 2 complex exps and 1 complex divide per mode.
+  The prefactor is folded into the exponents deliberately (since 2026-11-13): the earlier
+  `w = e^{sτ}` form multiplied `e^{mτ}` onto `cosh`/`sinh` afterwards, and for a stiffly
+  damped mode `cosh(sτ)` overflows (|Re sτ| ~ 710 fp64 / 88 fp32) while `e^{mτ}`
+  underflows — `inf·0 = NaN` for a bounded exponential. `e±` are the propagator's own
+  eigenvalues, so they overflow only if the solution does. **This was reachable under
+  adaptive dt**: the exponent is evaluated at every mode, the never-populated corners
+  beyond the dealias cut included (`0·NaN = NaN`), where `k^{2h}` is ~91× (hyper 3) or
+  ~414× (hyper 4) its value at the cut. Measured before the fix, z_spectral RMHD 64²×8,
+  `hyper=4`, `diss=(ν, 0)`, lsrk54: non-finite after one step at `ν·k_d⁸·dt ≈ 2.7` (fp32)
+  and `≈ 27` (fp64). Cost of the change, interleaved A/B on the M1 at fp64
+  (`bench/putzer2_step.py`): GDI-IF unchanged, z_spectral ν ≠ η 10–15% faster.
 - **separable**, `SeparableL(dperp, dz, kz)`: the exact factorised form for
   `L = d·I + i·kz·σx` with real `d = dperp(k⊥) + dz(kz)` — z_spectral RMHD at ν = η.
   Derivation and properties below.
@@ -313,22 +322,21 @@ Two traps in the 2×2 form, both guarded in `tests/test_linear_propagator.py`:
 - **everything is complex.** `s²` is negative for any oscillatory mode and complex in
   general; a real `sqrt` NaNs silently. `cosh(sτ)` and `sinh(sτ)/s` are *even* in `s`, so
   they are single-valued functions of `s²` and the branch of the sqrt does not matter.
-- **`sinh(sτ)/s` is 0/0 at a defective mode**, so it switches to its Taylor series
-  `τ·(1 + z²/6 + z⁴/120 + z⁶/5040)`, `z = sτ`, below a cutoff on `|z²|` (`1e-4` at fp64,
-  `1e-2` at fp32 — the coefficients are evaluated at fp64 and cast). The branch is taken
-  with a `jnp.where` on a *safe* denominator so the unused branch cannot NaN.
+- **`sinh(sτ)/s` is 0/0 at a defective mode**, so below a cutoff on `|z²|`, `z = sτ`
+  (`1e-4` at fp64, `1e-2` at fp32) `S` switches to the series
+  `S = C·τ·tanh(z)/z = C·τ·(1 − z²/3 + 2z⁴/15 − 17z⁶/315)` — `C` is a sum and accurate
+  there, so no third exponential is needed. The branch is taken with a `jnp.where` on a
+  *safe* denominator so the unused branch cannot NaN.
 
   The cutoffs are ~100× wider in `|z²|` than the removable singularity alone would need,
-  because the `w`-form above turns the branch into an *accuracy* branch: `w + 1/w` is a
-  sum of two nearly equal numbers, but `w − 1/w` is a **difference** of two nearly equal
-  numbers, and that cancellation grows as z shrinks (relative error ~ eps/|z|² in the
-  quotient). Measured, unbranched `w`-form against a complex128 `sinh(z)/z`: 1.5e-13 (fp64)
-  at the old `|z| = 1e-3` boundary and 4.8e-6 (fp32) at the old `|z| = 1e-2` — at or over
-  the gate — falling to 5.6e-15 and 3.2e-7 at the new boundaries. On the series side the
-  truncation `|z|⁸/362880` is 2.8e-14 at `|z| = 1e-1` and 2.8e-22 at `1e-2`, so the widened
-  branch is covered with room to spare at both precisions. Both coefficients stay *even*
-  in `s` (`w → 1/w` under `s → −s`), so widening the branch does not disturb the
-  branch-independence above.
+  because the branch is an *accuracy* branch: `e⁺ + e⁻` is a sum of two nearly equal
+  numbers, but `e⁺ − e⁻` is a **difference** of two nearly equal numbers, and that
+  cancellation grows as z shrinks (relative error ~ eps/|z|² in the quotient; the same
+  cancellation the earlier `w − 1/w` had, measured there as 5.6e-15 (fp64) and 3.2e-7
+  (fp32) at these boundaries). On the series side the truncation `62|z|⁸/2835` is
+  2.2e-10 at `|z| = 1e-1` (fp32's boundary) and 2.2e-18 at `1e-2`, so the branch is
+  covered at both precisions. Both coefficients stay *even* in `s` (`s → −s` swaps `e⁺`
+  and `e⁻`), so the branch-independence above is undisturbed.
 
 `setup_kgrids` also asserts that `L(−kx, ky) = conj(L(kx, ky))` on the `ky = 0` and
 Nyquist rows: without it the exponential would break the reality constraint of the rfft2
@@ -346,7 +354,7 @@ block of steps sharing one dt (fixed dt, or a `cfl_every` block) `run.py` forms 
 ExpOp once (`timestepping.stage_exp_ops`) and the stepper only applies it — the same
 numbers in the same op order, bitwise equal to the per-stage evaluation at fp64
 (`tests/test_hoist_propagator.py`). The cost it removes is the per-stage coefficient
-evaluation — the 2 complex exps + 1 reciprocal of the putzer2 `w`-form above, or the
+evaluation — the 2 complex exps + 1 divide of the putzer2 form above, or the
 separable backend's real `exp`/`cos`/`sin`. It is worth the most on putzer2, which is the
 only backend where the ExpOps are full-grid arrays and so the only one where hoisting has a
 memory price; docs/performance.md has the per-device numbers.
@@ -399,9 +407,9 @@ genuinely full-grid and is untouched.
 `d ≤ 0` everywhere (ν, zd ≥ 0), so for a > 0 the denominator is ≥ (1 − a·d)² ≥ 1: the
 separable `solve_shifted` divides by nothing smaller than 1. This retires, for this path,
 one of the two documented NaN traps above — putzer2's `det(I − a·L) = 0` at λ = 1/a
-(reachable at large fixed dt). The overflow trap is retired too: `e^{dperp·τ}` and
-`e^{dz·τ}` are exponentials of negative reals — they underflow to 0, never overflow —
-where cosh/sinh overflow at |Re(sτ)| ~ 710 (fp64) / 88 (fp32).
+(reachable at large fixed dt). Overflow cannot happen either: `e^{dperp·τ}` and
+`e^{dz·τ}` are exponentials of negative reals — they underflow to 0, never overflow
+(putzer2 had a cosh/sinh overflow trap here until its exponents were combined, above).
 
 **Reality, and why the setup check is analytic.** The rfft layout's self-conjugate rows
 require `L(−kx, −kz, ky) = conj(L(kx, kz, ky))` there, which for the separable form is

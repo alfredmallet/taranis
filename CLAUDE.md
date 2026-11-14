@@ -293,6 +293,19 @@ coefficients cost), where the same pair on the P100 is a real +7.0 u. Size the t
 device you will run on. Nothing to decide on the separable path (hoisting is ~free and on),
 and nothing to decide on FD-z/2D/CMHD (the knob does not reach the diagonal backend).
 
+**putzer2 evaluates `exp((m±s)·τ)`, never `e^{mτ}`·cosh/sinh** (2026-11-13;
+`Putzer2Operator._coeffs` returns `(C, S)` with the prefactor already folded in, and
+`exp(Lτ) = C·I + S·(L − m·I)`). The earlier `w = e^{sτ}` form gave `inf·0 = NaN` for a
+stiffly damped L — under ADAPTIVE dt too, because the exponent is evaluated at every mode,
+the empty corners past the dealias cut included (measured: z_spectral ν ≠ η, hyper 4,
+non-finite at `ν·k_d⁸·dt ≈ 2.7` fp32 / `≈ 27` fp64). Never split the prefactor back out
+(`tests/test_linear_propagator.py::test_stiffly_damped_exponential_never_overflows`). The
+putzer2 time/memory figures in the paragraph above were measured on the `w`-form and are
+not re-measured; the change itself timed as GDI-IF unchanged and z_spectral ν ≠ η 10–15%
+faster (`bench/putzer2_step.py`, M1, fp64, interleaved), and the four putzer2 configs of
+the refactor reference were regenerated for it (round-off moves only; the other eight
+stayed bitwise).
+
 The ExpOps are exactly the arrays `apply_exp` forms, in the same op order — `apply_exp(arr,
 tau)` IS `exp_op(tau).apply(arr)` — so hoisted and unhoisted agree bitwise at fp64 on the test
 grids (`tests/test_hoist_propagator.py`; fp32 has one 1-ulp fusion cell). `exp_ops=None` is
