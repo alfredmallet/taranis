@@ -2,7 +2,8 @@
 # Boris pusher and the periodic gather driven by ANALYTIC fields, no solver in the loop.
 #
 #   1. Gyration      uniform B0*zhat, E = 0: |v| conserved to round-off (the Boris
-#                    rotation is norm-exact), gyrophase error ~ (Omega*dt)^2, and the
+#                    rotation is norm-exact), gyrophase error ~ (Omega*dt)^7 with
+#                    the new corrected boris push (now default), and the
 #                    sense of rotation (qm > 0, B = +zhat rotates v clockwise seen from
 #                    +z, i.e. dv_x/dt = +qm*v_y*B0).
 #   2. E x B drift   uniform E_perp, B: gyro-averaged drift = E x B / B^2, both

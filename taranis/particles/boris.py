@@ -67,7 +67,8 @@ def boris_kick_corr(v, E, B, qm, dt):
     #exact angle, computationally slow
     #t_corr = jnp.tan(h*Bmag)
     #Faster: use Taylor expansion for tan(x) = x + x^3/3 + 2*x^5/15 + O(x^7))
-    # ~= x*(1 + x^2/3*(1 + 2*x^2/5))
+    # ~= x*(1 + x^2/3*(1 + 2*x^2/5)) should reduce gyrophase error to
+    #O(Omega*dt)^7
     arg = h*Bmag
     argsq = arg*arg
     t_corr = arg*(1.0 - argsq/3.0*(1.0 + 0.4*argsq))
