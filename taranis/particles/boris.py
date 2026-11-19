@@ -80,9 +80,9 @@ def boris_kick_corr(v, E, B, qm, dt):
     t_corrz = t_corr*bhatz
     s_corr = 2.0 / (1.0 + t_corrx * t_corrx + t_corry * t_corry +
                     t_corrz * t_corrz)
-    s_corrx = s_corr * tx
-    s_corry = s_corr * ty
-    s_corrz = s_corr * tz
+    s_corrx = s_corr * t_corrx
+    s_corry = s_corr * t_corry
+    s_corrz = s_corr * t_corrz
     # v' = v- + v- x t_corr
     px = vmx + (vmy * t_corrz - vmz * t_corry)
     py = vmy + (vmz * t_corrx - vmx * t_corrz)
