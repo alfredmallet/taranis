@@ -112,7 +112,7 @@ _drift = jax.vmap(drift, in_axes=(0, 0, None))
 _project = jax.vmap(project_perp, in_axes=(0, 0))
 
 
-def _kick_tracked(v, s, nez, qm, dt, dw, project=False, kick_corr=False):
+def _kick_tracked(v, s, nez, qm, dt, dw, project=False, kick_corr=True):
     # one half-kick from a single field sample s (N, 2+nez+3): E = (s0, s1, sum of the nez
     # E_z pieces), B = the last three columns. With `project` (static) the E sample is
     # replaced by its component perpendicular to B before the kick, and the work columns
@@ -134,7 +134,7 @@ def _kick_tracked(v, s, nez, qm, dt, dw, project=False, kick_corr=False):
 
 
 def push_tracked(x, v, F, nez, qm, dt, params, substeps=1, gather=interp.gather,
-                 project=False, kick_corr=False):
+                 project=False, kick_corr=True):
     # advance particles (x, v) both (N,3) float64 by dt in the stacked field array F
     # (fields.assemble_stacked's layout: E_perp, nez E_z pieces, B; frozen over the call),
     # with ONE gather per half-kick. substeps (static) splits dt into equal pieces.
@@ -162,7 +162,7 @@ def push_tracked(x, v, F, nez, qm, dt, params, substeps=1, gather=interp.gather,
 
 
 def push(x, v, E3, B3, qm, dt, params, substeps=1, gather=interp.gather,
-         kick_corr=False):
+         kick_corr=True):
     # push_tracked from separate E3, B3 arrays (each (3, nz, nx, ny)), discarding the work
     # split: E_z is a single piece here.
     return push_tracked(x, v, jnp.concatenate([E3, B3]), 1, qm, dt, params,
