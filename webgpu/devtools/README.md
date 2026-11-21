@@ -855,6 +855,19 @@ leave untracked or commit — they are dev-only, nothing in the apps loads them.
   (9) the other two pages: `stepHook` null, a running frame taking `stepsPerFrame` steps,
   the state mark unchanged, and the hook's contract (a number, a promise, a solver replaced
   meanwhile, not called while paused).
+  Since M3/M4 (295 rows): (6b) the live-source rules as data — `musicTabConstraints`,
+  `musicInputConstraints`, `musicRouting` (a tab is played only when its track reports the
+  tab silenced, exactly `true`; an input device never, whatever is passed), every
+  `musicStartError` sentence, and the detector's first seconds not being a burst; (10) the
+  sources on the stub, with `fakeMedia` standing in for `navigator.mediaDevices` and
+  `fakeAudio` now a real node graph (`outs` / `ins`, so `toSpeakers(node)` answers "what
+  reaches the speakers, and through what"): a silenced tab played through the delay; a tab
+  the browser did not silence analysed and never played; a capture with no audio track,
+  cancelled, or ending from outside; a source switched while live and while the picker is
+  still open; an input device — raw constraints, the exact `deviceId`, never connected to
+  the destination even when its track claims to be "suppressed"; the device list before and
+  after access; the delay slider moving the live node; a new detector on every Start; the
+  `musicDebug.audio` record; a 48 kHz context.
   **Things to know before editing it.** The stub's stats readback is all zeros, so leg 8
   replaces `readStats` with a MODEL (t advances by a fixed dt per step, the energy by 1 per
   kick): what is verified there is the page's arithmetic and ORDER given a readback, not

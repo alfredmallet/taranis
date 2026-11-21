@@ -1,8 +1,10 @@
 # MUSIC_PLAN — live music drives the 2D demo
 
-> **STATUS: drafted 2026-11-21; M0 measured; M1 (solver) committed (14ed94b); M2 (the page,
-> the clock, click track and file) implemented the same day, uncommitted; it runs in Chrome
-> on the M1 and looked in sync by eye, its numbers not yet measured; M3+ not started.** Phase M0 was three
+> **STATUS: drafted 2026-11-21; M0 measured; M1 (solver) committed (14ed94b); M2 (page, clock,
+> click track and file) committed (c960488), runs in Chrome on the M1 and looked in sync by
+> eye; M3 (tab capture, input devices) and M4 (latency compensation) implemented the same
+> day, uncommitted, awaiting one fresh review and a real-browser pass. The page is unlinked
+> and pruned from the deploy.** Phase M0 was three
 > measurements that decided the design (results below).
 > **M0.a answered 2026-11-21: tab audio capture works** for both the Spotify and the
 > Pandora web players (Alfred, Chrome on the M1) — tab capture is the primary route.
@@ -378,6 +380,41 @@ and recorded here as theirs, not his — each is cheap to revisit):
    addition to shared code keyed on the solver's own `g.kick`).
 8. Stop restarts a file from its beginning on the next Start (no pause/resume position).
 
+*Measured on a real GPU, 2026-11-21* (the coordinating session, through browser
+automation: the COMMITTED M2 page, a `git archive` of c960488 served from a scratch
+directory, Chrome on the M1, tab visible, click track at 120 bpm).
+- **Sync** (`?musicdebug`, 67.2 s, 3736 frames = 56.8 fps; context at 48000 Hz,
+  `baseLatency` 5.3 ms, `outputLatency` reported 0): `rebases` 0, `framesAtCap` 0. `lag`
+  over the whole run: mean 0.0159 s, min 0.0061, max 0.0685; after the first 10 s: min
+  0.0061, 5% 0.0119, median 0.0145, 95% 0.0294, max 0.0685. Never negative. 68 of 3736
+  frames exceed two frames (0.034 s), the earliest at 0.14–0.44 s (start-up). Steps per
+  frame mean 4.43 (2–14): **246 steps/s against the ~600 available.**
+- **How to read that lag.** `lag` is `target − simT` with `simT` from the PREVIOUS frame's
+  readback, i.e. it is taken BEFORE the frame's steps: the simulation ended the last frame
+  on its target, the audio clock has since moved one frame on, so a steady run reads about
+  one frame (0.0145 s median at 56.8 fps is 0.82 of one) by construction. The steps then
+  taken bring it to the target, and the frame is rendered after them. So the picture is
+  not a frame behind the audio clock; the record was. The M2 gate "within a frame" is met
+  in the median and not at the 95th percentile (1.8 frames) *in that pre-step number* — the
+  tail is frames that followed a long one. From this round the record also carries
+  `lagAfter` (the lag expected once the frame's steps are taken, at the dt in hand;
+  `summary().lagAfterSeconds`), which is the number to hold against the gate; it has not
+  been measured on a GPU yet. **An option, not taken:** the count could aim half a frame
+  past the target so that the pre-step lag centres on zero, but that puts the rendered
+  state half a frame AHEAD of the audio clock on every frame, and ahead of a kick that is
+  about to land — the thing the look-ahead rule exists to prevent. Leave it.
+- **Latency**, onset → `kick()` returning: band 0 (the kick drum) `latencySeconds` mean
+  0.0388 (0.0380–0.0433), `latencyFromScheduled` mean 0.0374 (0.0267–0.0773); band 1
+  0.0388 / 0.0372; band 3 (hats) from scheduled 0.0460 (0.0407–0.0793). About 38 ms plus
+  presentation, as estimated: **M4's 50 ms default delay is the right size.**
+- **Energy jump per kick** (`?musicdebug=energy`, 23.2 s, rebases 0), mean (min–max):
+  band 0 **0.361** (0.147–0.579) over 46 kicks, band 1 0.130 over 46, band 2 0.102 over
+  23, band 3 0.055 over 66. Offline click track: 0.30 / 0.24 / 0.16 / 0.08. The bass jump
+  is +20% of the offline figure, inside the plan's ~20%; the mid bands are lower (a
+  different synthesiser and detector).
+- **Not measured:** a file source, a 120 Hz display, a hidden-tab return, the save and
+  record buttons.
+
 *What only a real browser can say — unverified except where noted (it runs, and looked
 in sync by eye, 2026-11-21).*
 - That WebGPU runs `blobKick` at all (M1 never ran on a GPU either): blobs appear in |u|
@@ -424,11 +461,108 @@ in sync by eye, 2026-11-21).*
 - Decide whether the page ships: remove the `pages.yml` prune and link it, or keep it a
   development build.
 
-**M3 — live sources.** Tab capture and input-device picker, permission and failure paths
-(denied, no audio track, device unplugged), the running normalisation's first 20 s.
+**M3 — live sources, and M4 — latency compensation.** **IMPLEMENTED together 2026-11-21,
+uncommitted, awaiting the one fresh review. Nothing in this entry has run in a real
+browser** — the checklist at its end is what to do there. Developer notes:
+`webgpu/README.md`, "The music page".
 
-**M4 — polish.** Delay compensation for file/tab sources, `docs.html` section, preset,
-the "behind" indicator.
+*Process.* By agreement these two phases ran under a lighter rule than M1/M2: gates for
+the pure logic and for anything that could be silently wrong, no mutation round, the
+existing gates run once at the end.
+
+*What landed.*
+- `music.js` (pure): `MUSIC_SOURCES`, `MUSIC_DELAY_DEFAULT` / `_MAX`,
+  `musicTabConstraints`, `musicInputConstraints`, `musicRouting`, `musicStartError`.
+- `music.html`: the source select gains "another tab's audio" and "audio input device";
+  `musicAcquire` (one function per way of obtaining a source), `musicStart` /
+  `musicStop` with a generation counter for anything still awaiting, the device list,
+  the delay slider, the mode line, `musicDebug.audio`.
+- The graph is `source → analyser` (a dead end, undelayed) plus, only where
+  `musicRouting` allows, `source → DelayNode → speakers`. M2's `analyser → speakers`
+  connection is gone.
+- `devtools/checkmusic.js`: 295 rows (was 226), all green — legs 6b and 10.
+
+*Decisions taken in this round* (the coordinating session's, with Alfred's agreement to
+the lighter process; each cheap to revisit):
+1. **A captured tab is played by the page only if its audio track reports
+   `suppressLocalAudioPlayback === true`.** Otherwise it is analysed and not played, the
+   page runs uncompensated and says so. No double audio in either case.
+2. **An input device is never played.** Uncompensated by construction.
+3. **Default delay 50 ms, slider 0–150 ms**, applied live.
+4. **No `docs.html` section, no nav link, no `?demo=` preset**: the page is unpublished.
+
+*Implementer's choices, flagged for the browser pass.*
+1. **The tab capture's video track is kept alive**, requested at 64 px and 1 frame a
+   second. I believe stopping it leaves the audio running in Chrome, but could not check,
+   and the failure would be silent. If the browser pass shows stopping it is safe, stop it
+   in `musicAcquire` (one line) and drop `videoTrackAlive` from the worry list.
+2. **The analyser is left unconnected** on its output side. The Web Audio spec allows it
+   and it is the common way to analyse a microphone; if a browser did not pull an
+   unconnected analyser the page would show no kicks at all for input devices and
+   unsilenced tabs — visible at once.
+3. **`getSettings().suppressLocalAudioPlayback`** is where suppression is read from. If
+   Chrome applies the constraint without reporting it there, a silenced tab would be
+   treated as unsilenced: the tab would be SILENT (suppressed) and the page would not play
+   it either. That is the one combination to look for.
+4. A microphone's noise floor is not gated (see the README's "known limit").
+
+*Still browser-only after this round.* Everything in M2's list, plus:
+- that tab capture delivers audio through this code path (M0.a tested a throwaway page);
+- whether `suppressLocalAudioPlayback` takes effect, and is reported, in Chrome on macOS;
+- whether the unused video track can be stopped;
+- that an unconnected analyser is processed;
+- device labels appearing after permission; a loopback driver (BlackHole) as an input;
+- that the 50 ms default actually lines the picture up with the sound, by eye and by
+  `summary()`;
+- Chrome's "Stop sharing" bar ending the session cleanly; a tab closed mid-capture.
+
+*The real-browser checklist* (Chrome on the M1; serve with
+`cd webgpu && python -m http.server 8766`, open
+`http://localhost:8766/music.html?musicdebug`). After each Start, the line under the
+sliders is the mode line; `musicDebug.audio` in the console is the record.
+1. **Click track.** Source "click track" → Start. Mode line: "latency compensated (sound
+   delayed 50 ms): the page plays this source, delayed". `musicDebug.audio`: `kind
+   "click"`, `played true`, `compensated true`, `delayMs 50`, `suppressed null`,
+   `sampleRate` 44100 or 48000. Move "sound delay" to 0 and to 150: at 0 the picture
+   should trail the click slightly, at 150 lead it; `delayMs` follows. After 65 s,
+   `musicDebug.summary()`: `lagSeconds` within ±0.017, `rebases` 0, `framesAtCap` 0;
+   `bands[0].latencyFromScheduled.mean` ≈ 0.04, and perceived ≈ that − `delayMs`/1000 −
+   `audio.outputLatency` + 0.017.
+2. **File.** Source "audio file" → choose an mp3 → Start. Same mode line; `kind "file"`,
+   `label` the file name. It stops by itself at the end of the file.
+3. **Tab.** Play something in the Spotify web player in another tab. Source "another
+   tab's audio" → Start → in Chrome's picker choose **Chrome Tab**, the Spotify tab,
+   "Also share tab audio" ON → Share. Then read `musicDebug.audio.suppressed`:
+   - `true`: the mode line says "…the tab is silenced and the page plays its audio,
+     delayed". You should hear the music ONCE, coming from the page. `played true`,
+     `delayMs 50`.
+   - `false`: "NOT latency compensated: this browser did not silence the captured tab…".
+     You should hear the music ONCE, from the tab. `played false`, `delayMs 0`.
+   - **Report if you hear it twice, or not at all** — those are the two ways this can be
+     wrong (choice 3 above).
+   Also read `videoTrackAlive` (expected `true`) and `trackSettings`. Then press Chrome's
+   "Stop sharing": the page should stop and say "the tab capture ended".
+4. **Tab, wrong pick.** Start again and choose a *window* or turn the audio toggle off:
+   the page should not start and should say to pick a Chrome TAB and switch on "Also share
+   tab audio". Start again and press Cancel: "the tab capture was cancelled or not
+   allowed".
+5. **Input device.** Source "audio input device": the list shows "default input" and
+   nameless entries. Start → allow the microphone → names appear. Mode line: "NOT latency
+   compensated: an input device is never played back…". **Nothing should come out of the
+   speakers from the page** (clap: the picture kicks, no echo). `kind "input"`, `played
+   false`, `delayMs 0`. If BlackHole is installed, pick it and route the system output
+   through it.
+6. **Switching.** While the tab capture is live, change the source to "click track": the
+   sharing bar should go away and the page stop. Start: no flurry of kicks in the first
+   second.
+7. **To settle choice 1** (optional): in the console during a live tab capture,
+   `music.audio.stream.getVideoTracks()[0].stop()` — if the kicks carry on, the video
+   track can be stopped in the code.
+
+*What is left after M4.* The single fresh review of M3/M4; the browser pass above; the
+decision to ship (remove the `pages.yml` prune, link the page, write its `docs.html`
+section); the noise-floor guard for microphones; the detector on an `AudioWorklet` if a
+device cannot hold 60 Hz; 512² live, which needs about five times the M1's step rate.
 
 ## Decisions (Alfred, 2026-11-21)
 

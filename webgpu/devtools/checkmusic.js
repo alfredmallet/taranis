@@ -126,6 +126,7 @@ function legPure(state) {
   ok("music.js evaluates in a bare context: no DOM, no Web Audio, none of the shared scripts", msg === "", msg);
   const M = state.M = vm.runInContext(`({ musicBandPlan, MusicDetector, musicShouldPush, musicRng, musicBlobsFor,
     musicKickList, musicClickTrack, musicClock, musicNpSum, musicPercentile, MUSIC_LBOX, MUSIC_SIGMA_MAX,
+    musicTabConstraints, musicInputConstraints, musicRouting, musicStartError, MUSIC_SOURCES, MUSIC_DELAY_DEFAULT, MUSIC_DELAY_MAX,
     MUSIC_SIGMA_MIN_DX, MUSIC_SIGMA_STEP, MUSIC_NBLOB_BASS, MUSIC_NBLOB_MAX })`, ctx);
   const names = [];
   for (const l of src.split("\n")) {
@@ -139,7 +140,9 @@ function legPure(state) {
   const shared = ["common.js", "physics.js", "solver2d.js"].map(f => fs.readFileSync(path.join(dir, f), "utf8")).join("\n");
   const clash = names.filter(n => new RegExp("^(?:async\\s+)?(?:function\\*?|const|let|var|class)\\s+" + n.replace(/\$/g, "\\$") + "\\b", "m").test(shared));
   ok("  ... and none is declared at the top level of common.js / physics.js / solver2d.js", clash.length === 0, clash.join(", "));
-  const code = src.split("\n").filter(l => !/^\s*\/\//.test(l)).join("\n");
+  // comments and string literals out first: a MESSAGE may say "window" or "device"
+  const code = src.split("\n").filter(l => !/^\s*\/\//.test(l)).join("\n")
+                  .replace(/"(?:[^"\\\n]|\\.)*"/g, '""').replace(/\/\/.*$/gm, "");
   const dom = ["document", "window", "navigator", "AudioContext", "requestAnimationFrame", "performance", "location",
                "device", "solver", "GPU"].filter(w => new RegExp("\\b" + w + "\\b").test(code));
   ok("  ... its code names no DOM, Web Audio, WebGPU or page global", dom.length === 0, dom.join(", "));
@@ -608,40 +611,112 @@ function legClock(state) {
      reb === 1 && worst <= 1 / 60 + 1e-9 && Math.abs(simT - 599 / 60) < 0.0037, "worst lag " + (1e3 * worst).toFixed(2) + " ms, " + steps + " steps");
 }
 
+// ===========================================================================
+// 6b. the live-source rules (M3 / M4), as data
+// ===========================================================================
+function legRules(state) {
+  const M = state.M;
+  ok("the four sources, and the delay's default and range: click / file / tab / input, 50 ms in 0..150",
+     JSON.stringify(Array.from(M.MUSIC_SOURCES)) === '["click","file","tab","input"]' && M.MUSIC_DELAY_DEFAULT === 50 && M.MUSIC_DELAY_MAX === 150);
+  const tc = M.musicTabConstraints();
+  ok("a tab capture asks for a video track (the API requires one), as small and slow as it can be asked for",
+     !!tc.video && tc.video.frameRate === 1 && tc.video.width <= 64 && tc.video.height <= 64);
+  ok("  ... and for RAW audio with the captured tab silenced: no echo cancellation, noise suppression or gain control, suppressLocalAudioPlayback",
+     tc.audio.echoCancellation === false && tc.audio.noiseSuppression === false && tc.audio.autoGainControl === false &&
+     tc.audio.suppressLocalAudioPlayback === true);
+  const ic = M.musicInputConstraints("bh2"), id = M.musicInputConstraints(""), iu = M.musicInputConstraints();
+  ok("an input device is asked for RAW audio too, from exactly the device chosen, and no video",
+     ic.audio.echoCancellation === false && ic.audio.noiseSuppression === false && ic.audio.autoGainControl === false &&
+     ic.audio.deviceId.exact === "bh2" && ic.video === undefined);
+  ok("  ... and from the default device (no deviceId at all) when none is chosen",
+     !("deviceId" in id.audio) && !("deviceId" in iu.audio) && id.audio.echoCancellation === false);
+  // the routing rule: who may reach the speakers
+  const R = (k, sup) => M.musicRouting(k, sup);
+  ok("routing: the click track and a file are played by the page and so compensated, whatever `suppressed` says",
+     [undefined, null, true, false].every(v => R("click", v).play && R("click", v).compensated && R("file", v).play && R("file", v).compensated));
+  ok("  ... a captured tab is played ONLY if its track reports the tab silenced (=== true)",
+     R("tab", true).play === true && R("tab", true).compensated === true);
+  ok("  ... and with anything else -- false, undefined, null, the string \"true\", 1 -- it is NOT played (it would be heard twice)",
+     [false, undefined, null, "true", 1].every(v => R("tab", v).play === false && R("tab", v).compensated === false));
+  ok("  ... an input device is NEVER played, whatever is passed",
+     [undefined, null, true, false, 1].every(v => R("input", v).play === false && R("input", v).compensated === false));
+  ok("  ... every answer carries the sentence the page shows, and the two uncompensated ones say why",
+     ["click", "file", "tab", "input"].every(k => typeof R(k, false).why === "string" && R(k, false).why.length > 20) &&
+     /did not silence/.test(R("tab", false).why) && /never played/.test(R("input", true).why) && /silenced/.test(R("tab", true).why));
+  ok("  ... and an unknown source is refused", /unknown source/.test(throws(() => R("speaker", true))));
+  // the messages
+  const E = (k, n) => M.musicStartError(k, typeof n === "string" && n !== "noaudio" && n !== "unsupported" ? { name: n } : n);
+  ok("a tab capture with no audio track says what to do: pick a TAB and switch on \"Also share tab audio\"",
+     /Chrome TAB/.test(E("tab", "noaudio")) && /Also share tab audio/.test(E("tab", "noaudio")) && !/tab/i.test(E("input", "noaudio").replace("audio track", "")));
+  ok("  ... a cancelled or refused capture, an unplugged device, a busy device and a browser without the API each get their own sentence",
+     /cancelled or not allowed/.test(E("tab", "NotAllowedError")) && /not allowed/.test(E("input", "NotAllowedError")) &&
+     /not available/.test(E("input", "NotFoundError")) && /not available/.test(E("input", "OverconstrainedError")) &&
+     /could not be opened/.test(E("input", "NotReadableError")) && /getDisplayMedia is missing/.test(E("tab", "unsupported")) &&
+     /getUserMedia is missing/.test(E("input", "unsupported")));
+  ok("  ... and anything else is reported by name, never swallowed", /\(TypeError\)/.test(E("tab", "TypeError")) &&
+     /could not start/.test(M.musicStartError("input", null)) && /could not start/.test(M.musicStartError("tab", {})));
+  // the detector on a stream joined mid-way: no burst while its normalisation has little history
+  const F = state.F, x = state.x, sr = state.sr;
+  if (x) {
+    const det = new M.MusicDetector(Object.assign({ sr: sr }, F.cases[0].opts));
+    const on = runDetector(det, x, sr, 60, F.cases[0].opts.nfft);
+    const n = (a, b) => on.filter(e => e.tFire >= a && e.tFire < b).length;
+    ok("the detector's first seconds are not a burst: the first 2 s hold no more onsets than a later 2 s (" + n(0, 2) + " vs " + n(4, 6) + ", " + n(6, 8) + ")",
+       n(0, 2) <= Math.max(n(4, 6), n(6, 8)) && n(0, 0.5) === 0 && n(0, 2) > 0);
+  }
+}
+
+
 // ---------------------------------------------------------------------------
 // a fake AudioContext: the one thing node does not have. It PLAYS nothing; its
 // analyser computes the true spectrum of what would be playing at `currentTime`.
 // ---------------------------------------------------------------------------
+// Every node records what it was connected TO (`outs`) and FROM (`ins`), so a leg can ask
+// the one question that matters about a graph: what reaches the speakers, and through
+// what. Streams (tab capture, an input device) carry the samples they would deliver.
 function fakeAudio(sr) {
   const A = { t: 0, sr: sr || 44100, ctxs: [], decoded: null, analyserCalls: 0 };
+  const node = (kind, extra) => Object.assign({ kind: kind, outs: [], ins: [], disc: 0,
+    connect(n) { this.outs.push(n); n.ins.push(this); },
+    disconnect() { this.disc++; for (const n of this.outs) n.ins.splice(n.ins.indexOf(this), 1); this.outs.length = 0; } }, extra);
   A.Ctx = class {
-    constructor() { this.sampleRate = A.sr; this.state = "suspended"; this.destination = { dest: 1 };
+    constructor() { this.sampleRate = A.sr; this.state = "suspended"; this.destination = node("destination", {});
                     this.baseLatency = 0.005; this.outputLatency = 0.02; this.sources = []; this.analysers = [];
-                    this.resumed = 0; A.ctxs.push(this); }
+                    this.streamSources = []; this.delays = []; this.resumed = 0; A.ctxs.push(this); }
     get currentTime() { return A.t; }
     createBuffer(ch, len, rate) {
       const d = new Float32Array(len);
       return { numberOfChannels: ch, length: len, sampleRate: rate, duration: len / rate, getChannelData: () => d };
     }
     createBufferSource() {
-      const s = { buffer: null, loop: false, started: null, stopped: 0, onended: null, to: null, disc: 0,
-                  connect(n) { this.to = n; n.from = this; }, disconnect() { this.disc++; },
-                  start() { this.started = A.t; }, stop() { this.stopped++; } };
+      const s = node("buffer", { buffer: null, loop: false, started: null, stopped: 0, onended: null,
+                                 start() { this.started = A.t; }, stop() { this.stopped++; } });
       this.sources.push(s);
       return s;
     }
+    createMediaStreamSource(stream) {
+      const s = node("stream", { stream: stream });
+      this.streamSources.push(s);
+      return s;
+    }
+    createDelay(max) {
+      const d = node("delay", { maxDelay: max, delayTime: { value: 0 } });
+      this.delays.push(d);
+      return d;
+    }
     createAnalyser() {
-      const an = { fftSize: 1024, smoothingTimeConstant: 0.8, from: null, to: null,
-        get frequencyBinCount() { return this.fftSize / 2; },
-        connect(n) { this.to = n; }, disconnect() {},
+      const an = node("analyser", { fftSize: 1024, smoothingTimeConstant: 0.8,
         getFloatFrequencyData(arr) {
           A.analyserCalls++;
-          const s = this.from, d = s.buffer.getChannelData(0), n = d.length, N = this.fftSize;
-          const end = Math.round((A.t - s.started) * A.sr);
-          const at = s.loop ? i => (i < 0 ? 0 : d[i % n]) : i => (i >= 0 && i < n ? d[i] : 0);
+          const s = this.ins[0], N = this.fftSize;
+          const au = s.kind === "stream" ? s.stream.__audio : { d: s.buffer.getChannelData(0), started: s.started, loop: s.loop };
+          const d = au.d, n = d.length, end = Math.round((A.t - au.started) * A.sr);
+          const at = au.loop ? i => (i < 0 ? 0 : d[i % n]) : i => (i >= 0 && i < n ? d[i] : 0);
           const mag = spectrum(at, end, N, true);
           for (let k = 0; k < arr.length; k++) arr[k] = 20 * Math.log10(mag[k]);      // -Infinity for silence
-        } };
+        } });
+      // (a getter would be flattened to a value by Object.assign in `node`)
+      Object.defineProperty(an, "frequencyBinCount", { get() { return this.fftSize / 2; } });
       this.analysers.push(an);
       return an;
     }
@@ -649,6 +724,41 @@ function fakeAudio(sr) {
     async resume() { this.resumed++; this.state = "running"; }
   };
   return A;
+}
+// does `n` reach the speakers, and through which kinds of node? null = it does not
+function toSpeakers(n, seen) {
+  if (n.kind === "destination") return [];
+  for (const o of n.outs) { const p = toSpeakers(o, seen); if (p) return [o.kind].concat(p); }
+  return null;
+}
+// navigator.mediaDevices, faked: every call is logged, and what each returns is the leg's
+function fakeMedia(A, samples) {
+  const M = { display: [], user: [], enumerations: 0, labels: false, displayError: null, userError: null,
+              devices: [{ kind: "audioinput", deviceId: "default", label: "Default" },
+                        { kind: "audioinput", deviceId: "bh2", label: "BlackHole 2ch" },
+                        { kind: "videoinput", deviceId: "cam", label: "FaceTime Camera" },
+                        { kind: "audioinput", deviceId: "mic", label: "MacBook Microphone" },
+                        { kind: "audiooutput", deviceId: "spk", label: "Speakers" }] };
+  const track = (kind, settings, label) => ({ kind: kind, label: label || kind, readyState: "live", stops: 0, onended: null,
+    stop() { this.stops++; this.readyState = "ended"; }, getSettings() { return settings || {}; } });
+  // o: { audio: settings | false, video: bool }
+  M.stream = o => {
+    const tr = [];
+    if (o.audio !== false) tr.push(track("audio", o.audio, o.label));
+    if (o.video) tr.push(track("video", {}));
+    return { __audio: { d: samples, started: A.t, loop: true }, tracks: tr,
+             getTracks() { return tr.slice(); }, getAudioTracks() { return tr.filter(t => t.kind === "audio"); },
+             getVideoTracks() { return tr.filter(t => t.kind === "video"); } };
+  };
+  M.nextDisplay = () => M.stream({ audio: { suppressLocalAudioPlayback: true }, video: true, label: "tab: a web player" });
+  M.nextUser = c => M.stream({ audio: { deviceId: c.audio.deviceId ? c.audio.deviceId.exact : "default" }, label: "BlackHole 2ch" });
+  M.api = {
+    ondevicechange: null,
+    getDisplayMedia: async c => { M.display.push(c); if (M.displayHold) await M.displayHold; if (M.displayError) throw M.displayError; return M.last = M.nextDisplay(c); },
+    getUserMedia: async c => { M.user.push(c); if (M.userError) throw M.userError; M.labels = true; return M.last = M.nextUser(c); },
+    enumerateDevices: async () => { M.enumerations++; return M.devices.map(d => ({ kind: d.kind, deviceId: d.deviceId, label: M.labels ? d.label : "" })); }
+  };
+  return M;
 }
 // a booted music page with a model stats readback: t advances by `dt` per step, the energy
 // by 1 per kick, and everything the solver is asked to do is logged in order
@@ -779,8 +889,16 @@ async function legRun(state) {
   let same = buf.length === ref.samples.length;
   for (let i = 0; same && i < buf.length; i++) if (buf[i] !== ref.samples[i]) same = false;
   ok("  ... whose buffer IS musicClickTrack at the context's sample rate and the bpm box's tempo", same, buf.length + " samples");
-  ok("  ... wired source -> analyser -> destination, the analyser at fftSize 2048 with smoothing 0",
-     src.to === an && an.to === ctx.destination && an.fftSize === 2048 && an.smoothingTimeConstant === 0);
+  // the graph: the analyser reads the source UNDELAYED and feeds nothing; the speakers get
+  // the source through a delay node and through nothing else
+  const dly = ctx.delays[0];
+  ok("  ... wired source -> analyser (a dead end, at fftSize 2048 with smoothing 0) and source -> delay -> speakers",
+     src.outs.length === 2 && src.outs[0] === an && src.outs[1] === dly && an.outs.length === 0 && an.ins[0] === src &&
+     dly.outs.length === 1 && dly.outs[0] === ctx.destination && ctx.destination.ins.length === 1 &&
+     an.fftSize === 2048 && an.smoothingTimeConstant === 0 && toSpeakers(src).join() === "delay,destination");
+  ok("  ... the delay is the slider's 50 ms, and the page says it is latency compensated",
+     ctx.delays.length === 1 && dly.delayTime.value === 0.05 && dly.maxDelay >= 0.15 &&
+     /^latency compensated \(sound delayed 50 ms\)/.test(env.getEl("musicMode").textContent), env.getEl("musicMode").textContent.slice(0, 60));
   const d = JSON.parse(env.run(`function(){ const d = music.det; return JSON.stringify({ sr: d.sr, nfft: d.nfft, nb: d.nbands, fps: d.fps,
     thr: d.threshold, run: running, t0: music.audio.t0, db: music.db.length, mag: music.mag.length, dbg: typeof window.musicDebug }); }`));
   ok("  ... the detector is built at the context's rate: 44100 Hz, nfft 2048, 4 bands, 60 fps, threshold 0.3",
@@ -855,6 +973,15 @@ async function legRun(state) {
   });
   ok("  ... which is musicClock(newest readback, audio clock, rate, cap 64, lagMax 0.25, maxAhead one frame, kicked), frame for frame",
      clockBad === 0, clockBad + " frames disagree");
+  // `lag` is taken before the frame's steps (about a frame's advance, by construction);
+  // `lagAfter` is where the frame ends, and in this model -- a constant, known dt -- it is
+  // exactly lag - n * dt, never positive by more than nothing and never negative by a step
+  const la = dbg.frames.filter(f => f.fresh && f.a > 1);
+  ok("  ... `lagAfter` = lag - n * dt / rate: where the frame ENDS. Steady, it is within one step of the clock while `lag` sits a frame behind",
+     la.every(f => Math.abs(f.lagAfter - (f.lag - f.n * f.dt)) < 1e-12) &&
+     la.every(f => f.lagAfter <= 1e-9 && f.lagAfter > -0.004 - 1e-9) && la.filter(f => f.lag > 0.012).length > la.length / 2,
+     "lagAfter in [" + (1e3 * Math.min.apply(null, la.map(f => f.lagAfter))).toFixed(2) + ", "
+     + (1e3 * Math.max.apply(null, la.map(f => f.lagAfter))).toFixed(2) + "] ms");
   ok("  ... each frame's record names the readback it used: simT, dt and the energy e, and how many kicks it made",
      dbg.frames.filter(f => f.fresh).every(f => isFinite(f.simT) && isFinite(f.dt) && isFinite(f.e)) &&
      dbg.frames.reduce((a, f) => a + f.kicks, 0) === kicksLog.length &&
@@ -960,7 +1087,8 @@ async function legRun(state) {
   const callsBefore = A.analyserCalls;
   for (let f = 905; f <= 915; f++) await P.frame(100 + f / 60 + 30);
   ok("Stop: the source is stopped and disconnected, the page is not running, and no step, kick or analyser read follows",
-     src.stopped === 1 && src.disc >= 1 && env.run("function(){ return running; }") === false && P.takeLog().length === 0 &&
+     src.stopped === 1 && src.disc >= 1 && dly.disc >= 1 && ctx.destination.ins.length === 0 &&
+     env.run("function(){ return running; }") === false && P.takeLog().length === 0 &&
      A.analyserCalls === callsBefore && env.run("function(){ return music.audio === null; }") === true && env.getEl("btnRun").textContent === "Run");
   // ---- Start again: the same context, a fresh detector and source ----------------------
   await P.click("btnRun");
@@ -1133,6 +1261,252 @@ async function legOthers(state) {
   ok("  ... the hook is not called at all while the page is paused", env.run("function(){ return __calls; }") === 0 && env.run("function(){ return __n; }") === 0);
 }
 
+// ===========================================================================
+// 10. live sources and the delayed speaker branch (M3 / M4), on the stub
+// ===========================================================================
+async function legLive(state) {
+  const M = state.M;
+  const click = M.musicClickTrack({ sr: 44100, bpm: 120, beats: 16, seed: 1 }).samples;
+  const P = await musicPage("?musicdebug"), env = P.env, A = P.A, FM = fakeMedia(A, click);
+  env.run("function(m){ navigator.mediaDevices = m; }", FM.api);
+  env.run(MODEL, 0.004);
+  const st = () => JSON.parse(env.run(`function(){ const a = music.audio; return JSON.stringify({ run: running, starting: !!music.starting,
+    live: !!a, kind: a && a.kind, comp: a && a.route.compensated, play: a && a.route.play, sup: a && a.suppressed,
+    hist: music.det ? music.det.hist[0].length : -1, ref: music.det ? music.det.ref : -1, sr: music.det ? music.det.sr : -1,
+    status: el("status").textContent, mode: el("musicMode").textContent, dbg: window.musicDebug ? window.musicDebug.audio : null }); }`));
+  const pick = async v => { env.getEl("selSrc").value = v; env.getEl("selSrc").onchange({}); await turn(); };
+  const ctx0 = () => A.ctxs[0];
+  let T = 10;
+  const run = async (sec) => { let k = 0; const n = Math.round(sec * 60); for (let f = 1; f <= n; f++) { await P.frame(T + f / 60); k += P.takeLog().filter(e => e.op === "kick").length; } T += sec; return k; };
+
+  // ---- the select, before anything is started -------------------------------------
+  ok("the source select offers the four sources", Array.from(env.getEl("selSrc").options).map(o => o.value).join() === "click,file,tab,input");
+  ok("before Start the mode line says what each source will get: the click track compensated",
+     /^latency compensated/.test(env.getEl("musicMode").textContent) && env.getEl("rDelay").value === "50" && env.getEl("vDelay").textContent === "50");
+  await pick("tab");
+  ok("  ... a tab: decided at Start (it depends on whether this browser silences the tab)", /decided at Start/.test(env.getEl("musicMode").textContent));
+  await pick("input");
+  ok("  ... an input device: NOT compensated, because it is never played back",
+     /^NOT latency compensated/.test(env.getEl("musicMode").textContent) && /never played/.test(env.getEl("musicMode").textContent));
+  // the device list: audio INPUTS only; no names before access has been allowed
+  const opts = () => Array.from(env.getEl("selDev").options).map(o => o.value + "=" + o.textContent);
+  ok("choosing it shows the device row and lists the audio inputs -- nameless until access is allowed, and never an output or a camera",
+     env.getEl("rowDev").style.display === "" && FM.enumerations >= 1 &&
+     opts().join("|") === "=default input|bh2=audio input 2|mic=audio input 3", opts().join("|"));
+  await pick("click");
+  ok("  ... and the row is hidden again for the other sources", env.getEl("rowDev").style.display === "none");
+
+  // ---- a TAB, silenced by the browser: played by the page, delayed -------------------
+  await pick("tab");
+  A.t = T;
+  await P.click("btnRun");
+  let q = st(), ctx = ctx0();
+  const s1 = FM.last, at1 = s1.getAudioTracks()[0], vt1 = s1.getVideoTracks()[0];
+  ok("Start on \"another tab's audio\" calls getDisplayMedia ONCE, with musicTabConstraints",
+     FM.display.length === 1 && JSON.stringify(FM.display[0]) === JSON.stringify(M.musicTabConstraints()) && FM.user.length === 0);
+  const ss = ctx.streamSources[0], an = ctx.analysers[0], dl = ctx.delays[0];
+  ok("  ... the stream becomes a MediaStreamSource feeding the analyser (a dead end)",
+     q.live && q.run && q.kind === "tab" && ctx.streamSources.length === 1 && ss.stream === s1 && ss.outs[0] === an && an.outs.length === 0);
+  ok("  ... the track reports the tab silenced, so the page plays it: source -> delay (50 ms) -> speakers, and nothing else reaches them",
+     q.sup === true && q.play === true && q.comp === true && toSpeakers(ss).join() === "delay,destination" && dl.delayTime.value === 0.05 &&
+     ctx.destination.ins.length === 1 && ctx.destination.ins[0] === dl && /^latency compensated \(sound delayed 50 ms\): the tab is silenced/.test(q.mode));
+  ok("  ... both tracks are left LIVE (the unused video track is kept: stopping it is unverified browser behaviour)",
+     at1.readyState === "live" && vt1.readyState === "live" && at1.stops === 0 && vt1.stops === 0 && typeof at1.onended === "function");
+  const kTab = await run(3);
+  ok("  ... and the captured audio drives the flow like any other source: " + kTab + " kicks in 3 s, none in the first half second",
+     kTab > 10 && JSON.parse(env.run("function(){ return JSON.stringify(window.musicDebug.kicks.map(k => k.tFire)); }")).every(t => t >= 0.5));
+  ok("?musicdebug records the source: kind, label, sample rate, latencies, the delay in force, suppression, compensation, the video track",
+     q.dbg.kind === "tab" && q.dbg.label === "tab: a web player" && q.dbg.sampleRate === 44100 && q.dbg.baseLatency === 0.005 &&
+     q.dbg.outputLatency === 0.02 && q.dbg.delayMs === 50 && q.dbg.suppressed === true && q.dbg.compensated === true &&
+     q.dbg.played === true && q.dbg.videoTrackAlive === true && q.dbg.trackSettings.suppressLocalAudioPlayback === true &&
+     q.dbg.nfft === 2048 && q.dbg.bins === 1024, JSON.stringify(q.dbg).slice(0, 90));
+  // the delay slider, live
+  await P.input("rDelay", 120);
+  q = st();
+  ok("the delay slider moves the live delay node (120 ms), the mode line and the debug record",
+     dl.delayTime.value === 0.12 && /sound delayed 120 ms/.test(q.mode) && Math.abs(q.dbg.delayMs - 120) < 1e-9 && env.getEl("vDelay").textContent === "120");
+  await P.input("rDelay", 0);
+  ok("  ... down to 0 (still through the node: no second path to the speakers appears)",
+     dl.delayTime.value === 0 && ctx.destination.ins.length === 1 && toSpeakers(ss).join() === "delay,destination");
+  await P.input("rDelay", 50);
+  ok("  ... and `summary()` carries the audio record", JSON.parse(env.run("function(){ return JSON.stringify(window.musicDebug.summary().audio); }")).delayMs === 50);
+  // the capture ends from outside (Chrome's "Stop sharing")
+  at1.readyState = "ended"; at1.onended({}); await turn();
+  q = st();
+  ok("the capture ending from outside (the audio track's `ended`) stops the page, stops every track, and says so",
+     q.run === false && q.live === false && vt1.stops === 1 && /tab capture ended/.test(q.status) && ctx.destination.ins.length === 0 && ss.disc >= 1);
+  const kAfter = await run(0.5);
+  ok("  ... and nothing is kicked or stepped afterwards", kAfter === 0 && A.analyserCalls > 0);
+
+  // ---- a TAB the browser did NOT silence: analysed, never played ----------------------
+  for (const [tag, settings] of [["reports suppressLocalAudioPlayback false", { suppressLocalAudioPlayback: false }],
+                                 ["does not report it at all", {}]]) {
+    FM.nextDisplay = () => FM.stream({ audio: settings, video: true, label: "tab: a web player" });
+    const nd = ctx.delays.length;
+    A.t = T;
+    await P.click("btnRun");
+    q = st();
+    const s2 = ctx.streamSources[ctx.streamSources.length - 1];
+    ok("a tab whose track " + tag + ": the page does NOT play it (it is already heard) -- no delay node, nothing reaches the speakers",
+       q.live && q.kind === "tab" && q.sup === false && q.play === false && q.comp === false && ctx.delays.length === nd &&
+       toSpeakers(s2) === null && ctx.destination.ins.length === 0 && s2.outs.length === 1 && s2.outs[0].kind === "analyser");
+    ok("  ... and says so: NOT latency compensated, with the reason; the debug record agrees",
+       /^NOT latency compensated: this browser did not silence the captured tab/.test(q.mode) && q.dbg.compensated === false &&
+       q.dbg.played === false && q.dbg.delayMs === 0 && q.dbg.suppressed === false);
+    const k2 = await run(1.5);
+    ok("  ... it still drives the flow (" + k2 + " kicks in 1.5 s)", k2 > 3);
+    await P.click("btnRun");
+    ok("  ... Stop stops BOTH tracks of the capture", FM.last.getTracks().every(t => t.stops === 1 && t.readyState === "ended") && st().run === false);
+  }
+  FM.nextDisplay = () => FM.stream({ audio: { suppressLocalAudioPlayback: true }, video: true, label: "tab: a web player" });
+
+  // ---- a capture with NO audio track ---------------------------------------------------
+  FM.nextDisplay = () => FM.stream({ audio: false, video: true });
+  const nAn = ctx.analysers.length;
+  await P.click("btnRun");
+  q = st();
+  ok("a capture with no audio track (a window or screen, or the toggle off): nothing starts, the video track is stopped, and the message says what to do",
+     q.run === false && q.live === false && q.starting === false && FM.last.getVideoTracks()[0].stops === 1 &&
+     /Also share tab audio/.test(q.status) && /Chrome TAB/.test(q.status) && ctx.analysers.length === nAn, q.status.slice(0, 60));
+  // ---- cancelled / refused ----------------------------------------------------------------
+  FM.displayError = { name: "NotAllowedError", message: "Permission denied" };
+  await P.click("btnRun");
+  q = st();
+  ok("a cancelled or refused capture: nothing starts, and the page says so", q.run === false && q.live === false && q.starting === false &&
+     /cancelled or not allowed/.test(q.status) && ctx.analysers.length === nAn);
+  FM.displayError = null;
+  FM.nextDisplay = () => FM.stream({ audio: { suppressLocalAudioPlayback: true }, video: true, label: "tab: a web player" });
+  await P.click("btnRun");
+  ok("  ... and the next Start works (the page is not left stuck in \"starting\")", st().run === true && st().kind === "tab");
+
+  // ---- switching source while one is live --------------------------------------------------
+  await run(1);
+  const sLive = FM.last, histBefore = st().hist, detBefore = env.run("function(){ return music.det; }");
+  await pick("click");
+  q = st();
+  ok("choosing another source while a tab is live stops it: every track stopped, the page not running",
+     histBefore > 30 && q.run === false && q.live === false && sLive.getTracks().every(t => t.stops === 1));
+  A.t = T;
+  await P.click("btnRun");
+  q = st();
+  ok("  ... and the next source gets a NEW detector with no history (its normalisation and reference start again)",
+     q.run && q.kind === "click" && q.hist === 0 && q.ref === 0 && env.run("function(){ return music.det; }") !== detBefore &&
+     env.run("function(){ return music.tPush; }") === null);
+  const kSw = await run(2);
+  const firstK = JSON.parse(env.run("function(){ return JSON.stringify(window.musicDebug.kicks.map(k => k.tFire)); }"));
+  ok("  ... with no kick in its first half second and no burst after (" + kSw + " kicks in 2 s; the debug record restarts with the source)",
+     firstK.length === kSw && firstK.every(t => t >= 0.5) && kSw > 5 && kSw < 30 && st().dbg.kind === "click" && st().dbg.suppressed === null);
+  await P.click("btnRun");
+
+  // ---- a switch while the picker is still open ----------------------------------------------
+  await pick("tab");
+  let release;
+  FM.displayHold = new Promise(r => { release = r; });
+  const nDisp = FM.display.length;
+  const pending = env.getEl("btnRun").onclick({});
+  await turn();
+  ok("while the picker is open the page is \"starting\", not running", st().starting === true && st().run === false && FM.display.length === nDisp + 1);
+  env.getEl("btnRun").onclick({}); await turn();
+  ok("  ... a second click on Start does not open a second picker", FM.display.length === nDisp + 1);
+  await pick("click");
+  FM.displayHold = null; release(); await turn(); await pending; await turn();
+  q = st();
+  ok("  ... and if the source is changed before the picker answers, the capture it returns is given straight back: tracks stopped, nothing started",
+     q.run === false && q.live === false && q.starting === false && FM.last.getTracks().every(t => t.stops === 1) && ctx.destination.ins.length === 0);
+
+  // ---- an INPUT DEVICE: analysed, never played -------------------------------------------------
+  await pick("input");
+  const nd2 = ctx.delays.length;
+  env.getEl("selDev").value = "bh2";
+  A.t = T;
+  await P.click("btnRun");
+  q = st();
+  const si = ctx.streamSources[ctx.streamSources.length - 1];
+  ok("Start on an input device calls getUserMedia with musicInputConstraints(the chosen device): raw audio, deviceId exact",
+     FM.user.length === 1 && JSON.stringify(FM.user[0]) === JSON.stringify(M.musicInputConstraints("bh2")) && q.run && q.kind === "input");
+  ok("  ... it is NEVER connected to the speakers: source -> analyser only, no delay node created, the destination has no input",
+     toSpeakers(si) === null && si.outs.length === 1 && si.outs[0].kind === "analyser" && ctx.delays.length === nd2 &&
+     ctx.destination.ins.length === 0 && q.play === false && q.comp === false);
+  ok("  ... the page says NOT latency compensated, and the debug record says played: false, delay 0",
+     /^NOT latency compensated: an input device is never played back/.test(q.mode) && q.dbg.kind === "input" && q.dbg.played === false &&
+     q.dbg.delayMs === 0 && q.dbg.compensated === false && q.dbg.suppressed === null && q.dbg.videoTrackAlive === false);
+  await turn();
+  ok("  ... once access is allowed the device list has its names, and the choice is kept",
+     opts().join("|") === "=default input|bh2=BlackHole 2ch|mic=MacBook Microphone" && env.getEl("selDev").value === "bh2", opts().join("|"));
+  await P.input("rDelay", 100);
+  ok("  ... the delay slider cannot give it a path to the speakers", ctx.delays.length === nd2 && ctx.destination.ins.length === 0 && st().dbg.delayMs === 0);
+  await P.input("rDelay", 50);
+  const kIn = await run(1.5);
+  ok("  ... it drives the flow (" + kIn + " kicks in 1.5 s)", kIn > 3);
+  const sIn = FM.last;
+  env.getEl("selDev").value = "mic"; env.getEl("selDev").onchange({}); await turn();
+  ok("choosing another device while one is live stops it (its track is released)", st().run === false && sIn.getTracks()[0].stops === 1);
+  // even a track that claims the tab-silencing flag is not played: the rule is the source KIND
+  FM.nextUser = () => FM.stream({ audio: { suppressLocalAudioPlayback: true }, label: "odd device" });
+  env.getEl("selDev").value = "";
+  A.t = T;
+  await P.click("btnRun");
+  ok("the default device is asked for with NO deviceId; and an input is not played even if its track claimed to be \"suppressed\"",
+     !("deviceId" in FM.user[FM.user.length - 1].audio) && toSpeakers(ctx.streamSources[ctx.streamSources.length - 1]) === null &&
+     ctx.destination.ins.length === 0 && st().play === false);
+  // the device unplugged
+  const tIn = FM.last.getAudioTracks()[0];
+  tIn.readyState = "ended"; tIn.onended({}); await turn();
+  ok("an input that ends (unplugged) stops the page and says so", st().run === false && /audio input ended/.test(st().status));
+  // refused / missing
+  FM.userError = { name: "NotAllowedError" };
+  await P.click("btnRun");
+  ok("a refused input: nothing starts, with the permission hint", st().run === false && /not allowed/.test(st().status) && /microphone permission/.test(st().status));
+  FM.userError = { name: "NotFoundError" };
+  await P.click("btnRun");
+  ok("an unplugged input: nothing starts, and it is called unavailable", st().run === false && /not available/.test(st().status));
+  FM.userError = null;
+  // a device list that changes under the page
+  FM.devices.push({ kind: "audioinput", deviceId: "usb", label: "USB Interface" });
+  const en = FM.enumerations;
+  FM.api.ondevicechange && FM.api.ondevicechange({}); await turn();
+  ok("a `devicechange` re-reads the list", FM.enumerations === en + 1 && /usb=USB Interface/.test(opts().join("|")));
+
+  // ---- a browser with no capture API ---------------------------------------------------------
+  env.run("function(){ navigator.mediaDevices = { enumerateDevices: async () => [] }; }");
+  await pick("tab"); await P.click("btnRun");
+  const noTab = st().status;
+  await pick("input"); await P.click("btnRun");
+  ok("without getDisplayMedia / getUserMedia the two live sources say the browser cannot do it, and the click track still works",
+     /getDisplayMedia is missing/.test(noTab) && /getUserMedia is missing/.test(st().status) && st().run === false);
+  env.run("function(){ navigator.mediaDevices = undefined; }");
+  await pick("click"); A.t = T; await P.click("btnRun");
+  ok("  ... and with no mediaDevices at all the page still starts its own sources", st().run === true && st().kind === "click");
+  await P.click("btnRun");
+
+  // ---- the file source goes through the same delayed branch -------------------------------------
+  const tone = new Float32Array(44100);
+  A.fileBuffer = c => { const b = c.createBuffer(1, tone.length, 44100); b.getChannelData(0).set(tone); return b; };
+  env.getEl("fMusic").files = [{ name: "t.wav", arrayBuffer: async () => new ArrayBuffer(8) }];
+  await pick("file"); A.t = T; await P.click("btnRun");
+  const fs2 = ctx.sources[ctx.sources.length - 1];
+  ok("a file is played through the delay too: source -> delay -> speakers, source -> analyser, compensated",
+     st().run && toSpeakers(fs2).join() === "delay,destination" && fs2.outs[0].kind === "analyser" && fs2.loop === false &&
+     st().comp === true && st().dbg.kind === "file" && st().dbg.label === "t.wav");
+  const man = JSON.parse(env.run("function(){ return JSON.stringify(runManifest().forcing); }"));
+  ok("  ... and a saved params.json records the source, that it was compensated, and by how much",
+     man.source === "file" && man.compensated === true && man.delayMs === 50);
+  await P.click("btnRun");
+  ok("through all of it the page logged no failure of its own", realFails(env).length === 0, realFails(env).slice(0, 2).join(" | "));
+
+  // ---- a 48 kHz context with a live source -----------------------------------------------------
+  const W = await musicPage("", 48000), FW = fakeMedia(W.A, M.musicClickTrack({ sr: 48000, bpm: 120, beats: 16, seed: 1 }).samples);
+  W.env.run("function(m){ navigator.mediaDevices = m; }", FW.api);
+  W.env.run(MODEL, 0.004);
+  W.env.getEl("selSrc").value = "tab"; W.env.getEl("selSrc").onchange({}); await turn();
+  W.A.t = 3; await W.click("btnRun");
+  let k48 = 0;
+  for (let f = 1; f <= 150; f++) { await W.frame(3 + f / 60); k48 += W.takeLog().filter(e => e.op === "kick").length; }
+  ok("a captured tab on a 48 kHz context: the detector's bands follow the context's rate, and it kicks (" + k48 + " in 2.5 s)",
+     W.env.run("function(){ return music.det.sr; }") === 48000 &&
+     W.env.run("function(){ return music.det.bins[3][1]; }") === Math.ceil(10000 / (48000 / 2048)) && k48 > 8);
+}
+
 // ---------------------------------------------------------------------------
 const LEGS = [
   ["1. music.js is pure and self-contained", legPure],
@@ -1141,10 +1515,12 @@ const LEGS = [
   ["4. the push rule, the generator, the blobs", legBlobs],
   ["5. the click track, and what the detector makes of it", legClick],
   ["6. the clock", legClock],
+  ["6b. the live-source rules: constraints, routing, messages", legRules],
   ["7. music.html booted: the solver it builds, what the controls do", legBoot],
   ["8. music.html running: kicks, steps, the clock, Stop, a file", legRun],
   ["8b. without ?musicdebug", legPlain],
-  ["9. the other two pages: hook null, loop and state mark unchanged", legOthers]
+  ["9. the other two pages: hook null, loop and state mark unchanged", legOthers],
+  ["10. live sources and the delayed speaker branch (M3 / M4)", legLive]
 ];
 (async () => {
   const state = {};

@@ -12,6 +12,9 @@
 //   musicKickList      ... for both: the list Solver.kick takes for ONE onset
 //   musicClickTrack    the built-in test signal: kick / snare / hi-hat, seamless loop
 //   musicClock         the audio-clock controller: how many steps this frame
+//   musicTabConstraints / musicInputConstraints   what a live capture is asked for
+//   musicRouting       which sources the page may play, and so can delay-compensate
+//   musicStartError    what to tell the visitor when a source will not start
 //
 // It is the browser twin of examples/music_turbulence.py, the offline reference
 // (which made the movies this page is judged against):
@@ -395,4 +398,79 @@ function musicClock(st, inp) {
   if (inp.kicked && n < 1) n = 1;
   res.n = Math.max(0, Math.min(maxSteps, n));
   return res;
+}
+
+// ---------------------------------------------------------------------------
+// live sources (MUSIC_PLAN M3 / M4): the rules, as data
+// ---------------------------------------------------------------------------
+// The four sources, in the page's select. `click` and `file` are buffers the page plays
+// itself; `tab` is another tab's audio (getDisplayMedia); `input` is an audio input device
+// -- a loopback driver, or a microphone (getUserMedia).
+const MUSIC_SOURCES = ["click", "file", "tab", "input"];
+// the default sound delay, and the slider's range, in milliseconds
+const MUSIC_DELAY_DEFAULT = 50, MUSIC_DELAY_MAX = 150;
+
+// What getDisplayMedia is asked for. A video track is MANDATORY in the request (Chrome
+// rejects audio-only display capture); it is asked for as small and slow as the API lets
+// one ask. The audio is asked for RAW -- every processing stage is tuned for speech and
+// would flatten the transients the detector looks for -- and with
+// suppressLocalAudioPlayback, so that the captured tab falls silent and the page's own
+// delayed copy is the only one heard. Whether that took effect is read back off the
+// track (musicRouting), never assumed.
+function musicTabConstraints() {
+  return { video: { frameRate: 1, width: 64, height: 64 },
+           audio: { suppressLocalAudioPlayback: true, echoCancellation: false, noiseSuppression: false,
+                    autoGainControl: false } };
+}
+// What getUserMedia is asked for: raw audio from one device (or the default one).
+function musicInputConstraints(deviceId) {
+  const a = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+  if (deviceId) a.deviceId = { exact: deviceId };
+  return { audio: a };
+}
+// May the page send this source to the speakers -- and so delay it, which is the whole of
+// the latency compensation? `suppressed` is what the capture's audio track REPORTS for
+// suppressLocalAudioPlayback (true / false / undefined).
+//   click, file  the page is the only player: yes
+//   tab          only if the tab itself was silenced; otherwise the visitor already hears
+//                it, undelayed, and a second copy from the page would be an echo
+//   input        NEVER: a microphone routed to the speakers feeds back, and a loopback
+//                device is already being heard
+// Returns { play, compensated, why }: `why` is the sentence the page shows.
+function musicRouting(kind, suppressed) {
+  if (kind === "click" || kind === "file")
+    return { play: true, compensated: true, why: "the page plays this source, delayed" };
+  if (kind === "tab") {
+    if (suppressed === true)
+      return { play: true, compensated: true, why: "the tab is silenced and the page plays its audio, delayed" };
+    return { play: false, compensated: false,
+             why: "this browser did not silence the captured tab, so the page does not play it too: "
+                + "the picture runs about 40 ms after the sound" };
+  }
+  if (kind === "input")
+    return { play: false, compensated: false,
+             why: "an input device is never played back: the picture runs about 40 ms after the sound" };
+  throw new Error("musicRouting: unknown source " + kind);
+}
+// What to tell the visitor when a source will not start. `err` is the rejection (a
+// DOMException: only its name is used), or the string "noaudio" for a capture that came
+// back with no audio track.
+function musicStartError(kind, err) {
+  const name = typeof err === "string" ? err : (err && err.name) || "";
+  if (name === "noaudio")
+    return kind === "tab"
+      ? "that capture has no audio: pick a Chrome TAB (not a window or a screen) and switch on "
+        + "\"Also share tab audio\" in the picker"
+      : "that device delivered no audio track";
+  if (name === "NotAllowedError" || name === "SecurityError")
+    return kind === "tab" ? "the tab capture was cancelled or not allowed"
+                          : "access to the audio input was not allowed (check the site's microphone permission)";
+  if (name === "NotFoundError" || name === "OverconstrainedError")
+    return kind === "tab" ? "nothing to capture was found" : "that audio input is not available (unplugged?)";
+  if (name === "NotReadableError" || name === "AbortError")
+    return kind === "tab" ? "the tab could not be captured" : "the audio input could not be opened (in use by another program?)";
+  if (name === "unsupported")
+    return kind === "tab" ? "this browser cannot capture a tab's audio (getDisplayMedia is missing)"
+                          : "this browser cannot open an audio input (getUserMedia is missing)";
+  return "could not start the " + (kind === "tab" ? "tab capture" : "audio input") + (name ? " (" + name + ")" : "");
 }

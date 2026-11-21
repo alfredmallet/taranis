@@ -54,7 +54,11 @@
 // music.html -- the AUDIO and DOM glue of the music page. The logic it drives is
 // music.js (pure: the band plan, the onset detector, the blobs, the click track,
 // the clock) and the solver is solver2d.js's, built with `kick: true` and a drag.
-// plans-webgpu/MUSIC_PLAN.md, phase M2; developer notes in README.md.
+// plans-webgpu/MUSIC_PLAN.md, phases M2-M4; developer notes in README.md.
+// Four sources: the built-in click track, a local file, another tab's audio
+// (getDisplayMedia) and an audio input device (getUserMedia). The detector always
+// reads the source UNDELAYED; where the page is the one playing it, the speakers
+// get it through a delay, so a hit is on screen when it is heard.
 //
 // One frame, in order (musicStep, called by common.js's loop through `stepHook`):
 //   1. read the analyser's spectrum and hand it to the detector;
@@ -85,7 +89,8 @@ controlsBuild({
     { k: "btn", id: "btnRun", t: "Start" },
     { k: "btn", id: "btnReset", t: "Reset" },
     { k: "lab", t: "source", for: "selSrc" },
-    { k: "sel", id: "selSrc", o: [["click", "click track"], ["file", "audio file"]], v: "click" },
+    { k: "sel", id: "selSrc", o: [["click", "click track"], ["file", "audio file"],
+                                  ["tab", "another tab's audio"], ["input", "audio input device"]], v: "click" },
     { k: "txt", id: "steps" }
   ],
   groups: [
@@ -110,6 +115,17 @@ controlsBuild({
        { k: "val", id: "vRate" },
        { k: "lab", t: "click bpm" },
        { k: "num", id: "nBpm", v: 120, w: 70 }],
+      [{ k: "lab", t: "sound delay (ms)" },
+       { k: "rng", id: "rDelay", min: 0, max: MUSIC_DELAY_MAX, step: 5, v: MUSIC_DELAY_DEFAULT,
+         ti: "the page holds the sound back by this much, so that a hit is on screen when it is "
+           + "heard: the detector knows about a hit ~40 ms after it happens. Only where the page "
+           + "is the one playing the audio (click track, file, a silenced tab)." },
+       { k: "val", id: "vDelay" }],
+      { id: "rowDev", hide: true, items: [
+        { k: "lab", t: "input device", for: "selDev" },
+        { k: "sel", id: "selDev", o: [["", "default input"]],
+          ti: "a loopback driver, or a microphone. Names appear once access has been allowed." }] },
+      { k: "hintdiv", id: "musicMode", t: "" },
       { k: "hintdiv", id: "musicStrip", t: "" }
     ] },
     // the two CFL knobs the shared loop reads (rCflEvery) and the solver takes (rCfl)
@@ -123,7 +139,9 @@ const musicNum = (id, dflt) => { const v = parseFloat(el(id).value); return isFi
 function musicUi() {
   return { thr: musicNum("rThr", 0.3), memory: Math.max(0.05, musicNum("rMem", 1)),
            amp: Math.max(0, musicNum("rMAmp", 1)), rate: Math.max(0.01, musicNum("rRate", 1)),
-           bpm: Math.min(300, Math.max(30, musicNum("nBpm", 120))), src: el("selSrc").value };
+           bpm: Math.min(300, Math.max(30, musicNum("nBpm", 120))), src: el("selSrc").value,
+           delay: Math.min(MUSIC_DELAY_MAX, Math.max(0, musicNum("rDelay", MUSIC_DELAY_DEFAULT))),
+           dev: el("selDev").value };
 }
 // the drag's energy e-folding RATE, in simulation time: the flow forgets over `memory`
 // seconds of AUDIO, which is memory * rate simulation time units
@@ -152,7 +170,9 @@ const music = {
   plan: musicBandPlan(MUSIC_N, null, null, KICK_MAX),   // widths and counts, one kick() each
   rng: musicRng(MUSIC_SEED),
   det: null,                // the onset detector (built at Start, at the context's rate)
-  audio: null,              // { ctx, an, src, t0, kind, click } while a source plays
+  audio: null,              // the live source (musicStart): { ctx, an, node, delay, t0, kind,
+                            //   click, stream, route, suppressed, stop() }
+  gen: 0,                   // bumped by every Start and Stop: an await that outlives it gives up
   clock: {},                // musicClock's state
   tPush: null,              // audio time of the last spectrum handed to the detector
   db: null, mag: null,      // the analyser's dB bins, and their magnitudes
@@ -169,7 +189,10 @@ function syncLabels() {
   el("vRate").textContent = u.rate.toFixed(2);
   el("vCfl").textContent = musicNum("rCfl", 0.4).toFixed(2);
   el("vCflEvery").textContent = el("rCflEvery").value;
+  el("vDelay").textContent = u.delay.toFixed(0);
   el("rowFile").style.display = u.src === "file" ? "" : "none";
+  el("rowDev").style.display = u.src === "input" ? "" : "none";
+  musicModeLine();
   musicStrip();
 }
 // the per-band activity strip and the "behind" indicator: one line of text, rebuilt each
@@ -219,61 +242,181 @@ function rebuild() {
 
 // ---- audio -------------------------------------------------------------------
 // The context is created on the Start click (browsers refuse audio before a gesture).
-// source -> analyser -> destination; the analyser's window is the last MUSIC_NFFT samples,
-// read once per frame as dB and turned back into magnitudes for the detector.
+// Whatever the source, the graph is
+//
+//     source ──> analyser                       (what the detector reads: UNDELAYED)
+//        └─────> delay ──> speakers             (only if musicRouting says the page may play it)
+//
+// so the kick, which the detector can only declare ~40 ms after the sound, is on screen
+// when the DELAYED sound is heard. An input device has no second branch at all.
 function musicAudioClass() { return window.AudioContext || window.webkitAudioContext || null; }
+const musicMedia = () => (typeof navigator !== "undefined" && navigator.mediaDevices) || null;
+
+// One line saying which of the two modes is in force, and why (musicRouting's sentence).
+function musicModeLine() {
+  const A = music.audio, u = musicUi();
+  let t;
+  if (!A) {
+    const r = u.src === "tab" ? null : musicRouting(u.src, false);
+    t = u.src === "tab" ? "tab audio: compensated if this browser can silence the captured tab, otherwise not (decided at Start)"
+                        : (r.compensated ? "latency compensated: " : "NOT latency compensated: ") + r.why;
+  } else {
+    t = (A.route.compensated ? "latency compensated (sound delayed " + u.delay.toFixed(0) + " ms): "
+                             : "NOT latency compensated: ") + A.route.why;
+  }
+  el("musicMode").textContent = t;
+}
+// the input-device list. Labels are empty until access has been allowed once, so this is
+// called again after a successful getUserMedia; the current choice is kept if it survives.
+async function musicDevices() {
+  const md = musicMedia(), sel = el("selDev");
+  if (!md || !md.enumerateDevices) return;
+  md.ondevicechange = () => { musicDevices(); };   // a device plugged in or pulled: read it again
+  let list = [];
+  try { list = (await md.enumerateDevices()).filter(d => d.kind === "audioinput"); } catch (e) { return; }
+  const keep = sel.value;
+  sel.innerHTML = "";
+  const add = (v, t) => { const o = document.createElement("option"); o.value = v; o.textContent = t; sel.appendChild(o); };
+  add("", "default input");
+  list.forEach((d, i) => { if (d.deviceId && d.deviceId !== "default") add(d.deviceId, d.label || "audio input " + (i + 1)); });
+  sel.value = Array.from(sel.options).some(o => o.value === keep) ? keep : "";
+}
+// end a capture: every track stopped (which is also what clears Chrome's "sharing" bar)
+function musicStopStream(stream) {
+  if (!stream) return;
+  for (const t of stream.getTracks()) { t.onended = null; try { t.stop(); } catch (e) { /* already ended */ } }
+}
+
+// Obtain the source: a node to analyse, plus what goes with it. Throws { name } on failure
+// (musicStartError turns the name into the message). `ctx` exists already.
+async function musicAcquire(kind, ctx, u) {
+  if (kind === "click") {
+    const click = musicClickTrack({ sr: ctx.sampleRate, bpm: u.bpm, beats: 16, seed: 1 });
+    const buffer = ctx.createBuffer(1, click.samples.length, ctx.sampleRate);
+    buffer.getChannelData(0).set(click.samples);
+    const node = ctx.createBufferSource();
+    node.buffer = buffer;
+    node.loop = true;                              // the click track is a seamless loop
+    return { node: node, click: click, stream: null, suppressed: null, label: "click track, " + u.bpm + " bpm" };
+  }
+  if (kind === "file") {
+    const f = el("fMusic").files && el("fMusic").files[0];
+    if (!f) throw { name: "nofile" };
+    let buffer;
+    try { buffer = await ctx.decodeAudioData(await f.arrayBuffer()); }
+    catch (e) { throw { name: "decode", file: f.name, detail: e && e.message || String(e) }; }
+    el("vFile").textContent = f.name + ", " + buffer.duration.toFixed(1) + " s";
+    const node = ctx.createBufferSource();
+    node.buffer = buffer;
+    return { node: node, click: null, stream: null, suppressed: null, label: f.name };
+  }
+  const md = musicMedia();
+  if (kind === "tab") {
+    if (!md || !md.getDisplayMedia) throw { name: "unsupported" };
+    const stream = await md.getDisplayMedia(musicTabConstraints());
+    const at = stream.getAudioTracks()[0];
+    if (!at) { musicStopStream(stream); throw { name: "noaudio" }; }
+    // The VIDEO track is unused, and it is KEPT ALIVE: whether stopping it leaves the audio
+    // running is browser behaviour this code cannot check, and a dead audio track would be
+    // silent with no error. Keeping it is the choice that cannot break the capture; it was
+    // asked for at 64 px and 1 frame a second to cost as little as it can. (To be confirmed
+    // in Chrome -- plans-webgpu/MUSIC_PLAN.md M3 -- after which it may be stopped here.)
+    const st = at.getSettings ? at.getSettings() : {};
+    return { node: ctx.createMediaStreamSource(stream), click: null, stream: stream,
+             suppressed: st.suppressLocalAudioPlayback === true, label: at.label || "a tab", settings: st };
+  }
+  if (kind === "input") {
+    if (!md || !md.getUserMedia) throw { name: "unsupported" };
+    const stream = await md.getUserMedia(musicInputConstraints(u.dev));
+    const at = stream.getAudioTracks()[0];
+    if (!at) { musicStopStream(stream); throw { name: "noaudio" }; }
+    return { node: ctx.createMediaStreamSource(stream), click: null, stream: stream, suppressed: null,
+             label: at.label || "audio input", settings: at.getSettings ? at.getSettings() : {} };
+  }
+  throw { name: "unknown source" };
+}
+
 async function musicStart() {
-  if (music.audio) return;
-  const AC = musicAudioClass(), u = musicUi();
+  if (music.audio || music.starting) return;
+  const AC = musicAudioClass(), u = musicUi(), kind = u.src;
   if (!AC) { showStatus("this browser has no Web Audio (AudioContext)", "err"); return; }
   const ctx = music.ctx || (music.ctx = new AC());
-  let buffer, click = null;
-  if (u.src === "file") {
-    const f = el("fMusic").files && el("fMusic").files[0];
-    if (!f) { showStatus("choose an audio file first", "info"); return; }
-    try { buffer = await ctx.decodeAudioData(await f.arrayBuffer()); }
-    catch (e) { showStatus("could not decode " + f.name + ": " + (e && e.message || e), "err"); return; }
-    el("vFile").textContent = f.name + ", " + buffer.duration.toFixed(1) + " s";
-  } else {
-    click = musicClickTrack({ sr: ctx.sampleRate, bpm: u.bpm, beats: 16, seed: 1 });
-    buffer = ctx.createBuffer(1, click.samples.length, ctx.sampleRate);
-    buffer.getChannelData(0).set(click.samples);
+  const gen = ++music.gen;
+  music.starting = true;
+  let S;
+  try { S = await musicAcquire(kind, ctx, u); }
+  catch (e) {
+    music.starting = false;
+    const n = e && e.name;
+    showStatus(n === "nofile" ? "choose an audio file first"
+             : n === "decode" ? "could not decode " + e.file + ": " + e.detail
+             : musicStartError(kind, e), n === "nofile" ? "info" : "err");
+    return;
   }
-  if (music.audio) return;                       // a second click raced the decode
+  music.starting = false;
+  // a Stop, or a change of source, while the picker or the decode was open: give it back
+  if (gen !== music.gen || music.audio) { musicStopStream(S.stream); return; }
+  if (ctx.state === "suspended" && ctx.resume) await ctx.resume();
+  const route = musicRouting(kind, S.suppressed);
   const an = ctx.createAnalyser();
   an.fftSize = MUSIC_NFFT;
   an.smoothingTimeConstant = 0;                  // the raw spectrum of the last window
-  const src = ctx.createBufferSource();
-  src.buffer = buffer;
-  src.loop = !!click;                            // the click track is a seamless loop
-  src.connect(an);
-  an.connect(ctx.destination);
-  if (ctx.state === "suspended" && ctx.resume) await ctx.resume();
+  S.node.connect(an);                            // the analyser is a dead end: it feeds nothing
+  let delay = null;
+  // the ONLY place anything is connected to the speakers. musicRouting never says `play` for
+  // an input device; the second test is there so that no later edit of it can make a
+  // microphone feed back.
+  if (route.play && kind !== "input") {
+    delay = ctx.createDelay(1);
+    delay.delayTime.value = u.delay / 1000;
+    S.node.connect(delay);
+    delay.connect(ctx.destination);
+  }
   music.db = new Float32Array(an.frequencyBinCount);
   music.mag = new Float64Array(an.frequencyBinCount);
+  // a NEW detector for every source: its running normalisation and reference describe the
+  // audio it has heard, and carried across a switch they would misjudge the next one
   music.det = new MusicDetector({ sr: ctx.sampleRate, nfft: MUSIC_NFFT, nbands: music.plan.sigmas.length,
                                   fps: MUSIC_FPS, threshold: u.thr });
   music.tPush = null;
   music.clock.init = false;
-  music.audio = { ctx: ctx, an: an, src: src, t0: ctx.currentTime, kind: u.src, click: click };
-  src.onended = () => { if (music.audio && music.audio.src === src) musicStop(); };
-  src.start();
-  music.audio.t0 = ctx.currentTime;              // audio time 0 = the source's first sample
+  const A = music.audio = { ctx: ctx, an: an, node: S.node, delay: delay, t0: ctx.currentTime, kind: kind,
+                            click: S.click, stream: S.stream, route: route, suppressed: S.suppressed,
+                            label: S.label, settings: S.settings || null };
+  if (S.stream) {
+    // the capture ending from outside: Chrome's "Stop sharing", the tab closed, the device
+    // unplugged. Any track ending ends the session.
+    for (const t of S.stream.getTracks())
+      t.onended = () => { if (music.audio === A) { musicStop(); showStatus("the " + (kind === "tab" ? "tab capture" : "audio input") + " ended", "info"); } };
+  } else {
+    S.node.onended = () => { if (music.audio === A) musicStop(); };
+    S.node.start();
+  }
+  A.t0 = ctx.currentTime;                        // audio time 0 = the source's first sample
   if (MUSIC_DEBUG) musicDebugInit();
   setRunning(true);
   showStatus("", "info");
   syncLabels();
+  if (kind === "input") musicDevices();          // the labels exist now
 }
 function musicStop() {
   const A = music.audio;
   music.audio = null;
+  music.gen++;                                   // whatever Start is still awaiting gives up
   setRunning(false);
-  if (!A) return;
-  A.src.onended = null;
-  try { A.src.stop(); } catch (e) { /* already ended */ }
-  try { A.src.disconnect(); A.an.disconnect(); } catch (e) { /* nothing connected */ }
+  if (!A) { syncLabels(); return; }
+  if (A.stream) musicStopStream(A.stream);
+  else { A.node.onended = null; try { A.node.stop(); } catch (e) { /* already ended */ } }
+  try { A.node.disconnect(); A.an.disconnect(); if (A.delay) A.delay.disconnect(); } catch (e) { /* nothing connected */ }
   music.clock.init = false;
   music.behind = false;
+  syncLabels();
+}
+// the delay slider, live
+function musicDelayApply() {
+  const A = music.audio, u = musicUi();
+  if (A && A.delay) A.delay.delayTime.value = u.delay / 1000;
+  if (MUSIC_DEBUG && window.musicDebug && A) window.musicDebug.audio = musicDebugAudio(A);
   syncLabels();
 }
 
@@ -337,7 +480,8 @@ async function musicStep(sv) {
 //           `sched`: the nearest scheduled click { t, kind, dt = tOnset - t }. With
 //           ?musicdebug=energy also eBefore / eAfter, the total energy from stats
 //           readbacks either side of THAT kick (NaN otherwise)
-//   frames  one record per frame -- a (audio s), target, simT, lag (s of audio, + behind),
+//   frames  one record per frame -- a (audio s), target, simT, lag (s of audio, + behind;
+//           taken BEFORE the frame's steps) and lagAfter (expected once they are taken),
 //           n (steps asked for), dt and e (the readback the count was computed from: the
 //           previous frame's), rebased, kicks, fresh
 //   summary() the numbers MUSIC_PLAN M2 asks a browser session for
@@ -353,12 +497,20 @@ function musicSched(A, t) {
   }
   return best;
 }
+// what was playing and how it was routed: everything a browser session needs to report
+function musicDebugAudio(A) {
+  return { kind: A.kind, label: A.label, sampleRate: A.ctx.sampleRate, baseLatency: A.ctx.baseLatency,
+           outputLatency: A.ctx.outputLatency, compensated: A.route.compensated, played: A.route.play,
+           delayMs: A.delay ? 1000 * A.delay.delayTime.value : 0, suppressed: A.suppressed,
+           mode: A.route.why, bpm: A.click ? A.click.bpm : null, trackSettings: A.settings,
+           videoTrackAlive: A.stream ? A.stream.getVideoTracks().some(t => t.readyState === "live") : null,
+           nfft: MUSIC_NFFT, bins: A.an.frequencyBinCount };
+}
 function musicDebugInit() {
   const A = music.audio;
   window.musicDebug = {
     kicks: [], frames: [], rebases: 0,
-    audio: { sampleRate: A.ctx.sampleRate, baseLatency: A.ctx.baseLatency, outputLatency: A.ctx.outputLatency,
-             kind: A.kind, bpm: A.click ? A.click.bpm : null },
+    audio: musicDebugAudio(A),
     plan: music.plan, edges: music.det.edges.slice(),
     summary: musicDebugSummary
   };
@@ -367,7 +519,12 @@ function musicDebugFrame(tA, s, fresh, c, nk) {
   const D = window.musicDebug;
   if (!D) return;
   if (c.rebased) D.rebases++;
+  // `lag` is measured BEFORE this frame's steps, from the previous frame's readback, so in
+  // a steady run it is about one frame's advance by construction. `lagAfter` is where the
+  // frame is expected to END (lag minus the n steps about to be taken, at the dt in hand):
+  // that is the number to hold against "within a frame of the audio".
   D.frames.push({ a: tA, target: c.target, simT: fresh ? s[1] : NaN, lag: c.lag, n: c.n,
+                  lagAfter: fresh ? c.lag - c.n * s[0] / musicUi().rate : NaN,
                   dt: fresh ? s[0] : NaN, e: fresh ? s[2] + s[3] : NaN, rebased: c.rebased, kicks: nk,
                   fresh: fresh });
   if (D.frames.length > 40000) D.frames.splice(0, D.frames.length - 40000);
@@ -382,8 +539,9 @@ function musicDebugSummary(skip) {
                     return { n: a.length, mean: m, min: Math.min.apply(null, a), max: Math.max.apply(null, a) }; };
   const out = { seconds: fr.length ? fr[fr.length - 1].a - fr[0].a : 0, frames: fr.length,
                 rebases: D.frames.filter(f => f.a >= t0 && f.rebased).length,
-                lagSeconds: st(fr.map(f => f.lag)), stepsPerFrame: st(fr.map(f => f.n)),
-                framesAtCap: fr.filter(f => f.n >= MUSIC_MAX_STEPS).length, bands: [] };
+                lagSeconds: st(fr.map(f => f.lag)), lagAfterSeconds: st(fr.map(f => f.lagAfter)),
+                stepsPerFrame: st(fr.map(f => f.n)),
+                framesAtCap: fr.filter(f => f.n >= MUSIC_MAX_STEPS).length, audio: D.audio, bands: [] };
   for (let b = 0; b < music.plan.sigmas.length; b++) {
     const ks = D.kicks.filter(k => k.band === b && k.tOnset >= t0);
     const jump = ks.filter(k => k.eBefore > 0 && isFinite(k.eAfter)).map(k => (k.eAfter - k.eBefore) / k.eBefore);
@@ -411,15 +569,20 @@ async function boot() {
   });
   el("btnRun").onclick = () => { if (running) musicStop(); else musicStart(); };
   el("btnReset").onclick = () => applyIC();
-  el("selSrc").onchange = () => { if (running) musicStop(); syncLabels(); };
-  el("fMusic").onchange = () => { if (running && music.audio && music.audio.kind === "file") musicStop(); };
+  el("selSrc").onchange = () => { if (running || music.starting) musicStop(); syncLabels();
+                                  if (el("selSrc").value === "input") musicDevices(); };
+  el("selDev").onchange = () => { if (running && music.audio && music.audio.kind === "input") musicStop(); };
+  el("rDelay").oninput = musicDelayApply;
+  el("fMusic").onchange = () => { if (music.audio && music.audio.kind === "file") musicStop(); };
   for (const id of ["rThr", "rMem", "rMAmp", "rRate", "rCfl", "rCflEvery"]) el(id).oninput = applyControls;
   el("nBpm").onchange = () => { if (running && music.audio && music.audio.kind === "click") musicStop(); syncLabels(); };
   stepHook = musicStep;
   // what a saved params.json says drove the run (common.js _forcingRecord fills in the rest)
   manifestForcing = () => {
     const u = musicUi(), A = music.audio;
-    return { source: A ? A.kind : u.src, bpm: (A && A.click) ? A.click.bpm : null, threshold: u.thr,
+    return { source: A ? A.kind : u.src, compensated: A ? A.route.compensated : null,
+             delayMs: (A && A.delay) ? u.delay : 0,
+             bpm: (A && A.click) ? A.click.bpm : null, threshold: u.thr,
              memory: u.memory, amp: u.amp, rate: u.rate, mu: solver ? solver.p.mu : null,
              bands: music.plan.sigmas.length, sigmas: music.plan.sigmas, nblobs: music.plan.nblobs,
              seed: MUSIC_SEED };

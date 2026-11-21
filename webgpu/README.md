@@ -1686,8 +1686,8 @@ encoded and the interpreter executes the kernel text.
 
 Whatever is playing drives a 256² 2D RMHD run: an onset in a frequency band is one
 impulsive kick of gaussian blobs (previous section), and the audio clock sets the
-simulation time. M2 has two sources, the built-in click track and a local audio file;
-tab capture and input devices are M3. It is the live twin of the offline
+simulation time. Four sources: the built-in click track, a local audio file, another
+tab's audio, and an audio input device. It is the live twin of the offline
 `examples/music_turbulence.py`, which stays the reference and the way to make a movie.
 
 **Serve and open** (it loads from `file://` too, but a local server is the tested way):
@@ -1699,7 +1699,8 @@ tab capture and input devices are M3. It is the live twin of the offline
 source, **`epsP = epsM = 0`** (no OU forcing — the `Solver` defaults are 0.15), a solver
 built with `kick: true` and `mu = 1/(memory·rate)`, and `diss = 3·amp/(n/6)⁴`, the offline
 rule. The initial condition is rest. Its controls are few: source, Start/Reset, threshold
-(0.3), memory (1 s), amp (1), rate (1), the click track's bpm, and the two CFL knobs the
+(0.3), memory (1 s), amp (1), rate (1), the click track's bpm, the sound delay (50 ms), the
+input device, and the two CFL knobs the
 shared loop reads. The `Solver`'s drag is set from `memory` in seconds of **audio**, so
 changing `rate` changes μ too.
 
@@ -1777,6 +1778,64 @@ on a solver that never is. `_forcingRecord` knows a kicked run (`g.kick`), so a 
 `params.json` says `forcing.kind = "kick"` with the page's settings instead of
 `{"on": false}`.
 
+**Four sources** (the `source` select; `musicAcquire` obtains each, `musicStart` builds the
+same graph round whatever it returns):
+
+| source | how | may the page play it? |
+|---|---|---|
+| click track | `musicClickTrack` into a looping buffer | yes |
+| audio file | `<input type=file>` → `decodeAudioData` | yes |
+| another tab's audio | `getDisplayMedia(musicTabConstraints())` | only if the track reports the tab silenced |
+| audio input device | `getUserMedia(musicInputConstraints(deviceId))` | **never** |
+
+- **The graph, and the latency compensation (M4).** `source → analyser` always, and the
+  analyser is a dead end: the detector reads the signal UNDELAYED. Where the page may play
+  the source there is a second branch, `source → DelayNode → speakers` — the only place in
+  the page anything is connected to `ctx.destination`. The detector knows about a hit
+  ~40 ms after it sounds, so holding the *sound* back by the slider's delay (default
+  50 ms, 0–150) puts the kick on screen when the hit is heard. `musicRouting(kind,
+  suppressed)` is the rule, as data, and its sentence is the mode line under the sliders:
+  "latency compensated (sound delayed 50 ms): …" or "NOT latency compensated: …".
+- **A tab is played only if the browser silenced it.** The capture asks for
+  `suppressLocalAudioPlayback: true`; whether that took effect is read back off the audio
+  track's `getSettings()` and must be exactly `true`. If it is not, the visitor is already
+  hearing the tab, undelayed, and a second copy from the page would be an echo — so the
+  page does not play it, runs uncompensated, and says so.
+- **An input device is never routed to the speakers** — a microphone would feed back, and
+  a loopback device is already being heard. `musicRouting` never says `play` for it, and
+  the connect itself is additionally guarded on the source kind, so no later edit of the
+  rule can make a microphone howl.
+- **Raw audio.** Both captures ask for `echoCancellation`, `noiseSuppression` and
+  `autoGainControl` off: each is tuned for speech and would flatten the transients the
+  detector looks for.
+- **The unused video track of a tab capture is KEPT ALIVE** (asked for at 64 px, 1 frame a
+  second). Whether stopping it leaves the audio running is browser behaviour that has not
+  been checked, and a dead audio track would be silence with no error; keeping it is the
+  choice that cannot break the capture. To be confirmed in Chrome, after which it may be
+  stopped in `musicAcquire`.
+- **What ends a session**: Stop; choosing another source, device or file; the buffer
+  running out; and any track of a capture ending from outside (Chrome's "Stop sharing",
+  the tab closing, a device unplugged) — the page stops, stops every track (which is what
+  clears Chrome's sharing bar) and says the capture ended. A source change while the
+  picker is still open gives the capture straight back when it arrives (`music.gen`).
+- **What will not start says why** (`musicStartError`): a capture with no audio track
+  tells the visitor to pick a Chrome *tab* and switch on "Also share tab audio"; a
+  cancelled or refused capture, an unplugged or busy device and a browser without the API
+  each get their own sentence.
+- **Every Start builds a new detector.** Its running normalisation and reference describe
+  the audio it has heard; carried across a switch they would misjudge the next source.
+  There is no burst at the start of a stream: the first seconds hold about the steady
+  rate of onsets (measured mid-track on the two test recordings), and nothing fires in
+  the first half second.
+- **The device list** (`musicDevices`) shows audio *inputs* only. Browsers give no names
+  until access has been allowed once, so entries read "audio input N" until the first
+  successful Start, after which the list is re-read; a `devicechange` re-reads it too.
+- **The sample rate is the context's** — 44.1 or 48 kHz, whatever the machine runs at; a
+  stream is resampled into it. The detector's bands and windows are built from it.
+- **Known limit, not built:** with a microphone in a quiet room the detector's reference
+  decays toward the noise floor and the noise itself starts to count as onsets. A floor on
+  the reference would fix it; it needs adding to the python class too, so it was left.
+
 **`?musicdebug`** keeps a record on `window.musicDebug` for measuring sync and latency in
 a real browser:
 
@@ -1785,11 +1844,20 @@ a real browser:
   `strength`, `used`, `dropped`, and on the click track `sched = {t, kind, dt}`, the
   nearest scheduled click. Audio times are seconds since the source started.
 - `frames[]`: `a` (audio s), `target`, `simT`, `lag` (seconds of audio; + is behind), `n`,
-  `dt`, `e`, `rebased`, `kicks`, `fresh`.
+  `dt`, `e`, `rebased`, `kicks`, `fresh`, `lagAfter`. **`lag` is taken BEFORE the frame's
+  steps**, from the previous frame's readback, so a steady run reads about one frame
+  (measured: 14.5 ms median at 56.8 fps) by construction; `lagAfter` is where the frame is
+  expected to end, and is the number to hold against "within a frame of the audio".
 - `summary(skip = 5)`: frames, rebases, lag min/mean/max, steps per frame, frames at the
   cap, and per band the kick count, the mean energy jump, and the latency from the onset
   and from the scheduled click.
-- `audio`: the context's `sampleRate`, `baseLatency`, `outputLatency`.
+- `audio` (also in `summary().audio`): `kind`, `label`, `sampleRate`, `baseLatency`,
+  `outputLatency`, `played`, `compensated`, `delayMs` (the delay in force — it follows the
+  slider), `suppressed` (a tab: did the browser silence it; null otherwise), `mode` (the
+  sentence shown), `trackSettings`, `videoTrackAlive`, `nfft`, `bins`.
+- The latencies in `summary()` are measured to `kick()` returning and do NOT subtract the
+  delay: with compensation on, what is perceived is that figure minus `delayMs`/1000
+  (minus `outputLatency`, plus about a frame).
 
 **`?musicdebug=energy`** additionally reads the energy back after *every* kick (`eBefore`,
 `eAfter`): that is the only way to get one kick's own energy jump — kick energy enters no
