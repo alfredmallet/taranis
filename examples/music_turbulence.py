@@ -143,6 +143,69 @@ def detect_onsets(sr, x, nbands=3, fmin=40.0, fmax=10000.0, hop_s=0.010, win_s=0
             np.array(strengths)[order], edges)
 
 
+class CausalOnsetDetector:
+    """The per-frame core of `detect_onsets_causal`, fed MAGNITUDE SPECTRA one at a time.
+
+    This is the object a live page runs (plans-webgpu/MUSIC_PLAN.md, M2): `webgpu/music.js`'s
+    `MusicDetector` is a line-for-line port, and `webgpu/gen_musicfixture.py` records this
+    class's output as the fixture `webgpu/devtools/checkmusic.js` holds the port to. Keep the
+    two in step -- change one, change the other, regenerate the fixture.
+
+    `push(mag, t_now)` takes the magnitude spectrum of the last `nfft` samples under a
+    Blackman window, scaled by 1/nfft (what a Web Audio `AnalyserNode` with
+    smoothingTimeConstant 0 holds: 10^(dB/20) of `getFloatFrequencyData`), and the time the
+    window ENDS. It returns the onsets it can now declare, as (t_centre, band, strength,
+    t_fire): the peak was one frame ago, `t_centre` is that frame's analysis-window centre
+    and `t_fire` is `t_now`, when the caller knows.
+
+    All windows are counted in FRAMES at the nominal `fps`, so the caller must push at about
+    that rate. A gap longer than `gap_s` (a hidden tab, a seek) only re-primes the previous
+    spectrum: the flux across a gap is the music having moved on, not an onset.
+    """
+
+    def __init__(self, sr, nbands=3, fmin=40.0, fmax=10000.0, fps=60.0, nfft=2048,
+                 threshold=0.15, min_gap_s=0.07, mean_s=0.20, ref_decay_s=30.0,
+                 norm_s=20.0, warmup_s=0.5, gap_s=0.1):
+        freqs = np.fft.rfftfreq(nfft, 1.0 / sr)
+        self.sr, self.nfft, self.nbands, self.fps = sr, nfft, nbands, fps
+        self.edges = np.geomspace(fmin, min(fmax, 0.5 * sr), nbands + 1)
+        self.sels = [(freqs >= self.edges[b]) & (freqs < self.edges[b + 1]) for b in range(nbands)]
+        self.threshold, self.min_gap_s, self.warmup_s, self.gap_s = threshold, min_gap_s, warmup_s, gap_s
+        self.nmean = max(1, int(round(mean_s * fps)))
+        self.nnorm = max(1, int(round(norm_s * fps)))
+        self.decay = np.exp(-1.0 / (ref_decay_s * fps))
+        self.ref, self.prev, self.t_last = 0.0, None, None
+        self.hist = [[] for _ in range(nbands)]          # raw band flux, all frames so far
+        self.last_fire = [-np.inf] * nbands
+
+    def push(self, mag, t_now):
+        fps = self.fps
+        self.ref = max(self.ref * self.decay, float(mag.max()), 1e-30)
+        comp = np.log1p(100.0 * mag / self.ref)
+        gap = self.t_last is not None and t_now - self.t_last > self.gap_s
+        self.t_last = t_now
+        if self.prev is None or gap:
+            self.prev = comp
+            return []
+        flux = np.maximum(comp - self.prev, 0.0)
+        self.prev = comp
+        out = []
+        for b in range(self.nbands):
+            h = self.hist[b]
+            h.append(float(flux[self.sels[b]].sum()))
+            if len(h) < 3 or t_now < self.warmup_s:
+                continue
+            q = np.percentile(h[-self.nnorm:], 99.0) + 1e-30
+            s0, s1, s2 = h[-3] / q, h[-2] / q, h[-1] / q      # s1 is the candidate peak
+            mean = np.mean(h[-1 - self.nmean:-1]) / q         # trailing, ends at the candidate
+            t_peak = t_now - 1.0 / fps
+            if (s1 > s0 and s1 >= s2 and s1 > mean + self.threshold
+                    and t_peak - self.last_fire[b] >= self.min_gap_s):
+                self.last_fire[b] = t_peak
+                out.append((t_peak - 0.5 * self.nfft / self.sr, b, min(s1, 1.0), t_now))
+        return out
+
+
 def detect_onsets_causal(sr, x, nbands=3, fmin=40.0, fmax=10000.0, fps=60.0, nfft=2048,
                          threshold=0.15, min_gap_s=0.07, mean_s=0.20, ref_decay_s=30.0,
                          norm_s=20.0, warmup_s=0.5):
@@ -159,55 +222,28 @@ def detect_onsets_causal(sr, x, nbands=3, fmin=40.0, fmax=10000.0, fps=60.0, nff
       * the moving mean is trailing (`mean_s`), where offline centres it;
       * a peak is declared ONE frame after it happens (s[i-1] > s[i-2], s[i-1] >= s[i]),
         where offline looks `min_gap_s` both ways; `min_gap_s` is a refractory time here.
-    Written as a per-frame loop over explicit state so that it ports to JS line for line.
+    The per-frame logic is `CausalOnsetDetector`; this function only cuts the signal into
+    the frames a browser would see and feeds them in.
 
     Returns (times, bands, strengths, edges, fire_times): `times` are the analysis-window
     centres of the peak frames (comparable with `detect_onsets`), `fire_times` when the
     page would KNOW -- half a window plus one frame later.
     """
+    det = CausalOnsetDetector(sr, nbands=nbands, fmin=fmin, fmax=fmax, fps=fps, nfft=nfft,
+                              threshold=threshold, min_gap_s=min_gap_s, mean_s=mean_s,
+                              ref_decay_s=ref_decay_s, norm_s=norm_s, warmup_s=warmup_s)
     win = np.blackman(nfft)
-    freqs = np.fft.rfftfreq(nfft, 1.0 / sr)
-    edges = np.geomspace(fmin, min(fmax, 0.5 * sr), nbands + 1)
-    sels = [(freqs >= edges[b]) & (freqs < edges[b + 1]) for b in range(nbands)]
-    nframes = int(len(x) / sr * fps)
-    nmean = max(1, int(round(mean_s * fps)))
-    nnorm = max(1, int(round(norm_s * fps)))
-    decay = np.exp(-1.0 / (ref_decay_s * fps))
-
-    ref, prev = 0.0, None
-    hist = [[] for _ in range(nbands)]          # raw band flux, all frames so far
-    last_fire = [-np.inf] * nbands
     times, bands, strengths, fires = [], [], [], []
-    for i in range(nframes):
+    for i in range(int(len(x) / sr * fps)):
         end = int(round((i + 1) / fps * sr))    # the window ENDS now
         if end < nfft:
             continue
         mag = np.abs(np.fft.rfft(win * x[end - nfft:end])) / nfft
-        ref = max(ref * decay, float(mag.max()), 1e-30)
-        comp = np.log1p(100.0 * mag / ref)
-        if prev is None:
-            prev = comp
-            continue
-        flux = np.maximum(comp - prev, 0.0)
-        prev = comp
-        t_now = end / sr
-        for b in range(nbands):
-            h = hist[b]
-            h.append(float(flux[sels[b]].sum()))
-            if len(h) < 3 or t_now < warmup_s:
-                continue
-            q = np.percentile(h[-nnorm:], 99.0) + 1e-30
-            s0, s1, s2 = h[-3] / q, h[-2] / q, h[-1] / q      # s1 is the candidate peak
-            mean = np.mean(h[-1 - nmean:-1]) / q              # trailing, ends at the candidate
-            t_peak = t_now - 1.0 / fps
-            if (s1 > s0 and s1 >= s2 and s1 > mean + threshold
-                    and t_peak - last_fire[b] >= min_gap_s):
-                last_fire[b] = t_peak
-                times.append(t_peak - 0.5 * nfft / sr); bands.append(b)
-                strengths.append(min(s1, 1.0)); fires.append(t_now)
+        for t, b, s, tf in det.push(mag, end / sr):
+            times.append(t); bands.append(b); strengths.append(s); fires.append(tf)
     order = np.argsort(times, kind="stable")
     return (np.array(times)[order], np.array(bands, dtype=int)[order],
-            np.array(strengths)[order], edges, np.array(fires)[order])
+            np.array(strengths)[order], det.edges, np.array(fires)[order])
 
 
 # ---------------------------------------------------------------------------------------

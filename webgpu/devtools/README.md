@@ -823,6 +823,52 @@ leave untracked or commit — they are dev-only, nothing in the apps loads them.
   `cflEvery − 1` steps) and one poison channel (a finite sigma with an infinite fp32
   weight). Round 2 fixed both in the solver and closed every hole; all sixteen re-applied
   survivor mutations are killed.
+- `checkmusic.js [dir]` — the MUSIC PAGE gate (MUSIC_PLAN M2): `music.js`'s pure logic
+  against numbers recorded from the offline reference implementation, and `music.html`
+  booted and DRIVEN under the stub. 226 rows in ten legs. (1) `music.js` evaluates in a
+  bare `vm` context — no DOM, no Web Audio, none of the shared scripts — and every
+  top-level name is in its own namespace; (2) `musicBandPlan` equals the offline
+  `band_plan` at eleven argument sets (`fixtures/music_ref.json`, written by
+  `../gen_musicfixture.py`), plus its refusals and the `nblobMax` limit; (3)
+  `MusicDetector` gives the offline `CausalOnsetDetector`'s onsets — the same frame, the
+  same band, strength to 1e-12 — on the fixture's signal under eleven option sets that
+  between them vary every option the port takes, then what the python has no case for (the
+  gap re-prime, `reset`, a live threshold, an analyser's bin count, the refusals); (4) the
+  push rule, the generator, `musicBlobsFor` / `musicKickList`; (5) `musicClickTrack` —
+  deterministic, the schedule, the seamless loop (32 beats are exactly two copies of 16) —
+  and the detector in the PAGE's configuration (44100 Hz, 2048, 4 bands, threshold 0.3)
+  finding every kick in the bass band, every hat in the top one and every snare in the
+  middle, with no stray; (6) `musicClock`: the count, the cap, the look-ahead rule, the
+  kick-frame step, every rebase; (7) `music.html` booted — the solver it builds (256²,
+  hyper 2, `kick: true`, `epsP = epsM = 0`, μ and the offline dissipation rule in the
+  column), what each control does to the live solver, the manifest, the `pages.yml` prune,
+  no link from any other page; (8) the page RUNNING: a fake `AudioContext` (`fakeAudio`)
+  plays the page's own click track, its analyser computing the true spectrum of what is
+  "playing" at `currentTime`, and frames are driven one at a time — one `kick()` per onset
+  with the band's σ and count per channel, kicks before that frame's steps, the steps
+  equal to the clock's count (recomputed here from each frame's recorded inputs),
+  simulation time within a frame of the audio over 12 s, the cap / rebase / BEHIND
+  indicator when it cannot keep up, a hidden tab, Reset, Stop, restart, a bpm change, a
+  file source, a file that will not decode; (8b) `?musicdebug` without `=energy` (no
+  readback per kick), no flag (no record), a quiet start where dt is six frames long until
+  the first kick, a 120 Hz display, a browser with no or only a prefixed `AudioContext`;
+  (9) the other two pages: `stepHook` null, a running frame taking `stepsPerFrame` steps,
+  the state mark unchanged, and the hook's contract (a number, a promise, a solver replaced
+  meanwhile, not called while paused).
+  **Things to know before editing it.** The stub's stats readback is all zeros, so leg 8
+  replaces `readStats` with a MODEL (t advances by a fixed dt per step, the energy by 1 per
+  kick): what is verified there is the page's arithmetic and ORDER given a readback, not
+  the solver's. The reference onsets for leg 8 are computed at the very times the page saw
+  (`timeOf`) and through fp32 dB (`toDb`), which is why they agree to 0 and not to 1e-7.
+  Frame boundaries in leg 3 use python's round-half-to-even (`pyRound`) — `Math.round`
+  moves one sample at every half and changes strengths by 1e-2. The stub's
+  `getElementById` logs a miss where a browser returns null, so the five control ids
+  shared code looks up tolerantly (`TOLERATED`) are filtered from `env.fails`. And the
+  `checkonepage.js` row "music.js is committed, so it deploys" is red until the file is
+  committed — that gate walks every page in the directory. Mutation-tested once by the implementer: 131 one-line mutations of `music.js`, the
+  page glue and the loop hook, 123 killed; the 8 survivors each became a row, but those rows
+  were NOT re-run against their mutants (the round was cut short by agreement, and there is
+  no separate reviewer round for M2 — one fresh review follows M4).
 - `checkidle.js [dir]` — the RENDER GATE (audit of 2026-08-12), on both booted pages. It
   drives `renderCards(paused)`, the app's own per-frame display step (split out of `loop()`
   so it can be called at all — the stub's `requestAnimationFrame` is a no-op), and counts

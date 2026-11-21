@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>plasma turbulence in your browser &mdash; driven by music</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="favicon-32.png" sizes="32x32">
+<link rel="icon" href="favicon-16.png" sizes="16x16">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<!-- NO analytics beacon and NO link to or from the other pages: this page is a development
+     build of plans-webgpu/MUSIC_PLAN.md (phase M2), not yet a public one. The audio never
+     leaves the browser: it is analysed in this page and nothing derived from it is sent
+     anywhere. -->
+</head>
+<body>
+<h1>plasma turbulence, driven by music</h1>
+<div class="sub">2D RMHD &middot; 256&sup2; &middot; every onset in a frequency band is an
+  impulsive kick of gaussian blobs &middot; bass &rarr; wide blobs, treble &rarr; narrow &middot;
+  the audio clock sets the simulation time</div>
+
+<!-- the sticky bar and the control panel are BUILT from a spec (common.js controlsBuild) -->
+<div id="topbar"></div>
+<div id="controls">
+  <!-- the one control controlsBuild has no kind for: a local audio file. Shown only when
+       the source is "audio file" (syncLabels). The file is decoded in this page. -->
+  <div class="row" id="rowFile" style="display:none">
+    <label for="fMusic">audio file</label>
+    <input type="file" id="fMusic" accept="audio/*">
+    <span class="hint" id="vFile"></span>
+  </div>
+</div>
+<div id="status"></div>
+
+<div id="display">
+  <div id="displaycol">
+    <div id="displays"></div>
+    <div id="readout">initialising&hellip;</div>
+  </div>
+  <div id="charts"></div>
+</div>
+
+<div class="hint" id="buildline" style="margin-top:4px">
+  build <span class="buildid">dev</span>
+</div>
+
+<script src="common.js"></script>
+<script src="physics.js"></script>
+<script src="solver2d.js"></script>
+<script src="music.js"></script>
+<script>
+"use strict";
+// ===========================================================================
+// music.html -- the AUDIO and DOM glue of the music page. The logic it drives is
+// music.js (pure: the band plan, the onset detector, the blobs, the click track,
+// the clock) and the solver is solver2d.js's, built with `kick: true` and a drag.
+// plans-webgpu/MUSIC_PLAN.md, phase M2; developer notes in README.md.
+//
+// One frame, in order (musicStep, called by common.js's loop through `stepHook`):
+//   1. read the analyser's spectrum and hand it to the detector;
+//   2. ONE solver.kick() per onset it declares -- never a merged list;
+//   3. ask the clock how many steps the audio clock wants, and return that.
+// The loop then takes those steps, renders, and reads the stats back; the next
+// frame's count is computed from that readback.
+// ===========================================================================
+
+// ---- what this page fixes (MUSIC_PLAN decisions) ---------------------------
+const MUSIC_N = 256;               // the grid: live music is a 256^2 feature (M0.c)
+const MUSIC_HYPER = 2;             // with the offline dissipation rule below
+const MUSIC_FPS = 60;              // the detector's nominal frame rate
+const MUSIC_NFFT = 2048;           // the analyser's window: 46 ms at 44.1 kHz
+const MUSIC_MAX_STEPS = 64;        // per frame, the cap `stepsPerFrame` has always had
+const MUSIC_LAG_MAX = 0.25;        // seconds of audio: beyond it, rebase instead of catching up
+const MUSIC_SEED = 1;              // blob positions: the same session replays the same blobs
+// ?musicdebug: keep a per-kick and per-frame record on window.musicDebug (see musicDebugInit).
+// ?musicdebug=energy additionally reads the energy back after EVERY kick: that is the only
+// way to get a kick's own energy jump, and it costs a GPU round trip per kick, so the
+// timing numbers are best taken without it.
+const MUSIC_DEBUG = typeof location !== "undefined" && /[?&]musicdebug\b/.test(location.search);
+const MUSIC_DEBUG_E = typeof location !== "undefined" && /[?&]musicdebug=energy\b/.test(location.search);
+
+// ---- controls ---------------------------------------------------------------
+controlsBuild({
+  topbar: [
+    { k: "btn", id: "btnRun", t: "Start" },
+    { k: "btn", id: "btnReset", t: "Reset" },
+    { k: "lab", t: "source", for: "selSrc" },
+    { k: "sel", id: "selSrc", o: [["click", "click track"], ["file", "audio file"]], v: "click" },
+    { k: "txt", id: "steps" }
+  ],
+  groups: [
+    { id: "grpMusic", summary: "music", keep: true, rows: [
+      [{ k: "lab", t: "threshold" },
+       { k: "rng", id: "rThr", min: 0.05, max: 1, step: 0.05, v: 0.3,
+         ti: "how far above its recent mean a band's spectral flux must rise to count as an "
+           + "onset; raise it to keep only the stronger hits" },
+       { k: "val", id: "vThr" },
+       { k: "lab", t: "memory (s)" },
+       { k: "rng", id: "rMem", min: 0.2, max: 3, step: 0.1, v: 1,
+         ti: "the energy e-folding time of the uniform drag, in seconds of audio: how many "
+           + "beats the flow remembers" },
+       { k: "val", id: "vMem" }],
+      [{ k: "lab", t: "amp" },
+       { k: "rng", id: "rMAmp", min: 0.1, max: 3, step: 0.1, v: 1,
+         ti: "peak |grad z| a full-strength blob adds to its Elsasser channel" },
+       { k: "val", id: "vMAmp" },
+       { k: "lab", t: "rate" },
+       { k: "rng", id: "rRate", min: 0.25, max: 2, step: 0.05, v: 1,
+         ti: "simulation time units per second of audio" },
+       { k: "val", id: "vRate" },
+       { k: "lab", t: "click bpm" },
+       { k: "num", id: "nBpm", v: 120, w: 70 }],
+      { k: "hintdiv", id: "musicStrip", t: "" }
+    ] },
+    // the two CFL knobs the shared loop reads (rCflEvery) and the solver takes (rCfl)
+    { id: "grpSim", summary: "simulation", rows: [CTRL_CFL] },
+    ctrlGrpDisp()
+  ]
+});
+
+// ---- what the controls say ----------------------------------------------------
+const musicNum = (id, dflt) => { const v = parseFloat(el(id).value); return isFinite(v) ? v : dflt; };
+function musicUi() {
+  return { thr: musicNum("rThr", 0.3), memory: Math.max(0.05, musicNum("rMem", 1)),
+           amp: Math.max(0, musicNum("rMAmp", 1)), rate: Math.max(0.01, musicNum("rRate", 1)),
+           bpm: Math.min(300, Math.max(30, musicNum("nBpm", 120))), src: el("selSrc").value };
+}
+// the drag's energy e-folding RATE, in simulation time: the flow forgets over `memory`
+// seconds of AUDIO, which is memory * rate simulation time units
+const musicMu = u => 1 / (u.memory * u.rate);
+// the offline script's dissipation rule: the hyperviscous rate is 3*amp at k = n/6, i.e.
+// ~50*amp at the dealiasing cutoff (hyper 2). It scales with amp because the strain it has
+// to beat does; a rate of ~5 there leaves a grid-scale pile-up no timestep fixes.
+const musicDiss = u => 3 * Math.max(u.amp, 0.1) / Math.pow(MUSIC_N / 6, 2 * MUSIC_HYPER);
+
+function uiParams() {
+  const u = musicUi();
+  return {
+    nx: MUSIC_N, ny: MUSIC_N, Lx: MUSIC_LBOX, Ly: MUSIC_LBOX,
+    hyper: MUSIC_HYPER, diss: musicDiss(u), pm: 1, eqsrc: false,
+    // no OU forcing at all: the Solver's own defaults are epsP = epsM = 0.15, and left
+    // alone the shell forcing would run underneath the kicks
+    epsP: 0, epsM: 0, tau: 1, fshell: [1, 3], smax: 1e4,
+    cfl: musicNum("rCfl", 0.4), seed: 7,
+    kick: true, mu: musicMu(u)
+  };
+}
+function cardAspect() { return { w: 512, h: 512 }; }
+
+// ---- the page's state -------------------------------------------------------
+const music = {
+  plan: musicBandPlan(MUSIC_N, null, null, KICK_MAX),   // widths and counts, one kick() each
+  rng: musicRng(MUSIC_SEED),
+  det: null,                // the onset detector (built at Start, at the context's rate)
+  audio: null,              // { ctx, an, src, t0, kind, click } while a source plays
+  clock: {},                // musicClock's state
+  tPush: null,              // audio time of the last spectrum handed to the detector
+  db: null, mag: null,      // the analyser's dB bins, and their magnitudes
+  lit: [],                  // per band: performance.now() of its last onset (the strip)
+  behind: false, dropped: 0, lastFile: null
+};
+for (let b = 0; b < music.plan.sigmas.length; b++) music.lit.push(-1e9);
+
+function syncLabels() {
+  const u = musicUi();
+  el("vThr").textContent = u.thr.toFixed(2);
+  el("vMem").textContent = u.memory.toFixed(1);
+  el("vMAmp").textContent = u.amp.toFixed(1);
+  el("vRate").textContent = u.rate.toFixed(2);
+  el("vCfl").textContent = musicNum("rCfl", 0.4).toFixed(2);
+  el("vCflEvery").textContent = el("rCflEvery").value;
+  el("rowFile").style.display = u.src === "file" ? "" : "none";
+  musicStrip();
+}
+// the per-band activity strip and the "behind" indicator: one line of text, rebuilt each
+// frame (a band is lit for 120 ms after its onset)
+function musicStrip() {
+  const now = performance.now(), det = music.det, parts = [];
+  for (let b = 0; b < music.plan.sigmas.length; b++) {
+    const on = now - music.lit[b] < 120;
+    const f = det ? Math.round(det.edges[b]) + "–" + Math.round(det.edges[b + 1]) + " Hz" : "band " + b;
+    parts.push((on ? "● " : "○ ") + f + " σ " + music.plan.sigmas[b].toFixed(3)
+               + " ×" + music.plan.nblobs[b]);
+  }
+  el("musicStrip").textContent = parts.join("   |   ")
+    + (music.behind ? "   |   BEHIND: the simulation cannot keep up with the audio" : "")
+    + (music.dropped ? "   |   " + music.dropped + " blobs dropped" : "");
+}
+
+// slider -> the live solver. The drag and the dissipation share one column of gridB, so
+// they are uploaded together: set diss, then setDrag rebuilds from (diss, hyper, mu).
+function applyControls() {
+  syncLabels();
+  const u = musicUi();
+  if (music.det) music.det.threshold = u.thr;
+  if (!solver) return;
+  const q = uiParams();
+  solver.p.cfl = q.cfl;
+  solver.uploadCfg();
+  if (q.diss !== solver.p.diss || q.mu !== solver.p.mu) { solver.p.diss = q.diss; solver.setDrag(q.mu); }
+}
+// the initial condition is always rest: the music makes the flow
+function applyIC() {
+  if (!solver) return;
+  solver.setIC(true);
+  music.clock.init = false;         // the simulation time jumped back to 0: re-anchor
+  spsSmooth = 0;
+  chartsReset();
+}
+function rebuild() {
+  // never destroy in an event handler: the frame loop may be awaiting a readback on the
+  // old solver's buffers. Retire it and free it at the top of a later frame.
+  if (solver) { graveyard.push(solver); solver = null; }
+  solver = new Solver(device, uiParams());
+  cardsSync();
+  stepsPerFrame = 1;
+  applyIC();
+}
+
+// ---- audio -------------------------------------------------------------------
+// The context is created on the Start click (browsers refuse audio before a gesture).
+// source -> analyser -> destination; the analyser's window is the last MUSIC_NFFT samples,
+// read once per frame as dB and turned back into magnitudes for the detector.
+function musicAudioClass() { return window.AudioContext || window.webkitAudioContext || null; }
+async function musicStart() {
+  if (music.audio) return;
+  const AC = musicAudioClass(), u = musicUi();
+  if (!AC) { showStatus("this browser has no Web Audio (AudioContext)", "err"); return; }
+  const ctx = music.ctx || (music.ctx = new AC());
+  let buffer, click = null;
+  if (u.src === "file") {
+    const f = el("fMusic").files && el("fMusic").files[0];
+    if (!f) { showStatus("choose an audio file first", "info"); return; }
+    try { buffer = await ctx.decodeAudioData(await f.arrayBuffer()); }
+    catch (e) { showStatus("could not decode " + f.name + ": " + (e && e.message || e), "err"); return; }
+    el("vFile").textContent = f.name + ", " + buffer.duration.toFixed(1) + " s";
+  } else {
+    click = musicClickTrack({ sr: ctx.sampleRate, bpm: u.bpm, beats: 16, seed: 1 });
+    buffer = ctx.createBuffer(1, click.samples.length, ctx.sampleRate);
+    buffer.getChannelData(0).set(click.samples);
+  }
+  if (music.audio) return;                       // a second click raced the decode
+  const an = ctx.createAnalyser();
+  an.fftSize = MUSIC_NFFT;
+  an.smoothingTimeConstant = 0;                  // the raw spectrum of the last window
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  src.loop = !!click;                            // the click track is a seamless loop
+  src.connect(an);
+  an.connect(ctx.destination);
+  if (ctx.state === "suspended" && ctx.resume) await ctx.resume();
+  music.db = new Float32Array(an.frequencyBinCount);
+  music.mag = new Float64Array(an.frequencyBinCount);
+  music.det = new MusicDetector({ sr: ctx.sampleRate, nfft: MUSIC_NFFT, nbands: music.plan.sigmas.length,
+                                  fps: MUSIC_FPS, threshold: u.thr });
+  music.tPush = null;
+  music.clock.init = false;
+  music.audio = { ctx: ctx, an: an, src: src, t0: ctx.currentTime, kind: u.src, click: click };
+  src.onended = () => { if (music.audio && music.audio.src === src) musicStop(); };
+  src.start();
+  music.audio.t0 = ctx.currentTime;              // audio time 0 = the source's first sample
+  if (MUSIC_DEBUG) musicDebugInit();
+  setRunning(true);
+  showStatus("", "info");
+  syncLabels();
+}
+function musicStop() {
+  const A = music.audio;
+  music.audio = null;
+  setRunning(false);
+  if (!A) return;
+  A.src.onended = null;
+  try { A.src.stop(); } catch (e) { /* already ended */ }
+  try { A.src.disconnect(); A.an.disconnect(); } catch (e) { /* nothing connected */ }
+  music.clock.init = false;
+  music.behind = false;
+  syncLabels();
+}
+
+// ---- one frame -----------------------------------------------------------------
+// `sv` is the live solver. Returns the number of steps the loop is to take this frame.
+async function musicStep(sv) {
+  const A = music.audio;
+  if (!A) return 0;
+  const tA = A.ctx.currentTime - A.t0, u = musicUi();
+  // the stats readback the count is computed from: the last frame's, and only if nothing
+  // has moved the state since (a Reset or a rebuild leaves it describing a state that is
+  // gone -- then this frame takes no step and the readback at its end is the fresh one).
+  // Read BEFORE the kicks below, which move the mark themselves.
+  const s = statsCache.s, fresh = !!s && statsCache.at === stateMark();
+  let nk = 0;
+  if (musicShouldPush(tA, music.tPush, MUSIC_FPS)) {
+    music.tPush = tA;
+    A.an.getFloatFrequencyData(music.db);
+    const db = music.db, mag = music.mag;
+    for (let k = 0; k < mag.length; k++) mag[k] = Math.pow(10, db[k] / 20);   // -Infinity dB -> 0
+    let eBefore = fresh ? s[2] + s[3] : NaN;
+    for (const o of music.det.push(mag, tA)) {
+      // ONE kick per onset: KICK_MAX holds one band's blobs, and two onsets merged into
+      // one list could need twice that and would lose the overflow
+      const r = sv.kick(musicKickList(music.rng, music.plan, o.band, u.amp, o.strength));
+      nk++;
+      music.dropped += r.dropped;
+      music.lit[o.band] = performance.now();
+      if (MUSIC_DEBUG) {
+        // the energy a kick adds enters no accumulator: difference two readbacks
+        const k = { tOnset: o.t, tFire: o.tFire, tApplied: A.ctx.currentTime - A.t0, band: o.band,
+                    strength: o.strength, eBefore: NaN, eAfter: NaN, simT: fresh ? s[1] : NaN,
+                    used: r.used, dropped: r.dropped, sched: musicSched(A, o.t) };
+        window.musicDebug.kicks.push(k);
+        if (MUSIC_DEBUG_E) {
+          const sa = await sv.readStats();
+          if (solver !== sv) return 0;
+          k.eBefore = eBefore;
+          k.eAfter = sa[2] + sa[3];
+          eBefore = k.eAfter;
+        }
+      }
+    }
+  }
+  let c = { n: 0, target: NaN, lag: NaN, rebased: false, behind: music.behind };
+  if (fresh)
+    c = musicClock(music.clock, { running: true, audioT: tA, simT: s[1], dt: s[0], rate: u.rate,
+                                  maxSteps: MUSIC_MAX_STEPS, lagMax: MUSIC_LAG_MAX,
+                                  maxAhead: u.rate / MUSIC_FPS, kicked: nk > 0 });
+  music.behind = c.behind;
+  musicStrip();
+  if (MUSIC_DEBUG) musicDebugFrame(tA, s, fresh, c, nk);
+  return c.n;
+}
+
+// ---- ?musicdebug ------------------------------------------------------------------
+// window.musicDebug, for measuring sync and latency in a real browser without extra code:
+//   kicks   one record per kick -- tOnset (audio s, the analysis-window centre of the peak
+//           frame), tFire (audio s when the detector declared it), tApplied (audio s when
+//           kick() returned), band, strength, simT, used, dropped, and for the click track
+//           `sched`: the nearest scheduled click { t, kind, dt = tOnset - t }. With
+//           ?musicdebug=energy also eBefore / eAfter, the total energy from stats
+//           readbacks either side of THAT kick (NaN otherwise)
+//   frames  one record per frame -- a (audio s), target, simT, lag (s of audio, + behind),
+//           n (steps asked for), dt and e (the readback the count was computed from: the
+//           previous frame's), rebased, kicks, fresh
+//   summary() the numbers MUSIC_PLAN M2 asks a browser session for
+// Audio times are seconds since the source started. Records are capped (the last
+// 40000 frames, ~11 minutes at 60 Hz).
+function musicSched(A, t) {
+  if (!A.click) return null;
+  const c = A.click, tl = ((t % c.duration) + c.duration) % c.duration;
+  let best = null;
+  for (const e of c.events) for (const off of [-c.duration, 0, c.duration]) {
+    const d = tl - (e.t + off);
+    if (best === null || Math.abs(d) < Math.abs(best.dt)) best = { t: t - d, kind: e.kind, dt: d };
+  }
+  return best;
+}
+function musicDebugInit() {
+  const A = music.audio;
+  window.musicDebug = {
+    kicks: [], frames: [], rebases: 0,
+    audio: { sampleRate: A.ctx.sampleRate, baseLatency: A.ctx.baseLatency, outputLatency: A.ctx.outputLatency,
+             kind: A.kind, bpm: A.click ? A.click.bpm : null },
+    plan: music.plan, edges: music.det.edges.slice(),
+    summary: musicDebugSummary
+  };
+}
+function musicDebugFrame(tA, s, fresh, c, nk) {
+  const D = window.musicDebug;
+  if (!D) return;
+  if (c.rebased) D.rebases++;
+  D.frames.push({ a: tA, target: c.target, simT: fresh ? s[1] : NaN, lag: c.lag, n: c.n,
+                  dt: fresh ? s[0] : NaN, e: fresh ? s[2] + s[3] : NaN, rebased: c.rebased, kicks: nk,
+                  fresh: fresh });
+  if (D.frames.length > 40000) D.frames.splice(0, D.frames.length - 40000);
+}
+// the three numbers, each over the records after `skip` seconds of audio (default 5: the
+// detector's warm-up and the flow's spin-up)
+function musicDebugSummary(skip) {
+  const D = window.musicDebug, t0 = skip === undefined ? 5 : skip;
+  const fr = D.frames.filter(f => f.a >= t0 && f.fresh && isFinite(f.lag));
+  const st = a => { if (!a.length) return { n: 0 };
+                    const m = a.reduce((x, y) => x + y, 0) / a.length;
+                    return { n: a.length, mean: m, min: Math.min.apply(null, a), max: Math.max.apply(null, a) }; };
+  const out = { seconds: fr.length ? fr[fr.length - 1].a - fr[0].a : 0, frames: fr.length,
+                rebases: D.frames.filter(f => f.a >= t0 && f.rebased).length,
+                lagSeconds: st(fr.map(f => f.lag)), stepsPerFrame: st(fr.map(f => f.n)),
+                framesAtCap: fr.filter(f => f.n >= MUSIC_MAX_STEPS).length, bands: [] };
+  for (let b = 0; b < music.plan.sigmas.length; b++) {
+    const ks = D.kicks.filter(k => k.band === b && k.tOnset >= t0);
+    const jump = ks.filter(k => k.eBefore > 0 && isFinite(k.eAfter)).map(k => (k.eAfter - k.eBefore) / k.eBefore);
+    out.bands.push({ band: b, kicks: ks.length, energyJump: st(jump),
+                     // sound -> kick: the audio time the kick was applied minus the onset's
+                     latencySeconds: st(ks.map(k => k.tApplied - k.tOnset)),
+                     // ... and, on the click track, minus the click's SCHEDULED time
+                     latencyFromScheduled: st(ks.filter(k => k.sched && Math.abs(k.sched.dt) < 0.06)
+                                                .map(k => k.tApplied - k.sched.t)) });
+  }
+  return out;
+}
+
+// ---- boot -----------------------------------------------------------------------
+async function boot() {
+  groupsInit();
+  syncLabels();
+  if (!await initGPU({ maxLimits: true })) return;
+  cardsInit({
+    fields: DISP_FIELDS,
+    zslice: false, nz: () => 1, zsliceOf: () => 0,
+    offset: true,
+    aspect: cardAspect,
+    onLayout: syncLabels
+  });
+  el("btnRun").onclick = () => { if (running) musicStop(); else musicStart(); };
+  el("btnReset").onclick = () => applyIC();
+  el("selSrc").onchange = () => { if (running) musicStop(); syncLabels(); };
+  el("fMusic").onchange = () => { if (running && music.audio && music.audio.kind === "file") musicStop(); };
+  for (const id of ["rThr", "rMem", "rMAmp", "rRate", "rCfl", "rCflEvery"]) el(id).oninput = applyControls;
+  el("nBpm").onchange = () => { if (running && music.audio && music.audio.kind === "click") musicStop(); syncLabels(); };
+  stepHook = musicStep;
+  // what a saved params.json says drove the run (common.js _forcingRecord fills in the rest)
+  manifestForcing = () => {
+    const u = musicUi(), A = music.audio;
+    return { source: A ? A.kind : u.src, bpm: (A && A.click) ? A.click.bpm : null, threshold: u.thr,
+             memory: u.memory, amp: u.amp, rate: u.rate, mu: solver ? solver.p.mu : null,
+             bands: music.plan.sigmas.length, sigmas: music.plan.sigmas, nblobs: music.plan.nblobs,
+             seed: MUSIC_SEED };
+  };
+  rebuild();
+  // |u| is where a kick shows (7-13x the baseline frame change against 1.5x in vorticity)
+  cardsLayout({ disp: [{ sel: 4 }], charts: ["energy", "spectrum"] });
+  loop();
+}
+boot();
+</script>
+</body>
+</html>

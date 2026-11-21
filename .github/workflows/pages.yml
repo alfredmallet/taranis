@@ -73,6 +73,10 @@ jobs:
                  _site/webgpu/README.md _site/webgpu/SPEC.md _site/webgpu/SPEC3D.md
           # game.html (GAME_PLAN) is local-only until it ships.
           rm -f  _site/webgpu/game.html
+          # music.html + music.js (plans-webgpu/MUSIC_PLAN.md) are a development build:
+          # not linked from any page and not published until Alfred decides to ship it.
+          # Delete these two lines to publish.
+          rm -f  _site/webgpu/music.html _site/webgpu/music.js
           # Fail loudly if the pruning ever eats the site itself.
           for f in index.html rmhd2d.html rmhd3d.html docs.html reading.html \
                    common.js physics.js solver2d.js style.css; do

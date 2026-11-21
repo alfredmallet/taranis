@@ -3613,6 +3613,18 @@ function _forcingRecord(q) {
             + "bounds those presses were made within, not a recipe. The OU shell forcing "
             + "(eps, tau, band) was NOT running." },
       manifestForcing ? manifestForcing() : null);
+  // A solver built to be KICKED (solver2d.js `kick: true` -- music.html, MUSIC_PLAN M2) is
+  // forced by impulses the audio chose, whatever the OU numbers say; the trigger is again
+  // the solver's own flag (`g.kick`: false on rmhd2d.html, absent on the 3D solver, so
+  // both take the OU branch below exactly as before). Without this the record would read
+  // `{"on": false}` for a run that was being driven the whole time.
+  if (solver && solver.g && solver.g.kick)
+    return Object.assign(
+      { on: true, kind: "kick", ou: !!(q.epsP || q.epsM), reproducible: false, kicks: solver.nkicks,
+        note: "impulsive gaussian-blob kicks driven by AUDIO: one kick per onset in a "
+            + "frequency band, at seeded random positions. Not reproducible from these "
+            + "parameters -- the forcing history is the audio that was playing." },
+      manifestForcing ? manifestForcing() : null);
   // eps+- are already 0 while forcing is off (uiEps), so the flag is the checkbox and
   // the band is quoted only where it means something
   return _uiOn("cbForce")
@@ -8521,6 +8533,14 @@ function trackArgmax(e, off, nz, cur) {
 // A fourth, `manifestForcing()`, is declared beside `runManifest` instead -- it is read
 // there and nowhere else, and the manifest section reads better with it in view.
 let frameHook = null, readoutExtra = null, specExtra = null;
+// A fifth, `stepHook(solver)`, is the music page's (MUSIC_PLAN M2) and null everywhere
+// else: called once per frame while running, BEFORE the frame's steps, it does whatever
+// has to precede them (that page's kicks) and returns -- possibly as a promise -- how
+// many steps this frame takes, in place of `stepsPerFrame`. That page's step count is set
+// by the audio clock, an outside reference, and not by how long the last frame took; so
+// the adaptive controller below is left exactly as it is and simply goes unread there.
+// With the hook null the loop is the loop it always was, statement for statement.
+let stepHook = null;
 // Throttle clocks, and beside each the STATE it was last served for: the throttle says
 // "not yet", the marker says "nothing new". A paused page fails the second test, so the
 // spectrum's full extra field pass and the cut line's prep stop being taken 3-10 times a
@@ -8541,7 +8561,12 @@ function cardsThrottleReset() {
 let stateSeq = 0;
 // `rebuild` ends in applyIC -> chartsReset -> stateBumped, so a new solver always moves
 // stateSeq: the pair identifies the state without needing a handle on the solver itself.
-const stateMark = () => (solver ? solver.nsteps + "/" + stateSeq : null);
+// ... and `nkicks` (solver2d.js: a kick changes the fields WITHOUT a step) is the third
+// thing that can move it. It is appended only when non-zero, so on a solver that is never
+// kicked -- every page but music.html, and the 3D solver, which has no such counter -- the
+// mark is the string it always was.
+const stateMark = () => (solver ? solver.nsteps + "/" + stateSeq
+                                  + (solver.nkicks ? "/k" + solver.nkicks : "") : null);
 // The state jumped without a step: an IC upload, a preset, a rebuild. Moving the counter
 // is the whole job -- every consumer (the cards' needsRender, the throttled readbacks,
 // the 3D hooks) is keyed on stateMark() and re-opens on its own.
@@ -8603,6 +8628,11 @@ async function loop() {
       // low-amplitude state: a frozen dt block there collapses and NaNs.
       const ce = solver.nsteps < 200 ? 1 : parseInt(el("rCflEvery").value, 10);
       n = stepsPerFrame;
+      if (stepHook) {
+        const sv = solver;
+        n = await stepHook(sv);
+        if (solver !== sv) continue;          // retired (or rebuilt) while the hook awaited
+      }
       for (let i = 0; i < n; i++) solver.step(ce);
       // nothing to invalidate by hand: nsteps moved, so stateMark() did, and every card
       // and every gated readback below asks that question for itself

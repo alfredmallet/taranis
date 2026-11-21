@@ -255,6 +255,16 @@ else running, plugged in.
 - `style.css` — the shared dark theme.
 - `SPEC.md`, `SPEC3D.md` — the implementation contracts, extracted from the JAX source;
   read these before touching the math.
+- `music.html`, `music.js` — the music page (MUSIC_PLAN M2; see "The music page"): a
+  third page on the shared framework, loading `common.js`, `physics.js`, `solver2d.js`
+  and then `music.js`. `music.js` is PURE — the band plan, the onset detector, the blobs,
+  the click track and the audio clock, with no DOM, Web Audio or WebGPU in it — and the
+  page's inline script is the audio and DOM glue. **A development build**: linked from
+  nowhere, carrying no analytics beacon, and pruned from the deployed site by `pages.yml`
+  until it ships.
+- `gen_musicfixture.py` — records `devtools/fixtures/music_ref.json`, the offline
+  `band_plan`'s and `CausalOnsetDetector`'s own output for `devtools/checkmusic.js`.
+  Pruned from the deployed site with the other `*.py`.
 - `gen_kickfixture.py` — records `devtools/fixtures/kick_offline.json`, the offline
   `make_kick`'s own output for `devtools/checkkick.js` (see "The impulsive kick and the
   drag"). Pruned from the deployed site with the other `*.py`.
@@ -1671,6 +1681,124 @@ analytic form is the fully periodic one, which differ by e^(−(L/2)²/2σ²) of
 3e-9 at σ = 0.5 but 3e-6 at 0.625 (9e-4 on the weakest retained modes). The music map's
 widest blob is 0.45. **Nothing here has run on a real GPU**: the stub records what was
 encoded and the interpreter executes the kernel text.
+
+## The music page (`music.html`; MUSIC_PLAN M2 — a development build, not linked)
+
+Whatever is playing drives a 256² 2D RMHD run: an onset in a frequency band is one
+impulsive kick of gaussian blobs (previous section), and the audio clock sets the
+simulation time. M2 has two sources, the built-in click track and a local audio file;
+tab capture and input devices are M3. It is the live twin of the offline
+`examples/music_turbulence.py`, which stays the reference and the way to make a movie.
+
+**Serve and open** (it loads from `file://` too, but a local server is the tested way):
+
+    cd webgpu && python -m http.server 8766
+    # then http://localhost:8766/music.html            (add ?musicdebug to keep a record)
+
+**What the page fixes** (`uiParams`): N = 256, a 2π box, hyper 2, Pm 1, no equilibrium
+source, **`epsP = epsM = 0`** (no OU forcing — the `Solver` defaults are 0.15), a solver
+built with `kick: true` and `mu = 1/(memory·rate)`, and `diss = 3·amp/(n/6)⁴`, the offline
+rule. The initial condition is rest. Its controls are few: source, Start/Reset, threshold
+(0.3), memory (1 s), amp (1), rate (1), the click track's bpm, and the two CFL knobs the
+shared loop reads. The `Solver`'s drag is set from `memory` in seconds of **audio**, so
+changing `rate` changes μ too.
+
+**`music.js` is the logic, and it is pure.** It names nothing from the DOM, Web Audio,
+WebGPU or the three shared scripts, so node evaluates it on its own — that is how
+`devtools/checkmusic.js` runs it. Every top-level name starts `music` / `Music` /
+`MUSIC_`.
+
+- `musicBandPlan(n, nbands?, sigmaMin?, nblobMax?)` is the offline `band_plan`: widths
+  log-spaced from 0.45 down to 3.7 grid spacings, as many as fit with a factor 1.8 between
+  neighbours (4 at 256²), blob count ∝ 1/σ from 3 in the bass band — 3, 5, 9, 15 at 256².
+  The page passes `KICK_MAX` as `nblobMax`, so a plan one `kick()` cannot hold is refused
+  at boot (n = 1024 would need 59).
+- `MusicDetector` is a line-for-line port of the offline `CausalOnsetDetector` (the
+  per-frame core `detect_onsets_causal` was refactored around for this). `push(mag, tNow)`
+  takes one magnitude spectrum per frame and returns the onsets it can now declare — one
+  frame after their peak, so sound → declaration is half the analysis window plus a frame,
+  **40 ms** at 44.1 kHz / 2048 / 60 Hz. Its sums are taken in numpy's pairwise order and
+  its percentile is numpy's linear one, which is what lets the gate demand the *same*
+  onsets as the python and not merely similar ones.
+- All its windows are counted in **frames at a nominal 60 Hz**, so `musicShouldPush` feeds
+  it at about that rate whatever the display does: every frame at 60 Hz, every other at
+  120. **Below 60 Hz it loses onsets** (M0.b: recall 0.69 at 60 Hz, 0.44 at 30); moving it
+  to an `AudioWorklet` with a fixed hop is the fix if a device needs it.
+- A gap longer than 0.1 s between pushes (a hidden tab) only re-primes the detector: the
+  flux across a gap is the music having moved on, not an onset.
+- `musicKickList` is the list ONE `Solver.kick` takes for one onset: the band's blobs for
+  ζ⁺, then an independent second set for ζ⁻, each of amplitude `amp × strength` with a
+  random sign, at positions from a seeded generator (`MUSIC_SEED`, mulberry32 — not the
+  offline script's numpy stream, so positions differ from the movies').
+- `musicClickTrack` is the built-in source: a kick on every beat, a snare on beats 2 and
+  4, a hat on every off-beat, 16 beats, **looped** — every sound's tail wraps round the
+  end of the buffer, so the loop has no seam. Unlike the offline click track it has no
+  kick-less closing quarter.
+
+**One frame** (`musicStep`, called by the shared loop through `stepHook`):
+
+1. read the analyser (`getFloatFrequencyData`, magnitude = 10^(dB/20)) and push it;
+2. **one `solver.kick()` per onset** — never a merged list: `KICK_MAX` holds one band's
+   blobs, and two onsets in one list could need twice that;
+3. ask `musicClock` how many steps the audio clock wants, and return that.
+
+The loop then takes those steps, renders, and reads the stats back; the next frame's
+count is computed from that readback. Kicks therefore always precede their frame's steps.
+
+**The clock** (`musicClock`, pure). Target simulation time is
+`t0 + rate·(audioT − a0)`; the step count is `ceil((target − simT)/dt)` capped at 64 per
+frame, from the newest `simT` and `dt` a readback has returned. Three things it does that
+the bare formula does not:
+
+- **It never chases.** More than 0.25 s of audio behind (or ahead), a clock that ran
+  backwards, a change of `rate`, a Reset, the first frame after a stop or a long absence:
+  it *rebases* — the anchor moves to now and no step is taken to make up the difference.
+  Falling behind lights the BEHIND indicator for a second.
+- **It does not run ahead in silence.** At rest the CFL dt is its floor, `cfl·dx/0.1` —
+  0.098 at 256², six frames. Rounding up would put the simulation that far ahead of the
+  music, where it must wait; so a step that would overshoot by more than one frame
+  (`maxAhead`) is not taken yet and `n` rounds down instead. (The first step after a
+  start is the one exception: dt is unknown until a step has been made.)
+- **A frame that kicked takes at least one step** if the simulation is behind at all, even
+  where the dt in hand says none fits. That dt is a PRE-kick one (too large — a kick only
+  speeds the flow up), and the solver recomputes dt on that very step (`_cflStale`), so the
+  kicked flow moves at once and the next frame has a dt worth dividing by. Nothing loops
+  on a stale dt: its count can only undershoot, and the next readback corrects it.
+
+**The hook in the shared loop.** `common.js` gained `stepHook(solver)`: null on every other
+page, where the loop is the loop it always was (`n = stepsPerFrame`). When set it is
+awaited once per running frame, before the steps, and returns the count; a solver
+replaced while it awaited gets no step. The adaptive `stepsPerFrame` controller is left
+exactly as it is and simply goes unread on this page — the step count here follows an
+outside reference, which is the thing LOOPLAT_PLAN's post-mortem says every controller
+that failed was missing. `stateMark()` appends `/k<nkicks>` when a solver has been
+kicked, so a kick re-opens the stats cache and the cards' redraw; the string is unchanged
+on a solver that never is. `_forcingRecord` knows a kicked run (`g.kick`), so a saved
+`params.json` says `forcing.kind = "kick"` with the page's settings instead of
+`{"on": false}`.
+
+**`?musicdebug`** keeps a record on `window.musicDebug` for measuring sync and latency in
+a real browser:
+
+- `kicks[]`: `tOnset` (audio s; the analysis-window centre of the peak frame), `tFire`
+  (when the detector declared it), `tApplied` (when `kick()` returned), `band`,
+  `strength`, `used`, `dropped`, and on the click track `sched = {t, kind, dt}`, the
+  nearest scheduled click. Audio times are seconds since the source started.
+- `frames[]`: `a` (audio s), `target`, `simT`, `lag` (seconds of audio; + is behind), `n`,
+  `dt`, `e`, `rebased`, `kicks`, `fresh`.
+- `summary(skip = 5)`: frames, rebases, lag min/mean/max, steps per frame, frames at the
+  cap, and per band the kick count, the mean energy jump, and the latency from the onset
+  and from the scheduled click.
+- `audio`: the context's `sampleRate`, `baseLatency`, `outputLatency`.
+
+**`?musicdebug=energy`** additionally reads the energy back after *every* kick (`eBefore`,
+`eAfter`): that is the only way to get one kick's own energy jump — kick energy enters no
+accumulator — and it costs a GPU round trip per kick, so take the timing numbers without
+it.
+
+**The gate is `devtools/checkmusic.js`.** What it cannot say is listed at the top of that
+file and in MUSIC_PLAN's M2 entry: nothing about a real `AnalyserNode`, audible audio, a
+real frame's lateness, or a GPU.
 
 ## Alfvén-wave collision: directions, placement, χ
 
