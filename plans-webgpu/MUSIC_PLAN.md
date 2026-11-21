@@ -173,6 +173,15 @@ unmodified RMHD), nothing has to be pinned and restored, and `pages.yml`'s stagi
   DelayNode can only delay sound; when the output is already later than the detection,
   the kicks must wait instead. See "Review and fix round", part B.
 
+**After the fix round and k⁸ (19425b7), Alfred on AirPods, tab capture, 2026-11-21: "seems
+good".** His record: `kind "tab"`, `surface "browser"`, `suppressed true`, `played true`,
+`outputLatency 0.168` (`outputLatencyUsedMs 168`), `delayMs 0`, **`holdMs 112.3`**,
+`ldetMs 55.7`, `residualMs 0`, `trimMs 0`, 48000 Hz / nfft 2048; mode line "sound delayed
+0 ms, kicks held 112 ms (output latency 168 ms, detection 56 ms): the tab is silenced and
+the page plays its audio". So the automatic sync took the Bluetooth branch as designed and
+the displaySurface check passes for a Chrome tab. Not yet tried: speakers (the 56 ms delay
+branch), switching output mid-session, whether a trim improves on 0.
+
 ## Review and fix round (2026-11-21, after cc92edd) — committed as f4c92f2
 
 One fresh reviewer read M3/M4 and mutation-tested the gate; Alfred used the page on
