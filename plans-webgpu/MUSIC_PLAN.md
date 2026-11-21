@@ -190,8 +190,8 @@ the Chrome hint ("switch on Also share tab audio"), which does not exist there. 
 video-only capture in a browser that does not list the `suppressLocalAudioPlayback`
 constraint is told to use Chrome or Edge or a file, and the menu entry reads "another
 tab's audio (Chrome / Edge)". The proxy only words the failure; it never refuses a capture
-up front. Safari still shows its share prompt first. Not known: whether the rest of the
-page (WebGPU, file source) works in Safari.
+up front. Safari still shows its share prompt first. The rest of the page works in
+Safari on the Mac (Alfred, same day).
 
 ## Review and fix round (2026-11-21, after cc92edd) — committed as f4c92f2
 
