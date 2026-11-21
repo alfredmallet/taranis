@@ -15,6 +15,7 @@
 //   musicTabConstraints / musicInputConstraints   what a live capture is asked for
 //   musicRouting       which sources the page may play, and so can delay-compensate
 //   musicStartError    what to tell the visitor when a source will not start
+//   musicTabAudioLikely  whether this browser captures tab audio at all (wording only)
 //   musicSync          how long to delay the sound and hold the kicks, from the output latency
 //   MUSIC_CMAPS        the page's two extra colormaps, magma and brat
 //
@@ -547,12 +548,29 @@ function musicRouting(kind, suppressed, surface) {
 // What to tell the visitor when a source will not start. `err` is the rejection (a
 // DOMException: only its name is used), or the string "noaudio" for a capture that came
 // back with no audio track.
-function musicStartError(kind, err) {
+// Does this browser capture a TAB's audio at all? There is no direct test, so this reads a
+// proxy: the engines that deliver tab audio through getDisplayMedia (Chrome, Edge) are the
+// ones that list the `suppressLocalAudioPlayback` constraint; Safari and Firefox hand back
+// a video-only stream and do not list it. Used ONLY to word a failure -- never to refuse a
+// capture up front, so a wrong answer here cannot break a browser that does work.
+function musicTabAudioLikely(md) {
+  try {
+    return !!(md && md.getDisplayMedia && md.getSupportedConstraints
+              && md.getSupportedConstraints().suppressLocalAudioPlayback === true);
+  } catch (e) { return false; }
+}
+
+// `tabAudioLikely` (musicTabAudioLikely) only changes the wording of a tab capture that
+// came back without audio; omitted, it is taken as true (the Chrome wording).
+function musicStartError(kind, err, tabAudioLikely) {
   const name = typeof err === "string" ? err : (err && err.name) || "";
   if (name === "noaudio")
     return kind === "tab"
-      ? "that capture has no audio: pick a Chrome TAB (not a window or a screen) and switch on "
-        + "\"Also share tab audio\" in the picker"
+      ? (tabAudioLikely === false
+         ? "that capture has no audio, and this browser does not seem to capture tab audio at all "
+           + "(Safari and Firefox do not): use Chrome or Edge on a computer, or choose an audio file here"
+         : "that capture has no audio: pick a Chrome TAB (not a window or a screen) and switch on "
+           + "\"Also share tab audio\" in the picker")
       : "that device delivered no audio track";
   if (name === "NotAllowedError" || name === "SecurityError")
     return kind === "tab" ? "the tab capture was cancelled or not allowed"

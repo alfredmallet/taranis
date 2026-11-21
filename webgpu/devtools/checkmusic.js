@@ -126,7 +126,7 @@ function legPure(state) {
   ok("music.js evaluates in a bare context: no DOM, no Web Audio, none of the shared scripts", msg === "", msg);
   const M = state.M = vm.runInContext(`({ musicBandPlan, MusicDetector, musicShouldPush, musicRng, musicBlobsFor,
     musicKickList, musicClickTrack, musicClock, musicNpSum, musicPercentile, MUSIC_LBOX, MUSIC_SIGMA_MAX,
-    musicTabConstraints, musicInputConstraints, musicRouting, musicStartError, MUSIC_SOURCES, MUSIC_TRIM_MAX, MUSIC_LDET, MUSIC_FLUX_FLOOR, MUSIC_PEAK_DECAY, musicSync, musicSyncText, MUSIC_CMAPS,
+    musicTabConstraints, musicInputConstraints, musicRouting, musicStartError, musicTabAudioLikely, MUSIC_SOURCES, MUSIC_TRIM_MAX, MUSIC_LDET, MUSIC_FLUX_FLOOR, MUSIC_PEAK_DECAY, musicSync, musicSyncText, MUSIC_CMAPS,
     MUSIC_SIGMA_MIN_DX, MUSIC_SIGMA_STEP, MUSIC_NBLOB_BASS, MUSIC_NBLOB_MAX })`, ctx);
   const names = [];
   for (const l of src.split("\n")) {
@@ -689,6 +689,22 @@ function legRules(state) {
      /not available/.test(E("input", "NotFoundError")) && /not available/.test(E("input", "OverconstrainedError")) &&
      /could not be opened/.test(E("input", "NotReadableError")) && /getDisplayMedia is missing/.test(E("tab", "unsupported")) &&
      /getUserMedia is missing/.test(E("input", "unsupported")));
+  // Safari / Firefox: a tab capture comes back video-only. The wording follows the proxy,
+  // and only the wording: omitted or true it is the Chrome hint, false it names the browser
+  const TL = M.musicTabAudioLikely;
+  ok("musicTabAudioLikely: true only with getDisplayMedia AND the suppressLocalAudioPlayback constraint listed; a throwing or missing API is false",
+     TL({ getDisplayMedia() {}, getSupportedConstraints: () => ({ suppressLocalAudioPlayback: true }) }) === true &&
+     TL({ getDisplayMedia() {}, getSupportedConstraints: () => ({}) }) === false &&
+     TL({ getDisplayMedia() {}, getSupportedConstraints: () => ({ suppressLocalAudioPlayback: "yes" }) }) === false &&
+     TL({ getSupportedConstraints: () => ({ suppressLocalAudioPlayback: true }) }) === false &&
+     TL({ getDisplayMedia() {} }) === false && TL(null) === false &&
+     TL({ getDisplayMedia() {}, getSupportedConstraints() { throw new Error("x"); } }) === false);
+  ok("a tab capture with no audio: the Chrome hint by default and when tab audio is likely, the browser named when it is not; an input device's message does not change",
+     /Also share tab audio/.test(M.musicStartError("tab", "noaudio")) && /Also share tab audio/.test(M.musicStartError("tab", "noaudio", true)) &&
+     /Safari and Firefox do not/.test(M.musicStartError("tab", "noaudio", false)) && /Chrome or Edge/.test(M.musicStartError("tab", "noaudio", false)) &&
+     !/Also share tab audio/.test(M.musicStartError("tab", "noaudio", false)) &&
+     M.musicStartError("input", "noaudio", false) === M.musicStartError("input", "noaudio") &&
+     M.musicStartError("tab", { name: "NotAllowedError" }, false) === M.musicStartError("tab", { name: "NotAllowedError" }));
   ok("  ... and anything else is reported by name, never swallowed", /\(TypeError\)/.test(E("tab", "TypeError")) &&
      /could not start/.test(M.musicStartError("input", null)) && /could not start/.test(M.musicStartError("tab", {})));
   // the detector on a stream joined mid-way: no burst while its normalisation has little history
@@ -922,8 +938,10 @@ function fakeMedia(A, samples) {
   };
   M.nextDisplay = () => M.stream({ audio: { suppressLocalAudioPlayback: true }, video: true, label: "tab: a web player" });
   M.nextUser = c => M.stream({ audio: { deviceId: c.audio.deviceId ? c.audio.deviceId.exact : "default" }, label: "BlackHole 2ch" });
+  M.supported = { suppressLocalAudioPlayback: true };   // a Chromium: it lists the constraint
   M.api = {
     ondevicechange: null,
+    getSupportedConstraints: () => M.supported,
     getDisplayMedia: async c => { M.display.push(c); if (M.displayHold) await M.displayHold; if (M.displayError) throw M.displayError; return M.last = M.nextDisplay(c); },
     getUserMedia: async c => { M.user.push(c); if (M.userError) throw M.userError; M.labels = true; return M.last = M.nextUser(c); },
     enumerateDevices: async () => { M.enumerations++; return M.devices.map(d => ({ kind: d.kind, deviceId: d.deviceId, label: M.labels ? d.label : "" })); }
@@ -1559,6 +1577,17 @@ async function legLive(state) {
     ok("  ... Stop stops BOTH tracks of the capture", FM.last.getTracks().every(t => t.stops === 1 && t.readyState === "ended") && st().run === false);
   }
   FM.nextDisplay = () => FM.stream({ audio: { suppressLocalAudioPlayback: true }, video: true, label: "tab: a web player" });
+
+  // ---- a browser that does not capture tab audio at all (Safari, Firefox) --------------
+  // the capture comes back video-only AND the constraint is not listed: the message names
+  // the browser rather than sending the visitor to a toggle that does not exist there
+  FM.supported = {};
+  FM.nextDisplay = () => FM.stream({ audio: false, video: true });
+  await P.click("btnRun");
+  ok("a video-only capture in a browser that does not list suppressLocalAudioPlayback: nothing starts, and the message says to use Chrome or Edge or a file (not the picker toggle)",
+     st().run === false && /Safari and Firefox do not/.test(st().status) && /Chrome or Edge/.test(st().status) &&
+     !/Also share tab audio/.test(st().status) && FM.last.tracks.every(t => t.readyState === "ended"), st().status);
+  FM.supported = { suppressLocalAudioPlayback: true };
 
   // ---- a capture with NO audio track ---------------------------------------------------
   FM.nextDisplay = () => FM.stream({ audio: false, video: true });

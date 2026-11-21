@@ -184,6 +184,15 @@ the page plays its audio". So the automatic sync took the Bluetooth branch as de
 the displaySurface check passes for a Chrome tab. Not yet tried: speakers (the 56 ms delay
 branch), switching output mid-session, whether a trim improves on 0.
 
+**Safari (Alfred, 2026-11-21): tab share does not work** — as expected, Safari's
+`getDisplayMedia` returns no audio track (Firefox likewise). The page used to answer with
+the Chrome hint ("switch on Also share tab audio"), which does not exist there. Now a
+video-only capture in a browser that does not list the `suppressLocalAudioPlayback`
+constraint is told to use Chrome or Edge or a file, and the menu entry reads "another
+tab's audio (Chrome / Edge)". The proxy only words the failure; it never refuses a capture
+up front. Safari still shows its share prompt first. Not known: whether the rest of the
+page (WebGPU, file source) works in Safari.
+
 ## Review and fix round (2026-11-21, after cc92edd) — committed as f4c92f2
 
 One fresh reviewer read M3/M4 and mutation-tested the gate; Alfred used the page on
