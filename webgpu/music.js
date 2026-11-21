@@ -15,6 +15,8 @@
 //   musicTabConstraints / musicInputConstraints   what a live capture is asked for
 //   musicRouting       which sources the page may play, and so can delay-compensate
 //   musicStartError    what to tell the visitor when a source will not start
+//   musicSync          how long to delay the sound and hold the kicks, from the output latency
+//   MUSIC_CMAPS        the page's two extra colormaps, magma and brat
 //
 // It is the browser twin of examples/music_turbulence.py, the offline reference
 // (which made the movies this page is judged against):
@@ -132,6 +134,16 @@ function musicPercentile(a, lo, hi, q) {
 // about that rate (musicShouldPush). A gap longer than gapS -- a hidden tab, a seek --
 // only re-primes the previous spectrum: the flux across a gap is the music having moved
 // on, not an onset.
+//
+// `fluxFloor` (0 = off, the offline default; the page uses MUSIC_FLUX_FLOOR) is the noise
+// floor: a band's normaliser is held at no less than fluxFloor times a peak-hold of that
+// band's own flux, decaying over peakDecayS. Measured on a rock track followed by noise
+// (4 bands, threshold 0.3): without it, noise 40-90 dB below the music gives ~9 onsets a
+// second at strength 0.9, whatever its level; with 0.3 over 30 s, none at -60 dB and below
+// and 5 a second at -40 dB, at the cost of 0.1% of the music's own onsets. What it cannot
+// do: a source that is noise from its first sample has no louder past to be measured
+// against (a microphone in a quiet room still kicks), and after a loud passage onsets
+// weaker than fluxFloor of it are missed until the peak-hold has decayed.
 class MusicDetector {
   constructor(o) {
     o = o || {};
@@ -167,6 +179,14 @@ class MusicDetector {
     this.nmean = Math.max(1, Math.round(def(o.meanS, 0.20) * this.fps));
     this.nnorm = Math.max(1, Math.round(def(o.normS, 20) * this.fps));
     this.decay = Math.exp(-1 / (def(o.refDecayS, 30) * this.fps));
+    // the noise floor (flux_floor in the python; 0 = off, and then nothing differs): each
+    // band keeps a slow peak-hold of its own raw flux, decaying over peakDecayS, and its
+    // normaliser is never allowed below fluxFloor times that. Without it the running 99th
+    // percentile promotes ANY non-zero floor to full strength once the music stops.
+    this.fluxFloor = def(o.fluxFloor, 0);
+    this.pdecay = Math.exp(-1 / (def(o.peakDecayS, 30) * this.fps));
+    if (!(this.fluxFloor >= 0) || !(this.pdecay > 0))
+      throw new Error("MusicDetector: bad configuration (fluxFloor " + o.fluxFloor + ", peakDecayS " + o.peakDecayS + ")");
     this.reset();
   }
   reset() {
@@ -176,6 +196,7 @@ class MusicDetector {
     this.hist = [];
     for (let b = 0; b < this.nbands; b++) this.hist.push([]);
     this.lastFire = new Array(this.nbands).fill(-Infinity);
+    this.peak = new Array(this.nbands).fill(0);
     this.flux = null;
   }
   push(mag, tNow) {
@@ -198,11 +219,13 @@ class MusicDetector {
     for (let b = 0; b < this.nbands; b++) {
       const h = this.hist[b];
       h.push(musicNpSum(flux, this.bins[b][0], this.bins[b][1]));
+      if (this.fluxFloor > 0) this.peak[b] = Math.max(this.peak[b] * this.pdecay, h[h.length - 1]);
       // only the last nnorm values are ever read (and nmean + 1 < nnorm of them twice)
       if (h.length > 2 * this.nnorm + 8) h.splice(0, h.length - this.nnorm - 4);
       const L = h.length;
       if (L < 3 || tNow < this.warmupS) continue;
-      const q = musicPercentile(h, Math.max(0, L - this.nnorm), L, 99) + 1e-30;
+      let q = musicPercentile(h, Math.max(0, L - this.nnorm), L, 99) + 1e-30;
+      if (this.fluxFloor > 0) q = Math.max(q, this.fluxFloor * this.peak[b]);
       const s0 = h[L - 3] / q, s1 = h[L - 2] / q, s2 = h[L - 1] / q;   // s1 is the candidate
       const m0 = Math.max(0, L - 1 - this.nmean);
       const mean = musicNpSum(h, m0, L - 1) / (L - 1 - m0) / q;         // trailing, ends at it
@@ -360,28 +383,37 @@ function musicClickTrack(o) {
 // dt is whatever the last readback said, and after a kick that is a PRE-kick dt -- too
 // LARGE, since a kick only speeds the flow up. Nothing here loops on it: the count it gives
 // is taken (it can only undershoot), and the next frame's readback corrects it. The one
-// thing a kick does change: on a frame that kicked (`inp.kicked`), if the simulation is
-// behind the clock at all, at least ONE step is taken even where the stale dt says none
-// fits -- the solver computes that step's dt afresh, so it moves the kicked flow at once
-// and gives the next frame a dt worth dividing by. Rebase (never catch up) when the simulation is more than lagMax seconds of audio
-// away from the clock in either direction, when the clock runs backwards, when `rate`
-// changes, on the first frame after a stop, and after more than lagMax with no frame at
-// all (a hidden tab). Only the first of those is "behind".
+// thing a kick does change: a frame that kicked (`inp.kicked`) takes at least ONE step,
+// even where the stale dt says none fits and even when the simulation is ahead -- the
+// solver computes that step's dt afresh, so it is a small one, it moves the kicked flow at
+// once and it gives the next frame a dt worth dividing by. Rebase (never catch up) when
+// the simulation is more than lagMax seconds of audio behind the clock (or lagMax plus one
+// step ahead of it), when the clock runs backwards, when `rate` changes, on the first
+// frame after a stop, and when the caller says the page was hidden (`inp.resumed`). Only
+// the first of those is "behind". The hold-back above is itself bounded: see the code.
 function musicClock(st, inp) {
-  const res = { n: 0, target: inp.simT, lag: 0, rebased: false, behind: false };
+  const res = { n: 0, target: inp.simT, lag: 0, rebased: false, behind: false, resumed: false };
   if (!inp.running || !isFinite(inp.audioT) || !isFinite(inp.simT) || !(inp.rate > 0)) {
     st.init = false;
     return res;
   }
   const lagMax = inp.lagMax === undefined ? 0.25 : inp.lagMax;
   const hold = inp.behindHold === undefined ? 1 : inp.behindHold;
+  const dtOk = inp.dt > 0 && isFinite(inp.dt);
   const rebase = () => { st.t0 = inp.simT; st.a0 = inp.audioT; st.rate = inp.rate; st.init = true; res.rebased = true; };
-  // (the last clause: no frame at all for longer than lagMax -- a hidden tab -- is an absence,
-  // not a failure to keep up, so it re-anchors here, before the lag test could call it one)
-  if (!st.init || !(inp.audioT >= st.lastA) || st.rate !== inp.rate || inp.audioT - st.lastA > lagMax) rebase();
+  // `inp.resumed`: the page was HIDDEN since the last frame (the caller knows from the
+  // document's visibility, which is the only honest source -- a long gap between frames on
+  // a visible page is a device that cannot keep up, and must not be excused as an absence)
+  if (inp.resumed) res.resumed = true;
+  if (!st.init || !(inp.audioT >= st.lastA) || st.rate !== inp.rate || inp.resumed) rebase();
   st.lastA = inp.audioT;
   let target = st.t0 + inp.rate * (inp.audioT - st.a0), lag = (target - inp.simT) / inp.rate;
-  if (Math.abs(lag) > lagMax) {
+  // behind by more than lagMax: rebase, and say so. AHEAD is allowed one whole step more
+  // than lagMax, because a single step at the quiescent dt (0.098 at 256^2) is by itself
+  // more than lagMax of audio once rate < 0.39 -- and being one step ahead in silence is
+  // the clock working, not failing.
+  const aheadMax = lagMax + (dtOk ? inp.dt / inp.rate : 0);
+  if (lag > lagMax || lag < -aheadMax) {
     if (lag > 0) st.behindUntil = inp.audioT + hold;      // fell behind, as opposed to ran ahead
     rebase();
     target = inp.simT; lag = 0;
@@ -389,15 +421,69 @@ function musicClock(st, inp) {
   res.target = target; res.lag = lag;
   res.behind = st.behindUntil !== undefined && inp.audioT < st.behindUntil;
   const gap = target - inp.simT;
-  if (!(gap > 0)) return res;
   const maxSteps = inp.maxSteps === undefined ? 64 : inp.maxSteps;
-  if (!(inp.dt > 0) || !isFinite(inp.dt)) { res.n = Math.min(1, maxSteps); return res; }   // dt not known yet
+  // a frame that kicked always takes a step, behind the clock or not: its dt is recomputed
+  // by the solver from the kicked state, so it is a small one, and the flow moves at once
+  if (!(gap > 0)) { res.n = inp.kicked ? Math.min(1, maxSteps) : 0; return res; }
+  if (!dtOk) { res.n = Math.min(1, maxSteps); return res; }   // dt not known yet
   const maxAhead = inp.maxAhead === undefined ? Infinity : inp.maxAhead;   // default: always round up
   let n = Math.ceil(gap / inp.dt);
-  if (n * inp.dt - gap > maxAhead) n = Math.floor(gap / inp.dt);
+  // the hold-back, and its BOUND: a step that would overshoot by more than maxAhead waits --
+  // but only while the simulation is less than half of lagMax behind. Past that it is
+  // taken: otherwise, at a low rate, the wait for a step to "fit" outlasts lagMax and the
+  // clock would rebase for ever without stepping (rate 0.35: one step in ten seconds).
+  if (n * inp.dt - gap > maxAhead && gap < 0.5 * lagMax * inp.rate) n = Math.floor(gap / inp.dt);
   if (inp.kicked && n < 1) n = 1;
   res.n = Math.max(0, Math.min(maxSteps, n));
   return res;
+}
+
+// ---------------------------------------------------------------------------
+// sync: where the sound and the picture are each held back (fix round, 2026-11-21)
+// ---------------------------------------------------------------------------
+// Two delays the page did not choose stand between a hit and the visitor:
+//   Ldet  detection: a kick is on screen this long after the hit entered the analyser --
+//         half the analysis window + one frame to see the peak + one frame to draw it.
+//         Measured in Chrome on the M1: 0.039 s to kick() returning, plus a frame.
+//   Lout  the audio output: the sound leaves the speaker this long after the page handed
+//         it over. AudioContext.outputLatency: ~0 on a laptop's speakers, 0.168 s measured
+//         on Bluetooth earphones.
+// and two it can add:
+//   D     a delay on the SOUND (a DelayNode), only where the page is the one playing it
+//   H     a hold-back on the KICKS (they wait in a queue), always possible
+// A hit entering the analyser at time 0 is HEARD at D + Lout and SEEN at Ldet + H. With
+//   v = Lout - Ldet + trim        (trim > 0: the picture later, trim < 0: the sound later)
+// the picture is `trim` after the sound when  H - D = v,  so: v >= 0 -> hold the kicks
+// (H = v, D = 0); v < 0 -> delay the sound (D = -v, H = 0) where that is possible.
+//   page plays it (click, file, a silenced tab)   both sides available, as above
+//   a tab the page does not play                  the tab is heard through the SAME output,
+//                                                 undelayed: H = max(0, v), D unavailable
+//   an input device                               the sound is already in the room: Lout
+//                                                 does not apply, v = -Ldet + trim
+// `residual` is what is left over: (seen - heard) - trim, i.e. 0 when the sync is exact
+// and +x when the picture is still x seconds late because the sound could not be delayed.
+// D is capped at maxD (the DelayNode's length) and H at maxH.
+const MUSIC_LDET = 0.039 + 1 / 60;
+function musicSync(o) {
+  const num = v => (typeof v === "number" && isFinite(v) ? v : 0);
+  const ldet = o.ldet === undefined ? MUSIC_LDET : o.ldet, trim = num(o.trimMs) / 1000;
+  const maxD = o.maxD === undefined ? 1 : o.maxD, maxH = o.maxH === undefined ? 1 : o.maxH;
+  // an input device's sound never passes through this machine's output
+  const lout = o.kind === "input" ? 0 : Math.max(0, num(o.outputLatency));
+  const v = lout - ldet + trim;
+  let D = 0, H = 0;
+  if (v >= 0) H = Math.min(maxH, v);
+  else if (o.play) D = Math.min(maxD, -v);
+  return { D: D, H: H, lout: lout, ldet: ldet, trim: trim, canDelay: !!o.play, residual: (ldet + H) - (D + lout) - trim };
+}
+// the mode line, from a sync result and the routing's sentence
+function musicSyncText(sy, why) {
+  const ms = x => (1000 * x).toFixed(0) + " ms";
+  let t = (sy.canDelay ? "sound delayed " + ms(sy.D) + ", " : "") + "kicks held " + ms(sy.H)
+        + " (output latency " + ms(sy.lout) + ", detection " + ms(sy.ldet)
+        + (sy.trim ? ", trim " + (sy.trim > 0 ? "+" : "") + ms(sy.trim) : "") + ")";
+  if (sy.residual > 0.0005) t += " -- the picture still runs " + ms(sy.residual) + " after the sound";
+  return t + ": " + why;
 }
 
 // ---------------------------------------------------------------------------
@@ -407,8 +493,10 @@ function musicClock(st, inp) {
 // itself; `tab` is another tab's audio (getDisplayMedia); `input` is an audio input device
 // -- a loopback driver, or a microphone (getUserMedia).
 const MUSIC_SOURCES = ["click", "file", "tab", "input"];
-// the default sound delay, and the slider's range, in milliseconds
-const MUSIC_DELAY_DEFAULT = 50, MUSIC_DELAY_MAX = 150;
+// the sync TRIM the visitor may add to the automatic value, in milliseconds either way
+const MUSIC_TRIM_MAX = 150;
+// the page's noise floor (MusicDetector fluxFloor / peakDecayS)
+const MUSIC_FLUX_FLOOR = 0.3, MUSIC_PEAK_DECAY = 120;
 
 // What getDisplayMedia is asked for. A video track is MANDATORY in the request (Chrome
 // rejects audio-only display capture); it is asked for as small and slow as the API lets
@@ -420,7 +508,9 @@ const MUSIC_DELAY_DEFAULT = 50, MUSIC_DELAY_MAX = 150;
 function musicTabConstraints() {
   return { video: { frameRate: 1, width: 64, height: 64 },
            audio: { suppressLocalAudioPlayback: true, echoCancellation: false, noiseSuppression: false,
-                    autoGainControl: false } };
+                    autoGainControl: false },
+           // a TAB's audio only: the whole system's would include this page's own output
+           systemAudio: "exclude" };
 }
 // What getUserMedia is asked for: raw audio from one device (or the default one).
 function musicInputConstraints(deviceId) {
@@ -428,28 +518,30 @@ function musicInputConstraints(deviceId) {
   if (deviceId) a.deviceId = { exact: deviceId };
   return { audio: a };
 }
-// May the page send this source to the speakers -- and so delay it, which is the whole of
-// the latency compensation? `suppressed` is what the capture's audio track REPORTS for
-// suppressLocalAudioPlayback (true / false / undefined).
+// May the page send this source to the speakers -- which is what makes delaying the SOUND
+// possible at all? `suppressed` is what the capture's audio track REPORTS for
+// suppressLocalAudioPlayback, `surface` what its video track reports for displaySurface.
 //   click, file  the page is the only player: yes
-//   tab          only if the tab itself was silenced; otherwise the visitor already hears
-//                it, undelayed, and a second copy from the page would be an echo
+//   tab          only if the capture really is a browser TAB (surface === "browser") and
+//                the tab itself was silenced (suppressed === true); otherwise the visitor
+//                already hears it, undelayed, and a second copy from the page is an echo
 //   input        NEVER: a microphone routed to the speakers feeds back, and a loopback
 //                device is already being heard
 // Returns { play, compensated, why }: `why` is the sentence the page shows.
-function musicRouting(kind, suppressed) {
+function musicRouting(kind, suppressed, surface) {
   if (kind === "click" || kind === "file")
-    return { play: true, compensated: true, why: "the page plays this source, delayed" };
+    return { play: true, compensated: true, why: "the page plays this source" };
   if (kind === "tab") {
+    if (surface !== "browser")
+      return { play: false, compensated: false,
+               why: "that capture is not a browser tab, so the page analyses it and does not play it" };
     if (suppressed === true)
-      return { play: true, compensated: true, why: "the tab is silenced and the page plays its audio, delayed" };
+      return { play: true, compensated: true, why: "the tab is silenced and the page plays its audio" };
     return { play: false, compensated: false,
-             why: "this browser did not silence the captured tab, so the page does not play it too: "
-                + "the picture runs about 40 ms after the sound" };
+             why: "this browser did not silence the captured tab, so the page does not play it too" };
   }
   if (kind === "input")
-    return { play: false, compensated: false,
-             why: "an input device is never played back: the picture runs about 40 ms after the sound" };
+    return { play: false, compensated: false, why: "an input device is never played back" };
   throw new Error("musicRouting: unknown source " + kind);
 }
 // What to tell the visitor when a source will not start. `err` is the rejection (a
@@ -474,3 +566,34 @@ function musicStartError(kind, err) {
                           : "this browser cannot open an audio input (getUserMedia is missing)";
   return "could not start the " + (kind === "tab" ? "tab capture" : "audio input") + (name ? " (" + name + ")" : "");
 }
+
+// ---------------------------------------------------------------------------
+// the music page's two extra colormaps (fix round)
+// ---------------------------------------------------------------------------
+// In the form every colormap of the demo takes -- a degree-6 polynomial per channel, low
+// order first, Horner then clamp (physics.js cpoly6, common.js cmapRGB) -- and registered
+// by the page through common.js's cmapExtend, so they exist on that page only: the shared
+// table, the other pages' menus and their emitted WGSL are untouched.
+//   magma  matplotlib's, the map of the offline |u| movies: a least-squares fit to its
+//          256-point table, max channel error 0.0226 (gen_musiccmap.py prints these rows)
+//   brat   black -> #8ACE00, linear, EXACT in this form: rgb = t * (138, 206, 0) / 255
+const MUSIC_CMAPS = [
+  { name: "magma", coef: [
+      [-0.002067, -0.000688, -0.009548],
+      [0.250486, 0.694455, 2.495287],
+      [8.345901, -3.596031, 0.329057],
+      [-27.666969, 14.253853, -13.646583],
+      [52.170684, -27.944584, 12.881091],
+      [-50.758572, 29.053880, 4.269936],
+      [18.664253, -11.490027, -5.570769]
+    ] },
+  { name: "brat", coef: [
+      [0.000000, 0.000000, 0.000000],
+      [0.541176, 0.807843, 0.000000],
+      [0.000000, 0.000000, 0.000000],
+      [0.000000, 0.000000, 0.000000],
+      [0.000000, 0.000000, 0.000000],
+      [0.000000, 0.000000, 0.000000],
+      [0.000000, 0.000000, 0.000000]
+    ] }
+];

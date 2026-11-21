@@ -1036,6 +1036,17 @@ fn cmap(x: f32, which: u32) -> vec3<f32> {
                    clamp(2.0 * t - 0.5, 0.0, 1.0),
                    clamp(2.0 * t - 1.0, 0.0, 1.0));
 }`;
+// The colormap text a page's colorize kernel gets. With no extra maps registered (every
+// page but music.html) it IS CMAP_WGSL, so nothing emitted moves. With some, each becomes
+// one more `if (which == Nu)` in front of the grayscale test, in the same cpoly6 form.
+function cmapWGSL() {
+  if (!CMAP_EXTRA.length) return CMAP_WGSL;
+  const mark = "  if (which == 3u) { return vec3<f32>(t, t, t); }";
+  if (CMAP_WGSL.split(mark).length !== 2) throw new Error("cmapWGSL: the grayscale line moved");
+  const extra = CMAP_EXTRA.map((m, i) => "  if (which == " + (CMAP_NAMES.length + i) + "u) {                       // "
+    + m.name + " (page-registered)\n    return cpoly6(t, " + m.coef.map(_cvec).join(",\n                 ") + ");\n  }\n").join("");
+  return CMAP_WGSL.replace(mark, extra + mark);
+}
 
 // ---------------------------------------------------------------------------
 // display shading: value -> colour, and the contour overlay. ONE implementation
@@ -1164,7 +1175,7 @@ ${MODE_STRUCT}
 @group(0) @binding(5) var<storage, read> cd: array<f32>;
 @group(0) @binding(6) var<storage, read> cp2: array<f32>;
 @group(0) @binding(7) var<storage, read> cd2: array<f32>;
-${CMAP_WGSL}
+${cmapWGSL()}
 ${dispShade(C)}
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {

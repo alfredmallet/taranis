@@ -265,6 +265,9 @@ else running, plugged in.
 - `gen_musicfixture.py` — records `devtools/fixtures/music_ref.json`, the offline
   `band_plan`'s and `CausalOnsetDetector`'s own output for `devtools/checkmusic.js`.
   Pruned from the deployed site with the other `*.py`.
+- `gen_musiccmap.py` — fits the music page's `magma` to matplotlib's table and writes
+  `devtools/fixtures/music_cmap.json` (the table, the coefficients, the fit error) for
+  `devtools/checkmusic.js`; `brat` is exact. Pruned from the deployed site like the others.
 - `gen_kickfixture.py` — records `devtools/fixtures/kick_offline.json`, the offline
   `make_kick`'s own output for `devtools/checkkick.js` (see "The impulsive kick and the
   drag"). Pruned from the deployed site with the other `*.py`.
@@ -1699,7 +1702,7 @@ tab's audio, and an audio input device. It is the live twin of the offline
 source, **`epsP = epsM = 0`** (no OU forcing — the `Solver` defaults are 0.15), a solver
 built with `kick: true` and `mu = 1/(memory·rate)`, and `diss = 3·amp/(n/6)⁴`, the offline
 rule. The initial condition is rest. Its controls are few: source, Start/Reset, threshold
-(0.3), memory (1 s), amp (1), rate (1), the click track's bpm, the sound delay (50 ms), the
+(0.3), memory (1 s), amp (1), rate (1), the click track's bpm, the sync trim (0), the
 input device, and the two CFL knobs the
 shared loop reads. The `Solver`'s drag is set from `memory` in seconds of **audio**, so
 changing `rate` changes μ too.
@@ -1755,12 +1758,16 @@ the bare formula does not:
   backwards, a change of `rate`, a Reset, the first frame after a stop or a long absence:
   it *rebases* — the anchor moves to now and no step is taken to make up the difference.
   Falling behind lights the BEHIND indicator for a second.
-- **It does not run ahead in silence.** At rest the CFL dt is its floor, `cfl·dx/0.1` —
-  0.098 at 256², six frames. Rounding up would put the simulation that far ahead of the
-  music, where it must wait; so a step that would overshoot by more than one frame
-  (`maxAhead`) is not taken yet and `n` rounds down instead. (The first step after a
+- **It does not run ahead in silence — within a bound.** At rest the CFL dt is its floor,
+  `cfl·dx/0.1` — 0.098 at 256², six frames. Rounding up would put the simulation that far
+  ahead of the music, where it must wait; so a step that would overshoot by more than one
+  frame (`maxAhead`) is not taken yet and `n` rounds down instead — but only while the
+  simulation is less than half of `lagMax` behind. Past that the step is taken (and being
+  one step ahead is allowed: the ahead-rebase threshold is `lagMax` plus one step).
+  Without the bound, at `rate` < 0.37 the wait outlasted `lagMax` and the clock rebased
+  for ever without stepping. (The first step after a
   start is the one exception: dt is unknown until a step has been made.)
-- **A frame that kicked takes at least one step** if the simulation is behind at all, even
+- **A frame that kicked takes at least one step**, behind the clock or not, even
   where the dt in hand says none fits. That dt is a PRE-kick one (too large — a kick only
   speeds the flow up), and the solver recomputes dt on that very step (`_cflStale`), so the
   kicked flow moves at once and the next frame has a dt worth dividing by. Nothing loops
@@ -1788,17 +1795,44 @@ same graph round whatever it returns):
 | another tab's audio | `getDisplayMedia(musicTabConstraints())` | only if the track reports the tab silenced |
 | audio input device | `getUserMedia(musicInputConstraints(deviceId))` | **never** |
 
-- **The graph, and the latency compensation (M4).** `source → analyser` always, and the
-  analyser is a dead end: the detector reads the signal UNDELAYED. Where the page may play
-  the source there is a second branch, `source → DelayNode → speakers` — the only place in
-  the page anything is connected to `ctx.destination`. The detector knows about a hit
-  ~40 ms after it sounds, so holding the *sound* back by the slider's delay (default
-  50 ms, 0–150) puts the kick on screen when the hit is heard. `musicRouting(kind,
-  suppressed)` is the rule, as data, and its sentence is the mode line under the sliders:
-  "latency compensated (sound delayed 50 ms): …" or "NOT latency compensated: …".
-- **A tab is played only if the browser silenced it.** The capture asks for
-  `suppressLocalAudioPlayback: true`; whether that took effect is read back off the audio
-  track's `getSettings()` and must be exactly `true`. If it is not, the visitor is already
+- **The graph.** `source → analyser` always, and the analyser is a dead end: the detector
+  reads the signal UNDELAYED. Where the page may play the source there is a second
+  branch, `source → DelayNode → speakers` — the only place in the page anything is
+  connected to `ctx.destination`. `musicRouting(kind, suppressed, surface)` is the rule
+  for who may be played, as data.
+- **Sync is automatic, from the audio output's latency** (`musicSync`, fix round). Two
+  delays stand between a hit and the visitor that the page did not choose: the detection
+  latency `MUSIC_LDET` (39 ms measured from onset to `kick()`, plus a frame: 56 ms) and
+  the output latency `AudioContext.outputLatency` (≈ 0 on a laptop's speakers; **0.168 s
+  measured on Bluetooth earphones**). And two it can add: a delay D on the *sound* (the
+  DelayNode, only where the page plays the source) and a hold-back H on the *kicks* (they
+  wait in `music.queue`). A hit is heard at D + Lout and seen at Ldet + H, so with
+  `v = Lout − Ldet + trim`: v ≥ 0 → hold the kicks (H = v, D = 0); v < 0 → delay the
+  sound (D = −v, H = 0). On speakers that is "sound delayed 56 ms, kicks held 0 ms"; on
+  those earphones "sound delayed 0 ms, kicks held 112 ms". A tab the page does not play is
+  heard through the same output undelayed, so only H is available (`max(0, v)`); an input
+  device's sound is already in the room, so Lout does not apply and the picture runs Ldet
+  late. The mode line under the sliders states what is in force, with the output latency
+  it was computed from, and says by how much the picture still trails where the sound
+  could not be delayed.
+- **The kick queue.** Every onset is queued with a due time (declared + the H then in
+  force) and kicks on the first frame at or after it — still one `kick()` per onset, still
+  before that frame's steps, in the order declared (the head of the queue first, so a
+  shrinking H cannot reorder them). Stop, a change of source, Reset and the return from a
+  hidden tab empty it; a rebase for falling behind does not (due times are audio times).
+  **The clock's target is not shifted**: simulation time's origin is arbitrary, and a
+  constant offset in audio time changes nothing about the tracking — only *when* a kick is
+  applied moved.
+- **The output latency is re-read once a second** (earphones can connect mid-session): D
+  moves by `setTargetAtTime` (a jump in a delay line clicks), H applies to onsets declared
+  from then on. A value the browser does not report (undefined, NaN) is taken as 0.
+- **The slider is a "sync trim"**, ±150 ms around the automatic value: positive makes the
+  picture later, negative the sound later; it comes off whichever side is in force and
+  spills to the other.
+- **A tab is played only if it is a tab, and the browser silenced it.** The capture asks
+  for `suppressLocalAudioPlayback: true` and `systemAudio: "exclude"`; the page plays it
+  only if the VIDEO track's `getSettings().displaySurface` is `"browser"` and the audio
+  track's `suppressLocalAudioPlayback` is exactly `true`. If it is not, the visitor is already
   hearing the tab, undelayed, and a second copy from the page would be an echo — so the
   page does not play it, runs uncompensated, and says so.
 - **An input device is never routed to the speakers** — a microphone would feed back, and
@@ -1832,9 +1866,40 @@ same graph round whatever it returns):
   successful Start, after which the list is re-read; a `devicechange` re-reads it too.
 - **The sample rate is the context's** — 44.1 or 48 kHz, whatever the machine runs at; a
   stream is resampled into it. The detector's bands and windows are built from it.
-- **Known limit, not built:** with a microphone in a quiet room the detector's reference
-  decays toward the noise floor and the noise itself starts to count as onsets. A floor on
-  the reference would fix it; it needs adding to the python class too, so it was left.
+- **The noise floor** (fix round). The detector's running 99th-percentile normaliser
+  promotes ANY non-zero floor to full strength once the music stops — measured: noise
+  40–90 dB below a rock track gives ~9 onsets a second at strength 0.9, whatever its level,
+  for every source. The page therefore runs the detector with `fluxFloor` 0.3 over a 120 s
+  peak-hold (`MUSIC_FLUX_FLOOR`, `MUSIC_PEAK_DECAY`): a band's normaliser is never below
+  0.3 of the largest flux that band carried recently. Measured with a 30 s hold: no onsets
+  from noise at −60 dB and below, 5 a second at −40 dB (against 9), and 0.1% of the music's
+  own onsets lost. **Its failure modes**: a source that is noise from its first sample has
+  no louder past to be measured against (a microphone in a quiet room still kicks); and
+  for up to a couple of minutes after a loud passage, onsets weaker than 0.3 of it are
+  missed. It is an OPTION of the python `CausalOnsetDetector` (`flux_floor`, off by
+  default, so `detect_onsets_causal` is bitwise what it was) and of `MusicDetector`.
+- **Starting and stopping** are one state machine (`music.starting`, `music.gen`): `starting`
+  stays true across every await of `musicStart` — the picker, the decode, `ctx.resume()` —
+  and the generation is re-checked after the last one, so a second click or a change of
+  source in any of those windows cannot orphan a source. Anything thrown after a capture
+  was granted stops its tracks. Stop and Start both reset the clock state, so a BEHIND
+  indicator cannot outlive its session. The run button reads **Start / Stop**: it is a
+  full stop (a file starts again from the top), not a pause.
+- **Hidden is what the document says, not what the frame gap suggests.** The page notes
+  `visibilitychange` to hidden and tells the clock (`resumed`), which re-anchors quietly
+  and drops the kick queue. A long gap between frames on a VISIBLE page is a device that
+  cannot keep up, and lights BEHIND.
+- **A non-finite state** stops the page with a message (Reset, then Start) instead of
+  leaving a clock that returns "no steps" for ever.
+- **Two more colormaps, on this page only**: `magma` (matplotlib's, the map of the offline
+  |u| movies; a degree-6 fit, max channel error 0.0226) and `brat` (black → #8ACE00, exact
+  and linear). They are `MUSIC_CMAPS` in `music.js`, registered by the page through
+  `cmapExtend` (common.js) before anything is built; the display card's colormap select
+  lists them after the shared four, and the speed display starts on magma. The shared
+  table, the other pages' menus and their emitted WGSL are untouched: with nothing
+  registered `cmapNames()` is `CMAP_NAMES` and `cmapWGSL()` returns `CMAP_WGSL` itself.
+  The canvas (`colorize`), the colour bar and a saved PNG's bar (`cmapRGB`) read the same
+  coefficients. Regenerate with `python webgpu/gen_musiccmap.py`.
 
 **`?musicdebug`** keeps a record on `window.musicDebug` for measuring sync and latency in
 a real browser:
@@ -1851,13 +1916,15 @@ a real browser:
 - `summary(skip = 5)`: frames, rebases, lag min/mean/max, steps per frame, frames at the
   cap, and per band the kick count, the mean energy jump, and the latency from the onset
   and from the scheduled click.
-- `audio` (also in `summary().audio`): `kind`, `label`, `sampleRate`, `baseLatency`,
-  `outputLatency`, `played`, `compensated`, `delayMs` (the delay in force — it follows the
-  slider), `suppressed` (a tab: did the browser silence it; null otherwise), `mode` (the
-  sentence shown), `trackSettings`, `videoTrackAlive`, `nfft`, `bins`.
-- The latencies in `summary()` are measured to `kick()` returning and do NOT subtract the
-  delay: with compensation on, what is perceived is that figure minus `delayMs`/1000
-  (minus `outputLatency`, plus about a frame).
+- `audio` (also in `summary().audio`; refreshed whenever the sync is recomputed): `kind`,
+  `label`, `sampleRate`, `baseLatency`, `outputLatency` (as the browser reports it),
+  `outputLatencyUsedMs` (what the sync used: 0 for an input device or an unreported
+  value), `delayMs` (D), `holdMs` (H), `trimMs`, `ldetMs`, `residualMs` (how far the
+  picture still trails where the sound could not be delayed; 0 when the sync is exact),
+  `played`, `compensated`, `suppressed`, `surface`, `mode` (the line shown),
+  `trackSettings`, `videoTrackAlive`, `nfft`, `bins`.
+- Each kick also has `tDue`. `latencySeconds` in `summary()` is `tApplied − tOnset`, so it
+  INCLUDES the hold-back: on Bluetooth it reads ≈ 0.039 + `holdMs`/1000, by design.
 
 **`?musicdebug=energy`** additionally reads the energy back after *every* kick (`eBefore`,
 `eAfter`): that is the only way to get one kick's own energy jump — kick energy enters no

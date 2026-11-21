@@ -126,7 +126,7 @@ function legPure(state) {
   ok("music.js evaluates in a bare context: no DOM, no Web Audio, none of the shared scripts", msg === "", msg);
   const M = state.M = vm.runInContext(`({ musicBandPlan, MusicDetector, musicShouldPush, musicRng, musicBlobsFor,
     musicKickList, musicClickTrack, musicClock, musicNpSum, musicPercentile, MUSIC_LBOX, MUSIC_SIGMA_MAX,
-    musicTabConstraints, musicInputConstraints, musicRouting, musicStartError, MUSIC_SOURCES, MUSIC_DELAY_DEFAULT, MUSIC_DELAY_MAX,
+    musicTabConstraints, musicInputConstraints, musicRouting, musicStartError, MUSIC_SOURCES, MUSIC_TRIM_MAX, MUSIC_LDET, MUSIC_FLUX_FLOOR, MUSIC_PEAK_DECAY, musicSync, musicSyncText, MUSIC_CMAPS,
     MUSIC_SIGMA_MIN_DX, MUSIC_SIGMA_STEP, MUSIC_NBLOB_BASS, MUSIC_NBLOB_MAX })`, ctx);
   const names = [];
   for (const l of src.split("\n")) {
@@ -538,22 +538,30 @@ function legClock(state) {
   ok("maxAhead: a step that would overshoot the target by more than it is NOT taken (n rounds down)",
      run(est(), { audioT: 10.05, simT: 4, dt: 0.098, maxAhead: 1 / 60 }).n === 0 &&
      run(est(), { audioT: 10.1, simT: 4, dt: 0.098, maxAhead: 1 / 60 }).n === 1 &&
-     run(est(), { audioT: 10.2, simT: 4, dt: 0.098, maxAhead: 1 / 60 }).n === 2);
+     run(est(), { audioT: 10.12, simT: 4, dt: 0.07, maxAhead: 1 / 60 }).n === 1);
+  // the hold-back is BOUNDED (review F2): past half of lagMax behind, the step is taken
+  ok("  ... but only while less than half of lagMax behind: at a gap of 0.125 * rate and more the step IS taken, overshoot or not",
+     run(est(), { audioT: 10.124, simT: 4, dt: 0.5, maxAhead: 1 / 60 }).n === 0 &&
+     run(est(), { audioT: 10.126, simT: 4, dt: 0.5, maxAhead: 1 / 60 }).n === 1 &&
+     run(est(0.5), { audioT: 10.124, simT: 4, dt: 0.5, rate: 0.5, maxAhead: 1 / 120 }).n === 0 &&
+     run(est(0.5), { audioT: 10.126, simT: 4, dt: 0.5, rate: 0.5, maxAhead: 1 / 120 }).n === 1 &&
+     run(est(), { audioT: 10.2, simT: 4, dt: 0.098, maxAhead: 1 / 60 }).n === 3);
   ok("  ... but on a frame that KICKED, one step is taken anyway (its dt is recomputed by the solver; the stale one says none fits)",
      run(est(), { audioT: 10.05, simT: 4, dt: 0.098, maxAhead: 1 / 60, kicked: true }).n === 1 &&
-     run(est(), { audioT: 10.05, simT: 4, dt: 0.098, maxAhead: 1 / 60, kicked: false }).n === 0 &&
-     run(est(), { audioT: 10.2, simT: 4, dt: 0.098, maxAhead: 1 / 60, kicked: true }).n === 2);
-  ok("  ... never when the simulation is not behind, and never more than the stale count where that is >= 1",
-     run(est(), { audioT: 10.05, simT: 4.06, dt: 0.098, maxAhead: 1 / 60, kicked: true }).n === 0 &&
+     run(est(), { audioT: 10.05, simT: 4, dt: 0.098, maxAhead: 1 / 60, kicked: false }).n === 0);
+  ok("  ... even when the simulation is AHEAD of the clock (the step is a small, freshly computed one), and exactly one",
+     run(est(), { audioT: 10.05, simT: 4.06, dt: 0.098, maxAhead: 1 / 60, kicked: true }).n === 1 &&
+     run(est(), { audioT: 10.05, simT: 4.06, dt: 0.098, maxAhead: 1 / 60, kicked: false }).n === 0);
+  ok("  ... never more than the stale count where that is >= 1, and never past the cap",
      run(est(), { audioT: 10.05, simT: 4, dt: 0.0101, maxAhead: 1 / 60, kicked: true }).n === 5 &&
-     run(est(), { audioT: 10.05, simT: 4, dt: 0.098, maxAhead: 1 / 60, kicked: true, maxSteps: 0 }).n === 0);
+     run(est(), { audioT: 10.05, simT: 4, dt: 0.098, maxAhead: 1 / 60, kicked: true, maxSteps: 0 }).n === 0 &&
+     run(est(), { audioT: 10.05, simT: 4.06, dt: 0.098, kicked: true, maxSteps: 0 }).n === 0);
   ok("  ... while an overshoot within it rounds up as usual, and without maxAhead it always rounds up",
      run(est(), { audioT: 10.05, simT: 4, dt: 0.06, maxAhead: 1 / 60 }).n === 1 &&
      run(est(), { audioT: 10.05, simT: 4, dt: 0.07, maxAhead: 1 / 60 }).n === 0 &&
      run(est(), { audioT: 10.05, simT: 4, dt: 0.098 }).n === 1);
   // rebase: too far behind
-  // (reached over two frames: ONE jump of more than lagMax is an absence, tested below)
-  st = est(); run(st, { audioT: 10.2, simT: 4, dt: 0.01 }); r = run(st, { audioT: 10.3, simT: 4, dt: 0.01 });
+  st = est(); r = run(st, { audioT: 10.3, simT: 4, dt: 0.01 });
   ok("more than lagMax (0.25 s of audio) behind: REBASE -- no catching up, the anchor moves to now, the indicator lights",
      r.rebased === true && r.n === 0 && r.lag === 0 && r.target === 4 && st.t0 === 4 && st.a0 === 10.3 && r.behind === true);
   ok("  ... exactly at lagMax it does not (the test is >), and the lag is measured in audio seconds whatever the rate",
@@ -572,6 +580,12 @@ function legClock(state) {
   // rebase: the simulation ran ahead
   st = est(); r = run(st, { audioT: 10.05, simT: 4.5, dt: 0.01 });
   ok("more than lagMax AHEAD also rebases, but that is not `behind`", r.rebased === true && r.n === 0 && r.behind === false && st.t0 === 4.5);
+  // ... with one whole step of grace: one quiescent step is by itself more than lagMax of
+  // audio at a low rate, and being one step ahead in silence is not a failure (review F2)
+  ok("  ... AHEAD is allowed lagMax plus one step: at rate 0.25, dt 0.098 (0.39 s of audio), 0.3 s ahead is fine and 0.7 s is not",
+     run(est(0.25), { audioT: 10.05, simT: 4 + 0.0125 + 0.075, dt: 0.098, rate: 0.25 }).rebased === false &&
+     run(est(0.25), { audioT: 10.05, simT: 4 + 0.0125 + 0.175, dt: 0.098, rate: 0.25 }).rebased === true &&
+     run(est(), { audioT: 10.05, simT: 4.31, dt: 0, }).rebased === true && run(est(), { audioT: 10.05, simT: 4.29, dt: 0 }).rebased === false);
   // rebase: backwards, rate change, stop
   st = est(); run(st, { audioT: 10.1, simT: 4.1, dt: 0.01 }); r = run(st, { audioT: 9.9, simT: 4.1, dt: 0.01 });
   ok("an audio clock that runs BACKWARDS rebases (and is not `behind`)", r.rebased === true && r.n === 0 && st.a0 === 9.9 && st.t0 === 4.1 && r.behind === false);
@@ -586,14 +600,30 @@ function legClock(state) {
   st = est(); run(st, { audioT: 10.05, simT: 4.0501, dt: 0.01 });
   r = run(st, { audioT: 10.05, simT: 4.0501, dt: 0.01 });
   ok("a paused audio clock (the same time twice) takes no step and does not rebase", r.n === 0 && r.rebased === false);
-  // a hidden tab: frames stopped, audio went on
+  // a hidden tab is whatever the CALLER says it is (`resumed`, from the document's
+  // visibility): re-anchor quietly. A long gap with no such word is a device that cannot
+  // keep up, and is `behind` (review F4)
+  st = est(); r = run(st, { audioT: 25, simT: 4, dt: 0.01, resumed: true });
+  ok("back from a hidden tab (`resumed`): the clock re-anchors with no step, and it is NOT `behind`",
+     r.rebased === true && r.n === 0 && st.a0 === 25 && r.behind === false && r.resumed === true);
   st = est(); r = run(st, { audioT: 25, simT: 4, dt: 0.01 });
-  ok("a long absence (hidden tab: audio 15 s on, simulation where it was) rebases on return -- and is not `behind`",
-     r.rebased === true && r.n === 0 && st.a0 === 25 && r.behind === false);
-  st = est(); run(st, { audioT: 10.2, simT: 4.2, dt: 0.01 }); r = run(st, { audioT: 10.44, simT: 4.2, dt: 0.01 });
-  ok("  ... while frames that DID come, each under lagMax apart, with the simulation not following, are `behind`",
-     (() => { const z = est(); let reb = 0, q; for (const a of [10.1, 10.2, 10.3]) { q = run(z, { audioT: a, simT: 4, dt: 0.01 }); if (q.rebased) reb++; }
-              return reb === 1 && q.rebased === true && q.behind === true; })() && r.rebased === false);
+  ok("  ... the same gap on a page that was VISIBLE is a device that cannot keep up: rebase, and `behind`",
+     r.rebased === true && r.n === 0 && r.behind === true && r.resumed === false);
+  st = est(); r = run(st, { audioT: 10.6, simT: 4, dt: 0.01 });
+  ok("  ... down to a single slow frame: 0.6 s since the last one with the simulation where it was is `behind`", r.rebased === true && r.behind === true);
+  // silence at a low rate (review F2): dt sits at the quiescent floor, 0.098 at 256^2. The
+  // simulation must still advance at `rate`, with no rebase after the anchor and BEHIND dark
+  for (const rate of [0.25, 0.35, 1, 2]) {
+    const z = {}; let sim = 0, steps = 0, reb = 0, beh = 0, dtk = 0;
+    for (let f = 0; f <= 1200; f++) {
+      const q = run(z, { audioT: f / 60, simT: sim, dt: dtk, rate: rate, maxAhead: rate / 60 });
+      if (q.rebased) reb++;
+      if (q.behind) beh++;
+      sim += q.n * 0.098; steps += q.n; dtk = 0.098;
+    }
+    ok("20 s of silence at rate " + rate + " (dt 0.098 throughout): the simulation advances at the rate asked for, one rebase (the anchor), BEHIND never lit",
+       reb === 1 && beh === 0 && Math.abs(sim - rate * 20) <= 0.098 + 0.125 * rate + 1e-9, steps + " steps, simulation time " + sim.toFixed(3) + " for " + (rate * 20).toFixed(2));
+  }
   for (const [tag, o] of [["a non-finite audio time", { audioT: NaN, simT: 4, dt: 0.01 }], ["a non-finite simulation time", { audioT: 10, simT: NaN, dt: 0.01 }],
                           ["rate 0", { audioT: 10, simT: 4, dt: 0.01, rate: 0 }]]) {
     st = est(); r = run(st, o);
@@ -617,7 +647,8 @@ function legClock(state) {
 function legRules(state) {
   const M = state.M;
   ok("the four sources, and the delay's default and range: click / file / tab / input, 50 ms in 0..150",
-     JSON.stringify(Array.from(M.MUSIC_SOURCES)) === '["click","file","tab","input"]' && M.MUSIC_DELAY_DEFAULT === 50 && M.MUSIC_DELAY_MAX === 150);
+     JSON.stringify(Array.from(M.MUSIC_SOURCES)) === '["click","file","tab","input"]' && M.MUSIC_TRIM_MAX === 150);
+  ok("a tab capture excludes system audio (a TAB's audio only -- the system's would include this page's own output)", M.musicTabConstraints().systemAudio === "exclude");
   const tc = M.musicTabConstraints();
   ok("a tab capture asks for a video track (the API requires one), as small and slow as it can be asked for",
      !!tc.video && tc.video.frameRate === 1 && tc.video.width <= 64 && tc.video.height <= 64);
@@ -631,7 +662,7 @@ function legRules(state) {
   ok("  ... and from the default device (no deviceId at all) when none is chosen",
      !("deviceId" in id.audio) && !("deviceId" in iu.audio) && id.audio.echoCancellation === false);
   // the routing rule: who may reach the speakers
-  const R = (k, sup) => M.musicRouting(k, sup);
+  const R = (k, sup, surf) => M.musicRouting(k, sup, surf === undefined ? "browser" : surf);
   ok("routing: the click track and a file are played by the page and so compensated, whatever `suppressed` says",
      [undefined, null, true, false].every(v => R("click", v).play && R("click", v).compensated && R("file", v).play && R("file", v).compensated));
   ok("  ... a captured tab is played ONLY if its track reports the tab silenced (=== true)",
@@ -644,6 +675,11 @@ function legRules(state) {
      ["click", "file", "tab", "input"].every(k => typeof R(k, false).why === "string" && R(k, false).why.length > 20) &&
      /did not silence/.test(R("tab", false).why) && /never played/.test(R("input", true).why) && /silenced/.test(R("tab", true).why));
   ok("  ... and an unknown source is refused", /unknown source/.test(throws(() => R("speaker", true))));
+  // review F6: a capture that is not a browser TAB is never played, silenced or not
+  ok("  ... a capture whose video track is not displaySurface \"browser\" (a window, a monitor, unknown) is NOT played even if silenced",
+     ["window", "monitor", null, "", "Browser"].every(v => M.musicRouting("tab", true, v).play === false && /not a browser tab/.test(M.musicRouting("tab", true, v).why)) &&
+     M.musicRouting("tab", true, "browser").play === true && M.musicRouting("tab", true).play === false &&
+     M.musicRouting("click", null, null).play === true && M.musicRouting("input", true, "browser").play === false);
   // the messages
   const E = (k, n) => M.musicStartError(k, typeof n === "string" && n !== "noaudio" && n !== "unsupported" ? { name: n } : n);
   ok("a tab capture with no audio track says what to do: pick a TAB and switch on \"Also share tab audio\"",
@@ -667,6 +703,135 @@ function legRules(state) {
 }
 
 
+// ===========================================================================
+// 6c. sync (sound delay / kick hold-back), the noise floor, the colormaps
+// ===========================================================================
+function legSync(state) {
+  const M = state.M, L = M.MUSIC_LDET, S = o => M.musicSync(o), near = (a, b) => Math.abs(a - b) < 1e-12;
+  ok("the detection latency is a named constant: 39 ms (measured, onset to kick()) + one frame = " + (1e3 * L).toFixed(1) + " ms",
+     near(L, 0.039 + 1 / 60));
+  // page-played sources: both sides available
+  let r = S({ kind: "click", play: true, outputLatency: 0 });
+  ok("the page plays it, output latency 0 (laptop speakers): the SOUND is delayed by the detection latency, no kick is held",
+     near(r.D, L) && r.H === 0 && near(r.residual, 0) && r.canDelay === true);
+  r = S({ kind: "file", play: true, outputLatency: 0.02 });
+  ok("  ... 20 ms: the sound is delayed by Ldet - 20 ms", near(r.D, L - 0.02) && r.H === 0 && near(r.residual, 0));
+  r = S({ kind: "tab", play: true, outputLatency: 0.168 });
+  ok("  ... 168 ms (Bluetooth earphones): the sound cannot be made earlier, so the KICKS are held " + (1e3 * (0.168 - L)).toFixed(0) + " ms and the sound is not delayed",
+     r.D === 0 && near(r.H, 0.168 - L) && near(r.residual, 0) &&
+     M.musicSyncText(r, "why") === "sound delayed 0 ms, kicks held 112 ms (output latency 168 ms, detection 56 ms): why", M.musicSyncText(r, "why"));
+  r = S({ kind: "click", play: true, outputLatency: L });
+  ok("  ... exactly the detection latency: neither", r.D === 0 && r.H === 0 && near(r.residual, 0));
+  ok("  ... an output latency that is undefined, null, NaN, negative, infinite or a string counts as 0",
+     [undefined, null, NaN, -0.1, Infinity, "0.168"].every(v => { const q = S({ kind: "click", play: true, outputLatency: v }); return near(q.D, L) && q.H === 0 && q.lout === 0; }));
+  // a tab the page does not play: heard through the same output, undelayed
+  r = S({ kind: "tab", play: false, outputLatency: 0 });
+  ok("a tab the page does NOT play, output 0: nothing can be done -- no delay, no hold, the picture " + (1e3 * L).toFixed(0) + " ms late",
+     r.D === 0 && r.H === 0 && near(r.residual, L) && r.canDelay === false && /picture still runs 56 ms after the sound/.test(M.musicSyncText(r, "w")) &&
+     !/sound delayed/.test(M.musicSyncText(r, "w")));
+  r = S({ kind: "tab", play: false, outputLatency: 0.168 });
+  ok("  ... on a 168 ms output it is heard that late, so the kicks are held the same " + (1e3 * (0.168 - L)).toFixed(0) + " ms and it is exact",
+     r.D === 0 && near(r.H, 0.168 - L) && near(r.residual, 0));
+  // an input device: the sound is in the room already
+  r = S({ kind: "input", play: false, outputLatency: 0.168 });
+  ok("an input device: the output latency does not apply (the sound is already in the room) -- no hold, the picture Ldet late",
+     r.D === 0 && r.H === 0 && r.lout === 0 && near(r.residual, L));
+  ok("  ... and it is never given a sound delay, even if asked with play: true and a negative trim... unless `play` -- which the page never passes for it",
+     S({ kind: "input", play: false, outputLatency: 0, trimMs: -100 }).D === 0);
+  // the trim: + makes the picture later, - the sound later; it moves to whichever side is free
+  ok("trim +30 ms on a 0 ms output comes off the sound's delay; +100 ms empties it and holds the kicks for the rest",
+     near(S({ kind: "click", play: true, outputLatency: 0, trimMs: 30 }).D, L - 0.03) &&
+     S({ kind: "click", play: true, outputLatency: 0, trimMs: 100 }).D === 0 && near(S({ kind: "click", play: true, outputLatency: 0, trimMs: 100 }).H, 0.1 - L));
+  ok("  ... -50 ms adds to the sound's delay; on Bluetooth, -50 ms comes off the kick hold and -200 ms turns it into a sound delay",
+     near(S({ kind: "click", play: true, outputLatency: 0, trimMs: -50 }).D, L + 0.05) &&
+     near(S({ kind: "tab", play: true, outputLatency: 0.168, trimMs: -50 }).H, 0.168 - L - 0.05) &&
+     near(S({ kind: "tab", play: true, outputLatency: 0.168, trimMs: -200 }).D, 0.2 - 0.168 + L) && S({ kind: "tab", play: true, outputLatency: 0.168, trimMs: -200 }).H === 0);
+  ok("  ... where the sound cannot be delayed a negative trim is simply not available: both stay at 0",
+     S({ kind: "tab", play: false, outputLatency: 0, trimMs: -100 }).D === 0 && S({ kind: "tab", play: false, outputLatency: 0, trimMs: -100 }).H === 0 &&
+     near(S({ kind: "input", play: false, trimMs: 80 }).H, 0.08 - L));
+  let inv = 0, n = 0;
+  for (const play of [true, false]) for (const kind of ["click", "tab", "input"]) for (const lo of [0, 0.01, 0.0557, 0.1, 0.168, 0.4])
+    for (const tr of [-150, -60, 0, 60, 150]) {
+      const q = S({ kind: kind, play: play, outputLatency: lo, trimMs: tr }); n++;
+      if (!(q.D >= 0 && q.H >= 0) || (q.D > 0 && q.H > 0) || (!play && q.D !== 0) || (play && Math.abs(q.residual) > 1e-12) || q.residual < -1e-12) inv++;
+    }
+  ok("  ... over " + n + " combinations: D and H are never negative and never both in force, D is 0 unless the page plays the source, and where it does the sync is exact",
+     inv === 0, inv + " violations");
+  ok("  ... both are capped (the delay node is 1 s long): an absurd trim cannot ask for more",
+     S({ kind: "click", play: true, outputLatency: 0, trimMs: -5000 }).D === 1 && S({ kind: "click", play: true, outputLatency: 3 }).H === 1 &&
+     S({ kind: "click", play: true, outputLatency: 3, maxH: 0.5 }).H === 0.5 && S({ kind: "click", play: true, trimMs: -5000, maxD: 0.2 }).D === 0.2);
+
+  // ---- the noise floor (review F7), on the fixture's signal followed by noise ------------
+  const x = state.x, sr = state.sr;
+  if (x) {
+    let rms = 0; for (let i = 0; i < x.length; i++) rms += x[i] * x[i]; rms = Math.sqrt(rms / x.length);
+    const run = (db, floor) => {
+      // 8 s of music, then 32 s of noise: the normaliser's 20 s window has to EMPTY of music
+      // before the percentile is the noise's own, which is when the promotion starts
+      const y = new Float64Array(5 * x.length); y.set(x);
+      let v = 4321;
+      for (let i = x.length; i < y.length; i++) { v = (1103515245 * v + 12345) % 2147483648; y[i] = rms * Math.pow(10, db / 20) * 1.7 * (v / 1073741824 - 1); }
+      const det = new M.MusicDetector(Object.assign({ sr: sr, nfft: 512, nbands: 4, threshold: 0.3 }, floor ? { fluxFloor: M.MUSIC_FLUX_FLOOR, peakDecayS: M.MUSIC_PEAK_DECAY } : {}));
+      const on = runDetector(det, y, sr, 60, 512), T = x.length / sr;
+      return { music: on.filter(e => e.tFire <= T).length, noise: on.filter(e => e.tFire > T + 0.3).length,
+               late: on.filter(e => e.tFire > T + 21).length };
+    };
+    const a60 = run(-60, false), b60 = run(-60, true), b80 = run(-80, true), a80 = run(-80, false);
+    ok("WITHOUT the floor, noise 60 and 80 dB below the music that preceded it becomes a stream of onsets once the 20 s window holds nothing else ("
+       + a60.late + " and " + a80.late + " in the last 11 s) -- the running percentile promotes any floor",
+       a60.late > 20 && a80.late > 20);
+    ok("WITH the page's floor (0.3 of a 120 s peak-hold of the band's own flux) that noise gives NONE, and the music's own onsets are untouched (" + b60.music + " vs " + a60.music + ")",
+       b60.noise === 0 && b80.noise === 0 && b60.late === 0 && b60.music === a60.music && a60.music > 50);
+  }
+  ok("fluxFloor defaults to OFF (0) with a 30 s peak-hold, as the offline class does; a negative one is refused",
+     new M.MusicDetector({ sr: 44100 }).fluxFloor === 0 && Math.abs(new M.MusicDetector({ sr: 44100 }).pdecay - Math.exp(-1 / 1800)) < 1e-15 &&
+     /bad configuration/.test(throws(() => new M.MusicDetector({ sr: 44100, fluxFloor: -1 }))));
+  // history trimming (a reviewer survivor): a run long enough to trim, against the same
+  // detector with trimming made impossible -- the answers must be identical
+  {
+    const mk = () => new M.MusicDetector({ sr: 44100, nbands: 3, threshold: 0.1, normS: 0.5, warmupS: 0, fluxFloor: 0.2, peakDecayS: 2 });
+    const d1 = mk(), d2 = mk();
+    for (const h of d2.hist) h.splice = () => [];                    // never trims
+    let seed = 99, out1 = [], out2 = [], maxLen = 0;
+    const rnd = () => { seed = (seed * 48271) % 2147483647; return seed / 2147483647; };
+    for (let f = 0; f < 600; f++) {
+      const m = new Float64Array(1025);
+      for (let k = 0; k < 1025; k++) m[k] = 1e-3 * rnd() + ((f % 23 === 0 && k > 20 && k < 60) ? 0.3 * rnd() : 0) + ((f % 37 === 5 && k > 300 && k < 500) ? 0.2 * rnd() : 0);
+      out1 = out1.concat(d1.push(m, (f + 1) / 60)); out2 = out2.concat(d2.push(m, (f + 1) / 60));
+      maxLen = Math.max(maxLen, d1.hist[0].length);
+    }
+    ok("the detector's history is TRIMMED on a long run (never past 2 nnorm + 8 = 68 values of " + d2.hist[0].length + ") and the onsets are those of an untrimmed one",
+       maxLen <= 2 * d1.nnorm + 9 && d2.hist[0].length > 500 && out1.length > 10 && JSON.stringify(out1) === JSON.stringify(out2), out1.length + " onsets");
+  }
+
+  // ---- the two colormaps ----------------------------------------------------------------
+  const cf = path.join(__dirname, "fixtures", "music_cmap.json");
+  if (!fs.existsSync(cf)) { ok("fixtures/music_cmap.json is present", false, "run ../gen_musiccmap.py"); return; }
+  const C = JSON.parse(fs.readFileSync(cf, "utf8")), maps = M.MUSIC_CMAPS;
+  const poly = (co, t) => [0, 1, 2].map(c => { let v = co[6][c]; for (let k = 5; k >= 0; k--) v = v * t + co[k][c]; return Math.max(0, Math.min(1, v)); });
+  ok("MUSIC_CMAPS is magma then brat, each 7 rows of 3 coefficients (the demo's degree-6 form)",
+     maps.length === 2 && maps[0].name === "magma" && maps[1].name === "brat" && maps.every(m => m.coef.length === 7 && Array.from(m.coef).every(r => r.length === 3)));
+  ok("magma's coefficients are the ones gen_musiccmap.py fitted to matplotlib's table", JSON.stringify(maps[0].coef) === JSON.stringify(C.magma_coef), C.source);
+  let err = 0;
+  C.magma_table.forEach((row, i) => { const v = poly(maps[0].coef, i / 255); for (let c = 0; c < 3; c++) err = Math.max(err, Math.abs(v[c] - row[c])); });
+  ok("  ... and the fit is within 0.023 of matplotlib's magma in every channel at all 256 points (the recorded maximum)",
+     err < 0.023 && Math.abs(err - C.magma_fit_max_error) < 1e-5 && C.magma_table.length === 256, "max |fit - table| = " + err.toFixed(4));
+  ok("  ... it starts black and ends pale: (0, 0, 0) at 0 within the fit, near (0.99, 0.99, 0.75) at 1",
+     poly(maps[0].coef, 0).every(v => v < 0.02) && poly(maps[0].coef, 1)[0] > 0.95 && poly(maps[0].coef, 1)[2] > 0.7);
+  const b1 = poly(maps[1].coef, 1), b0 = poly(maps[1].coef, 0);
+  ok("brat is black at 0 and #8ACE00 at 1: (138, 206, 0) / 255",
+     b0.every(v => v === 0) && b1.map(v => Math.round(255 * v)).join() === "138,206,0" && C.brat_hex === "#8ACE00" &&
+     JSON.stringify(maps[1].coef) === JSON.stringify(C.brat_coef));
+  let mono = true, lin = 0;
+  const luma = v => 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+  for (let i = 1; i <= 200; i++) {
+    const a = poly(maps[1].coef, (i - 1) / 200), b = poly(maps[1].coef, i / 200);
+    if (!(luma(b) > luma(a)) || b[0] < a[0] || b[1] < a[1]) mono = false;
+    lin = Math.max(lin, Math.abs(b[0] - (i / 200) * b1[0]), Math.abs(b[1] - (i / 200) * b1[1]), b[2]);
+  }
+  ok("  ... exactly linear in between, so its lightness rises monotonically and the fastest flow is the green", mono && lin < 1e-12);
+}
+
 // ---------------------------------------------------------------------------
 // a fake AudioContext: the one thing node does not have. It PLAYS nothing; its
 // analyser computes the true spectrum of what would be playing at `currentTime`.
@@ -675,15 +840,16 @@ function legRules(state) {
 // the one question that matters about a graph: what reaches the speakers, and through
 // what. Streams (tab capture, an input device) carry the samples they would deliver.
 function fakeAudio(sr) {
-  const A = { t: 0, sr: sr || 44100, ctxs: [], decoded: null, analyserCalls: 0 };
+  const A = { t: 0, sr: sr || 44100, ctxs: [], decoded: null, analyserCalls: 0, outLat: 0.02 };
   const node = (kind, extra) => Object.assign({ kind: kind, outs: [], ins: [], disc: 0,
     connect(n) { this.outs.push(n); n.ins.push(this); },
     disconnect() { this.disc++; for (const n of this.outs) n.ins.splice(n.ins.indexOf(this), 1); this.outs.length = 0; } }, extra);
   A.Ctx = class {
     constructor() { this.sampleRate = A.sr; this.state = "suspended"; this.destination = node("destination", {});
-                    this.baseLatency = 0.005; this.outputLatency = 0.02; this.sources = []; this.analysers = [];
+                    this.baseLatency = 0.005; this.sources = []; this.analysers = [];
                     this.streamSources = []; this.delays = []; this.resumed = 0; A.ctxs.push(this); }
     get currentTime() { return A.t; }
+    get outputLatency() { return A.outLat; }       // the leg's to change, mid-session too
     createBuffer(ch, len, rate) {
       const d = new Float32Array(len);
       return { numberOfChannels: ch, length: len, sampleRate: rate, duration: len / rate, getChannelData: () => d };
@@ -695,16 +861,20 @@ function fakeAudio(sr) {
       return s;
     }
     createMediaStreamSource(stream) {
+      if (A.throwOn === "streamSource") throw new Error("createMediaStreamSource failed");
       const s = node("stream", { stream: stream });
       this.streamSources.push(s);
       return s;
     }
     createDelay(max) {
-      const d = node("delay", { maxDelay: max, delayTime: { value: 0 } });
+      // setTargetAtTime lands at once here, and is logged: a leg can tell a smooth move from a jump
+      const d = node("delay", { maxDelay: max, delayTime: { value: 0, ramps: [],
+        setTargetAtTime(v, t, tc) { this.ramps.push({ v: v, t: t, tc: tc }); this.value = v; } } });
       this.delays.push(d);
       return d;
     }
     createAnalyser() {
+      if (A.throwOn === "analyser") throw new Error("createAnalyser failed");
       const an = node("analyser", { fftSize: 1024, smoothingTimeConstant: 0.8,
         getFloatFrequencyData(arr) {
           A.analyserCalls++;
@@ -721,7 +891,7 @@ function fakeAudio(sr) {
       return an;
     }
     async decodeAudioData(ab) { A.decoded = ab; return A.fileBuffer(this); }
-    async resume() { this.resumed++; this.state = "running"; }
+    async resume() { this.resumed++; if (A.resumeHold) await A.resumeHold; this.state = "running"; }
   };
   return A;
 }
@@ -745,7 +915,7 @@ function fakeMedia(A, samples) {
   M.stream = o => {
     const tr = [];
     if (o.audio !== false) tr.push(track("audio", o.audio, o.label));
-    if (o.video) tr.push(track("video", {}));
+    if (o.video) tr.push(track("video", { displaySurface: o.surface === undefined ? "browser" : o.surface }));
     return { __audio: { d: samples, started: A.t, loop: true }, tracks: tr,
              getTracks() { return tr.slice(); }, getAudioTracks() { return tr.filter(t => t.kind === "audio"); },
              getVideoTracks() { return tr.filter(t => t.kind === "video"); } };
@@ -896,15 +1066,22 @@ async function legRun(state) {
      src.outs.length === 2 && src.outs[0] === an && src.outs[1] === dly && an.outs.length === 0 && an.ins[0] === src &&
      dly.outs.length === 1 && dly.outs[0] === ctx.destination && ctx.destination.ins.length === 1 &&
      an.fftSize === 2048 && an.smoothingTimeConstant === 0 && toSpeakers(src).join() === "delay,destination");
-  ok("  ... the delay is the slider's 50 ms, and the page says it is latency compensated",
-     ctx.delays.length === 1 && dly.delayTime.value === 0.05 && dly.maxDelay >= 0.15 &&
-     /^latency compensated \(sound delayed 50 ms\)/.test(env.getEl("musicMode").textContent), env.getEl("musicMode").textContent.slice(0, 60));
+  // the sync in force: this fake context reports an output latency of 20 ms, less than the
+  // detection latency, so the SOUND is delayed by the difference and no kick is held
+  const sy0 = M.musicSync({ kind: "click", play: true, outputLatency: 0.02, trimMs: 0 });
+  ok("  ... the delay is musicSync's for a 20 ms output: " + (1e3 * sy0.D).toFixed(1) + " ms on the sound, kicks not held, and the mode line says so",
+     ctx.delays.length === 1 && dly.delayTime.value === sy0.D && sy0.H === 0 && Math.abs(sy0.D - (M.MUSIC_LDET - 0.02)) < 1e-15 && dly.maxDelay >= 1 &&
+     /^sound delayed 36 ms, kicks held 0 ms \(output latency 20 ms, detection 56 ms\): the page plays this source$/.test(env.getEl("musicMode").textContent),
+     env.getEl("musicMode").textContent);
+  ok("  ... the detector is the page's: the noise floor on (0.3 of a 120 s peak-hold)",
+     env.run("function(){ return music.det.fluxFloor; }") === 0.3 && M.MUSIC_FLUX_FLOOR === 0.3 && M.MUSIC_PEAK_DECAY === 120 &&
+     Math.abs(env.run("function(){ return music.det.pdecay; }") - Math.exp(-1 / (120 * 60))) < 1e-15);
   const d = JSON.parse(env.run(`function(){ const d = music.det; return JSON.stringify({ sr: d.sr, nfft: d.nfft, nb: d.nbands, fps: d.fps,
     thr: d.threshold, run: running, t0: music.audio.t0, db: music.db.length, mag: music.mag.length, dbg: typeof window.musicDebug }); }`));
   ok("  ... the detector is built at the context's rate: 44100 Hz, nfft 2048, 4 bands, 60 fps, threshold 0.3",
      d.sr === 44100 && d.nfft === 2048 && d.nb === 4 && d.fps === 60 && d.thr === 0.3 && d.db === 1024 && d.mag === 1024);
   ok("  ... and the page is running, with audio time 0 at the source's first sample", d.run === true && d.t0 === 100 &&
-     env.getEl("btnRun").textContent === "Pause" && d.dbg === "object");
+     env.getEl("btnRun").textContent === "Stop" && d.dbg === "object");
   // ---- 12 s of frames at 60 Hz --------------------------------------------------
   const frames = [];
   for (let f = 1; f <= 720; f++) {
@@ -914,7 +1091,8 @@ async function legRun(state) {
   const dbg = JSON.parse(env.run("function(){ return JSON.stringify({ kicks: window.musicDebug.kicks, frames: window.musicDebug.frames, rebases: window.musicDebug.rebases }); }"));
   const kicksLog = frames.flatMap(fr => fr.log.filter(e => e.op === "kick").map(e => Object.assign({ f: fr.f, a: fr.a }, e)));
   // the reference: the page's own detector configuration run by the GATE over the same audio
-  const det = new M.MusicDetector({ sr: 44100, nfft: 2048, nbands: 4, fps: 60, threshold: 0.3 });
+  const det = new M.MusicDetector({ sr: 44100, nfft: 2048, nbands: 4, fps: 60, threshold: 0.3,
+                                    fluxFloor: M.MUSIC_FLUX_FLOOR, peakDecayS: M.MUSIC_PEAK_DECAY });
   // ... at the very times the page saw (audio time = currentTime - 100, in fp64 as the page
   // computes it), through the analyser's fp32 dB, with silence before the first sample
   const want = runDetector(det, ref.samples, 44100, 60, 2048, { loop: true, zeroBefore: true, periodic: true, seconds: 12,
@@ -1058,6 +1236,7 @@ async function legRun(state) {
   ok("  ... and once it can keep up again the indicator goes out", !/BEHIND/.test(env.getEl("musicStrip").textContent));
   const simBefore = env.run("function(){ return solver.__t; }");
   P.takeLog();
+  env.run("function(){ document.visibilityState = 'hidden'; document.onvisibilitychange({}); document.visibilityState = 'visible'; document.onvisibilitychange({}); }");
   await P.frame(100 + 900 / 60 + 30);                                  // 30 s later
   fr = JSON.parse(env.run("function(){ return JSON.stringify(window.musicDebug.frames[window.musicDebug.frames.length - 1]); }"));
   const hidLog = P.takeLog();
@@ -1089,7 +1268,7 @@ async function legRun(state) {
   ok("Stop: the source is stopped and disconnected, the page is not running, and no step, kick or analyser read follows",
      src.stopped === 1 && src.disc >= 1 && dly.disc >= 1 && ctx.destination.ins.length === 0 &&
      env.run("function(){ return running; }") === false && P.takeLog().length === 0 &&
-     A.analyserCalls === callsBefore && env.run("function(){ return music.audio === null; }") === true && env.getEl("btnRun").textContent === "Run");
+     A.analyserCalls === callsBefore && env.run("function(){ return music.audio === null; }") === true && env.getEl("btnRun").textContent === "Start");
   // ---- Start again: the same context, a fresh detector and source ----------------------
   await P.click("btnRun");
   ok("Start again reuses the AudioContext and builds a fresh source and detector (warm-up counted from the new start)",
@@ -1282,12 +1461,14 @@ async function legLive(state) {
   // ---- the select, before anything is started -------------------------------------
   ok("the source select offers the four sources", Array.from(env.getEl("selSrc").options).map(o => o.value).join() === "click,file,tab,input");
   ok("before Start the mode line says what each source will get: the click track compensated",
-     /^latency compensated/.test(env.getEl("musicMode").textContent) && env.getEl("rDelay").value === "50" && env.getEl("vDelay").textContent === "50");
+     /^sound delayed 56 ms, kicks held 0 ms \(output latency 0 ms, detection 56 ms\): the page plays this source$/.test(env.getEl("musicMode").textContent) &&
+     env.getEl("rTrim").value === "0" && env.getEl("vTrim").textContent === "0", env.getEl("musicMode").textContent);
   await pick("tab");
   ok("  ... a tab: decided at Start (it depends on whether this browser silences the tab)", /decided at Start/.test(env.getEl("musicMode").textContent));
   await pick("input");
   ok("  ... an input device: NOT compensated, because it is never played back",
-     /^NOT latency compensated/.test(env.getEl("musicMode").textContent) && /never played/.test(env.getEl("musicMode").textContent));
+     /^kicks held 0 ms \(output latency 0 ms, detection 56 ms\) -- the picture still runs 56 ms after the sound: an input device is never played back$/.test(env.getEl("musicMode").textContent),
+     env.getEl("musicMode").textContent);
   // the device list: audio INPUTS only; no names before access has been allowed
   const opts = () => Array.from(env.getEl("selDev").options).map(o => o.value + "=" + o.textContent);
   ok("choosing it shows the device row and lists the audio inputs -- nameless until access is allowed, and never an output or a camera",
@@ -1308,8 +1489,10 @@ async function legLive(state) {
   ok("  ... the stream becomes a MediaStreamSource feeding the analyser (a dead end)",
      q.live && q.run && q.kind === "tab" && ctx.streamSources.length === 1 && ss.stream === s1 && ss.outs[0] === an && an.outs.length === 0);
   ok("  ... the track reports the tab silenced, so the page plays it: source -> delay (50 ms) -> speakers, and nothing else reaches them",
-     q.sup === true && q.play === true && q.comp === true && toSpeakers(ss).join() === "delay,destination" && dl.delayTime.value === 0.05 &&
-     ctx.destination.ins.length === 1 && ctx.destination.ins[0] === dl && /^latency compensated \(sound delayed 50 ms\): the tab is silenced/.test(q.mode));
+     q.sup === true && q.play === true && q.comp === true && toSpeakers(ss).join() === "delay,destination" &&
+     dl.delayTime.value === M.musicSync({ kind: "tab", play: true, outputLatency: 0.02 }).D &&
+     ctx.destination.ins.length === 1 && ctx.destination.ins[0] === dl &&
+     /^sound delayed 36 ms, kicks held 0 ms \(output latency 20 ms, detection 56 ms\): the tab is silenced and the page plays its audio$/.test(q.mode), q.mode);
   ok("  ... both tracks are left LIVE (the unused video track is kept: stopping it is unverified browser behaviour)",
      at1.readyState === "live" && vt1.readyState === "live" && at1.stops === 0 && vt1.stops === 0 && typeof at1.onended === "function");
   const kTab = await run(3);
@@ -1317,19 +1500,31 @@ async function legLive(state) {
      kTab > 10 && JSON.parse(env.run("function(){ return JSON.stringify(window.musicDebug.kicks.map(k => k.tFire)); }")).every(t => t >= 0.5));
   ok("?musicdebug records the source: kind, label, sample rate, latencies, the delay in force, suppression, compensation, the video track",
      q.dbg.kind === "tab" && q.dbg.label === "tab: a web player" && q.dbg.sampleRate === 44100 && q.dbg.baseLatency === 0.005 &&
-     q.dbg.outputLatency === 0.02 && q.dbg.delayMs === 50 && q.dbg.suppressed === true && q.dbg.compensated === true &&
+     q.dbg.outputLatency === 0.02 && Math.abs(q.dbg.delayMs - 1e3 * (M.MUSIC_LDET - 0.02)) < 1e-9 && q.dbg.holdMs === 0 && q.dbg.trimMs === 0 &&
+     Math.abs(q.dbg.ldetMs - 1e3 * M.MUSIC_LDET) < 1e-9 && q.dbg.outputLatencyUsedMs === 20 && Math.abs(q.dbg.residualMs) < 1e-9 &&
+     q.dbg.surface === "browser" && q.dbg.mode === q.mode && q.dbg.suppressed === true && q.dbg.compensated === true &&
      q.dbg.played === true && q.dbg.videoTrackAlive === true && q.dbg.trackSettings.suppressLocalAudioPlayback === true &&
      q.dbg.nfft === 2048 && q.dbg.bins === 1024, JSON.stringify(q.dbg).slice(0, 90));
-  // the delay slider, live
-  await P.input("rDelay", 120);
+  // the trim slider, live: +30 ms makes the PICTURE later. Here the sound is being delayed
+  // 36 ms, so the trim comes off that first; -30 ms adds to it
+  const ramps0 = dl.delayTime.ramps.length;
+  await P.input("rTrim", 30);
   q = st();
-  ok("the delay slider moves the live delay node (120 ms), the mode line and the debug record",
-     dl.delayTime.value === 0.12 && /sound delayed 120 ms/.test(q.mode) && Math.abs(q.dbg.delayMs - 120) < 1e-9 && env.getEl("vDelay").textContent === "120");
-  await P.input("rDelay", 0);
-  ok("  ... down to 0 (still through the node: no second path to the speakers appears)",
-     dl.delayTime.value === 0 && ctx.destination.ins.length === 1 && toSpeakers(ss).join() === "delay,destination");
-  await P.input("rDelay", 50);
-  ok("  ... and `summary()` carries the audio record", JSON.parse(env.run("function(){ return JSON.stringify(window.musicDebug.summary().audio); }")).delayMs === 50);
+  ok("the trim slider moves the live delay node SMOOTHLY (setTargetAtTime, never a jump): +30 ms takes 30 ms off the sound's delay",
+     Math.abs(dl.delayTime.value - (M.MUSIC_LDET - 0.02 - 0.03)) < 1e-12 && dl.delayTime.ramps.length === ramps0 + 1 &&
+     dl.delayTime.ramps[ramps0].tc > 0 && /^sound delayed 6 ms, kicks held 0 ms \(output latency 20 ms, detection 56 ms, trim \+30 ms\)/.test(q.mode) &&
+     Math.abs(q.dbg.trimMs - 30) < 1e-9 && env.getEl("vTrim").textContent === "+30", q.mode);
+  await P.input("rTrim", 100);
+  q = st();
+  ok("  ... past what the sound's delay can give, the rest goes to holding the KICKS: +100 ms = sound 0 ms, kicks held 64 ms",
+     dl.delayTime.value === 0 && Math.abs(q.dbg.holdMs - 1e3 * (0.02 - M.MUSIC_LDET + 0.1)) < 1e-9 && q.dbg.delayMs === 0 &&
+     /^sound delayed 0 ms, kicks held 64 ms/.test(q.mode) && ctx.destination.ins.length === 1 && toSpeakers(ss).join() === "delay,destination", q.mode);
+  await P.input("rTrim", -50);
+  q = st();
+  ok("  ... and a negative trim makes the sound later: -50 ms = sound delayed 86 ms, kicks not held",
+     Math.abs(dl.delayTime.value - (M.MUSIC_LDET - 0.02 + 0.05)) < 1e-12 && q.dbg.holdMs === 0 && /trim -50 ms/.test(q.mode));
+  await P.input("rTrim", 0);
+  ok("  ... and `summary()` carries the audio record", Math.abs(JSON.parse(env.run("function(){ return JSON.stringify(window.musicDebug.summary().audio); }")).delayMs - 1e3 * (M.MUSIC_LDET - 0.02)) < 1e-9);
   // the capture ends from outside (Chrome's "Stop sharing")
   at1.readyState = "ended"; at1.onended({}); await turn();
   q = st();
@@ -1350,9 +1545,10 @@ async function legLive(state) {
     ok("a tab whose track " + tag + ": the page does NOT play it (it is already heard) -- no delay node, nothing reaches the speakers",
        q.live && q.kind === "tab" && q.sup === false && q.play === false && q.comp === false && ctx.delays.length === nd &&
        toSpeakers(s2) === null && ctx.destination.ins.length === 0 && s2.outs.length === 1 && s2.outs[0].kind === "analyser");
-    ok("  ... and says so: NOT latency compensated, with the reason; the debug record agrees",
-       /^NOT latency compensated: this browser did not silence the captured tab/.test(q.mode) && q.dbg.compensated === false &&
-       q.dbg.played === false && q.dbg.delayMs === 0 && q.dbg.suppressed === false);
+    ok("  ... and says so: no \"sound delayed\", the picture 36 ms late (the tab is heard through the same 20 ms output, undelayed), with the reason",
+       /^kicks held 0 ms \(output latency 20 ms, detection 56 ms\) -- the picture still runs 36 ms after the sound: this browser did not silence the captured tab/.test(q.mode) &&
+       q.dbg.compensated === false && q.dbg.played === false && q.dbg.delayMs === 0 && q.dbg.holdMs === 0 &&
+       Math.abs(q.dbg.residualMs - 1e3 * (M.MUSIC_LDET - 0.02)) < 1e-9 && q.dbg.suppressed === false, q.mode);
     const k2 = await run(1.5);
     ok("  ... it still drives the flow (" + k2 + " kicks in 1.5 s)", k2 > 3);
     await P.click("btnRun");
@@ -1427,15 +1623,19 @@ async function legLive(state) {
   ok("  ... it is NEVER connected to the speakers: source -> analyser only, no delay node created, the destination has no input",
      toSpeakers(si) === null && si.outs.length === 1 && si.outs[0].kind === "analyser" && ctx.delays.length === nd2 &&
      ctx.destination.ins.length === 0 && q.play === false && q.comp === false);
-  ok("  ... the page says NOT latency compensated, and the debug record says played: false, delay 0",
-     /^NOT latency compensated: an input device is never played back/.test(q.mode) && q.dbg.kind === "input" && q.dbg.played === false &&
-     q.dbg.delayMs === 0 && q.dbg.compensated === false && q.dbg.suppressed === null && q.dbg.videoTrackAlive === false);
+  ok("  ... the page says the picture runs 56 ms after the sound (the output latency does not apply: the sound is already in the room)",
+     /^kicks held 0 ms \(output latency 0 ms, detection 56 ms\) -- the picture still runs 56 ms after the sound: an input device is never played back$/.test(q.mode) &&
+     q.dbg.kind === "input" && q.dbg.played === false && q.dbg.delayMs === 0 && q.dbg.holdMs === 0 && q.dbg.outputLatencyUsedMs === 0 &&
+     q.dbg.outputLatency === 0.02 && q.dbg.compensated === false && q.dbg.suppressed === null && q.dbg.surface === null && q.dbg.videoTrackAlive === false, q.mode);
   await turn();
   ok("  ... once access is allowed the device list has its names, and the choice is kept",
      opts().join("|") === "=default input|bh2=BlackHole 2ch|mic=MacBook Microphone" && env.getEl("selDev").value === "bh2", opts().join("|"));
-  await P.input("rDelay", 100);
-  ok("  ... the delay slider cannot give it a path to the speakers", ctx.delays.length === nd2 && ctx.destination.ins.length === 0 && st().dbg.delayMs === 0);
-  await P.input("rDelay", 50);
+  await P.input("rTrim", -100);
+  ok("  ... the trim slider cannot give it a path to the speakers (a negative trim has no sound to delay), though a positive one holds its kicks",
+     ctx.delays.length === nd2 && ctx.destination.ins.length === 0 && st().dbg.delayMs === 0 && st().dbg.holdMs === 0);
+  await P.input("rTrim", 80);
+  ok("  ... +80 ms: kicks held " + (80 - 1e3 * M.MUSIC_LDET).toFixed(0) + " ms", Math.abs(st().dbg.holdMs - (80 - 1e3 * M.MUSIC_LDET)) < 1e-9 && ctx.destination.ins.length === 0);
+  await P.input("rTrim", 0);
   const kIn = await run(1.5);
   ok("  ... it drives the flow (" + kIn + " kicks in 1.5 s)", kIn > 3);
   const sIn = FM.last;
@@ -1490,7 +1690,7 @@ async function legLive(state) {
      st().comp === true && st().dbg.kind === "file" && st().dbg.label === "t.wav");
   const man = JSON.parse(env.run("function(){ return JSON.stringify(runManifest().forcing); }"));
   ok("  ... and a saved params.json records the source, that it was compensated, and by how much",
-     man.source === "file" && man.compensated === true && man.delayMs === 50);
+     man.source === "file" && man.compensated === true && Math.abs(man.delayMs - 1e3 * (M.MUSIC_LDET - 0.02)) < 1e-9 && man.holdMs === 0 && man.trimMs === 0);
   await P.click("btnRun");
   ok("through all of it the page logged no failure of its own", realFails(env).length === 0, realFails(env).slice(0, 2).join(" | "));
 
@@ -1507,6 +1707,288 @@ async function legLive(state) {
      W.env.run("function(){ return music.det.bins[3][1]; }") === Math.ceil(10000 / (48000 / 2048)) && k48 > 8);
 }
 
+// ===========================================================================
+// 11. the review's findings and the output-latency sync, on the page
+// ===========================================================================
+async function legFix(state) {
+  const M = state.M, L = M.MUSIC_LDET;
+  const click = M.musicClickTrack({ sr: 44100, bpm: 120, beats: 16, seed: 1 }).samples;
+  const mk = async (search) => {
+    const P = await musicPage(search === undefined ? "?musicdebug" : search), FM = fakeMedia(P.A, click);
+    P.env.run("function(m){ navigator.mediaDevices = m; }", FM.api);
+    P.env.run(MODEL, 0.004);
+    P.FM = FM;
+    P.st = () => JSON.parse(P.env.run(`function(){ const a = music.audio; return JSON.stringify({ run: running, starting: !!music.starting,
+      live: !!a, kind: a && a.kind, play: a && a.route.play, q: music.queue.length, behind: music.behind, clock: music.clock,
+      status: el("status").textContent, mode: el("musicMode").textContent, strip: el("musicStrip").textContent,
+      btn: el("btnRun").textContent, dropped: music.dropped, dbg: window.musicDebug ? window.musicDebug.audio : null,
+      kicks: window.musicDebug ? window.musicDebug.kicks : [] }); }`));
+    P.pick = async v => { P.env.getEl("selSrc").value = v; P.env.getEl("selSrc").onchange({}); await turn(); };
+    P.T = 10;
+    P.run = async (sec, fps) => { const logs = [], n = Math.round(sec * (fps || 60)); for (let f = 1; f <= n; f++) { await P.frame(P.T + f / (fps || 60)); logs.push(P.takeLog()); } P.T += sec; return logs; };
+    return P;
+  };
+  const kicksIn = logs => logs.reduce((a, l) => a + l.filter(e => e.op === "kick").length, 0);
+
+  // ---- colormaps: on this page only ---------------------------------------------------------
+  let P = await mk(), env = P.env, A = P.A;
+  const cm = JSON.parse(env.run(`function(){ const c = cards.disp[0]; return JSON.stringify({ names: cmapNames(), shared: CMAP_NAMES,
+    opts: Array.from(c.selCmap.options).map(o => cmapNames()[+o.value]), sel: c.selCmap.value, cmap: c.cmap(), field: c.selField.value,
+    rgb4: cmapRGB(4, 0.37), rgb5: cmapRGB(5, 1), rgb0: cmapRGB(0, 0.37), code: solver.pl.colorize.__code, dflt: MUSIC_CMAP_DEFAULT }); }`));
+  ok("the music page's colormap menu is the shared four plus magma and brat, and the speed display starts on magma",
+     cm.names.join() === "afmhot,viridis,RdBu,grayscale,magma,brat" && cm.shared.length === 4 && cm.opts.join() === cm.names.join() &&
+     cm.sel === "4" && cm.cmap === 4 && cm.dflt === 4 && cm.field === "4", cm.opts.join(" "));
+  const polyOf = (co, t) => [0, 1, 2].map(c => { let v = co[6][c]; for (let k = 5; k >= 0; k--) v = v * t + co[k][c]; return Math.max(0, Math.min(1, v)); });
+  ok("the CPU twin (cmapRGB: the colour bar, the saved PNG's bar) evaluates the SAME table: magma at 0.37, brat's green at 1, afmhot unmoved",
+     JSON.stringify(cm.rgb4) === JSON.stringify(polyOf(M.MUSIC_CMAPS[0].coef, 0.37)) && cm.rgb5.map(v => Math.round(255 * v)).join() === "138,206,0" &&
+     JSON.stringify(cm.rgb0) === JSON.stringify([0.74, 0.24, 0]));
+  // the emitted display kernel carries exactly those coefficients
+  const lits = tag => { const m = new RegExp("if \\(which == " + tag + "u\\) \\{[^\\n]*\\n\\s*return cpoly6\\(t, ([\\s\\S]*?)\\);\\n").exec(cm.code);
+                        return m ? Array.from(m[1].matchAll(/vec3<f32>\(([-\d.e]+), ([-\d.e]+), ([-\d.e]+)\)/g)).map(v => [+v[1], +v[2], +v[3]]) : null; };
+  ok("the EMITTED colorize kernel has branches 4 (magma) and 5 (brat) whose vec3 literals are MUSIC_CMAPS' coefficients, number for number",
+     JSON.stringify(lits(4)) === JSON.stringify(M.MUSIC_CMAPS[0].coef) && JSON.stringify(lits(5)) === JSON.stringify(M.MUSIC_CMAPS[1].coef) &&
+     lits(1).length === 7 && lits(2).length === 7 && /if \(which == 3u\) \{ return vec3<f32>\(t, t, t\); \}/.test(cm.code));
+  for (const page of ["rmhd2d.html", "rmhd3d.html"]) {
+    const o = await boot(dir, page); await turn();
+    const q = JSON.parse(o.run(`function(){ return JSON.stringify({ n: cmapNames(), extra: CMAP_EXTRA.length, same: cmapWGSL() === CMAP_WGSL,
+      opts: Array.from(cards.disp[0].selCmap.options).map(x => cmapNames()[+x.value]),
+      code: (solver.pl.colorize && solver.pl.colorize.__code) || "" }); }`));
+    ok(page + ": no extra colormap is registered -- the menu is the four it always was, and the colormap text is CMAP_WGSL itself",
+       q.n.join() === "afmhot,viridis,RdBu,grayscale" && q.extra === 0 && q.same === true && q.opts.join() === q.n.join() && !/which == 4u/.test(q.code));
+  }
+  ok("cmapExtend refuses a duplicate name and a malformed table",
+     /already exists/.test(throws(() => env.run("function(){ cmapExtend([{ name: 'magma', coef: MUSIC_CMAPS[0].coef }]); }"))) &&
+     /already exists/.test(throws(() => env.run("function(){ cmapExtend([{ name: 'viridis', coef: MUSIC_CMAPS[0].coef }]); }"))) &&
+     /7 rows of 3/.test(throws(() => env.run("function(){ cmapExtend([{ name: 'x', coef: [[0, 0, 0]] }]); }"))) &&
+     /7 rows of 3/.test(throws(() => env.run("function(){ cmapExtend([{ name: 'y', coef: MUSIC_CMAPS[0].coef.map(r => [r[0], NaN, r[2]]) }]); }"))) &&
+     env.run("function(){ return cmapNames().length; }") === 6);
+
+  // ---- the run button says what it does ----------------------------------------------------
+  ok("the run button reads Start, not Run (and Stop, not Pause: it is a full stop)", P.st().btn === "Start");
+
+  // ---- B: Bluetooth -- the output is later than the detection, so the KICKS wait -----------
+  A.outLat = 0.168; A.t = P.T;
+  await P.click("btnRun");
+  let q = P.st();
+  const ctx = A.ctxs[0], dl = ctx.delays[0], H = 0.168 - L;
+  ok("on a 168 ms output (Bluetooth) the page delays the sound by NOTHING and holds every kick " + (1e3 * H).toFixed(0) + " ms; the mode line says so",
+     dl.delayTime.value === 0 && q.mode === "sound delayed 0 ms, kicks held 112 ms (output latency 168 ms, detection 56 ms): the page plays this source" &&
+     q.btn === "Stop", q.mode);
+  ok("  ... the debug record: outputLatency 0.168, delayMs 0, holdMs " + (1e3 * H).toFixed(1) + ", trimMs 0, ldetMs " + (1e3 * L).toFixed(1) + ", residualMs 0",
+     q.dbg.outputLatency === 0.168 && q.dbg.delayMs === 0 && Math.abs(q.dbg.holdMs - 1e3 * H) < 1e-9 && q.dbg.trimMs === 0 &&
+     Math.abs(q.dbg.ldetMs - 1e3 * L) < 1e-9 && Math.abs(q.dbg.outputLatencyUsedMs - 168) < 1e-9 && Math.abs(q.dbg.residualMs) < 1e-9 && q.dbg.played === true);
+  ok("  ... and there is still exactly ONE path to the speakers, through the (zero) delay", ctx.destination.ins.length === 1 && toSpeakers(ctx.sources[0]).join() === "delay,destination");
+  env.run("function(){ globalThis.__declared = []; const d = music.det, p = d.push.bind(d); d.push = (m, t) => { const o = p(m, t); for (const e of o) __declared.push({ band: e.band, strength: e.strength, tFire: e.tFire }); return o; }; }");
+  const logsB = await P.run(6);
+  q = P.st();
+  const decl = JSON.parse(env.run("function(){ return JSON.stringify(__declared); }")), kk = q.kicks;
+  ok("every kick records the time it was DUE (declared + the hold) and is applied on the first frame at or after it, never before",
+     kk.length > 20 && kk.every(k => Math.abs(k.tDue - (k.tFire + H)) < 1e-9 && k.tApplied >= k.tDue - 1e-12 && k.tApplied - k.tDue < 1 / 60 + 1e-9),
+     "applied " + (1e3 * Math.min.apply(null, kk.map(k => k.tApplied - k.tDue))).toFixed(1) + " to "
+     + (1e3 * Math.max.apply(null, kk.map(k => k.tApplied - k.tDue))).toFixed(1) + " ms after due");
+  ok("  ... so sound -> kick is now " + (1e3 * (kk[0].tApplied - kk[0].tFire)).toFixed(0) + " ms later than it was declared, about the 112 ms held",
+     kk.every(k => k.tApplied - k.tFire >= H - 1e-9 && k.tApplied - k.tFire < H + 1 / 60 + 1e-9));
+  ok("  ... one kick() per onset, in the order they were declared, none lost and none twice: applied + still queued = declared",
+     kk.length + q.q === decl.length && kk.every((k, i) => k.band === decl[i].band && k.strength === decl[i].strength && k.tFire === decl[i].tFire) &&
+     kicksIn(logsB) === kk.length, kk.length + " applied + " + q.q + " queued of " + decl.length + " declared");
+  ok("  ... and still before that frame's steps", logsB.every(l => { let st = false; for (const e of l) { if (e.op === "step") st = true; else if (st) return false; } return true; }));
+  // a rebase for falling behind does not touch the queue: nothing lost, nothing twice
+  env.run("function(){ solver.__dt = 0.0001; }");
+  const nReb0 = env.run("function(){ return window.musicDebug.rebases; }");
+  await P.run(1.5);
+  env.run("function(){ solver.__dt = 0.004; }");
+  await P.run(1.5);
+  q = P.st();
+  const decl2 = JSON.parse(env.run("function(){ return JSON.stringify(__declared); }"));
+  ok("across a rebase for falling behind (" + (env.run("function(){ return window.musicDebug.rebases; }") - nReb0) + " of them) the queue is untouched: still applied + queued = declared, in order",
+     env.run("function(){ return window.musicDebug.rebases; }") > nReb0 && q.kicks.length + q.q === decl2.length &&
+     q.kicks.every((k, i) => k.tFire === decl2[i].tFire && k.band === decl2[i].band));
+  // the output device changes under the session: read about once a second
+  await P.run(1.5);
+  A.outLat = 0.02;
+  const r0 = dl.delayTime.ramps.length;
+  await P.run(1.2);
+  q = P.st();
+  ok("the output latency is re-read about once a second: switched to a 20 ms output mid-session, the sound's delay RAMPS to 36 ms and the hold drops to 0",
+     Math.abs(dl.delayTime.value - (L - 0.02)) < 1e-12 && dl.delayTime.ramps.length >= r0 + 1 && dl.delayTime.ramps.length <= r0 + 2 &&
+     q.dbg.holdMs === 0 && q.dbg.outputLatency === 0.02 && /^sound delayed 36 ms, kicks held 0 ms/.test(q.mode), q.mode);
+  await P.run(1);
+  const tail = P.st().kicks.slice(-5);
+  ok("  ... and kicks declared after that are due at once (their hold is the one in force when they were declared)", tail.every(k => Math.abs(k.tDue - k.tFire) < 1e-12));
+  A.outLat = NaN; await P.run(1.2);
+  ok("  ... an output latency the browser does not report (NaN / undefined) is taken as 0: sound delayed by the whole detection latency",
+     Math.abs(dl.delayTime.value - L) < 1e-12 && P.st().dbg.outputLatencyUsedMs === 0);
+  // Stop empties the queue; a new session cannot inherit a kick
+  A.outLat = 0.168; await P.run(1.3);
+  await P.input("rTrim", 150);                       // hold ~262 ms: something is always waiting
+  await P.run(1.2);
+  q = P.st();
+  ok("with a long hold something is always waiting in the queue", q.q > 0, q.q + " queued");
+  await P.click("btnRun");
+  q = P.st();
+  ok("Stop empties the queue, clears the clock and the BEHIND flag, and the button reads Start again",
+     q.q === 0 && q.run === false && JSON.stringify(q.clock) === "{}" && q.behind === false && q.btn === "Start");
+  await P.input("rTrim", 0);
+  A.t = P.T; await P.click("btnRun");
+  const l0 = await P.run(0.45);
+  ok("  ... so the next session's first half second kicks nothing (nothing inherited)", kicksIn(l0) === 0 && P.st().kicks.length === 0);
+  // a hidden tab clears what was waiting
+  await P.input("rTrim", 150); await P.run(2);
+  const qBefore = P.st().q, kBefore = P.st().kicks.length;
+  env.run("function(){ document.visibilityState = 'hidden'; document.onvisibilitychange({}); document.visibilityState = 'visible'; document.onvisibilitychange({}); }");
+  P.T += 20;
+  const lh = await P.run(1 / 60);
+  ok("back from a hidden tab the queue is dropped (" + qBefore + " stale onsets), no kick comes out of the gap, and BEHIND stays dark",
+     qBefore > 0 && kicksIn(lh) === 0 && P.st().kicks.length === kBefore && !/BEHIND/.test(P.st().strip) && P.st().q === 0);
+  await P.input("rTrim", 0);
+
+  // ---- F4: a long gap while VISIBLE is "behind" ----------------------------------------------
+  await P.run(1);
+  P.T += 0.6;                                         // one frame 0.6 s long, the page visible
+  await P.run(2 / 60);
+  ok("a 0.6 s frame on a VISIBLE page is a device that cannot keep up: the clock rebases and BEHIND lights", /BEHIND/.test(P.st().strip) && P.st().behind === true);
+  // ---- F3: BEHIND does not survive the session -------------------------------------------------
+  await P.click("btnRun");
+  ok("Stop while BEHIND is lit puts it out at once", P.st().behind === false && !/BEHIND/.test(P.st().strip));
+  A.t = P.T; await P.click("btnRun");
+  await P.run(0.3);
+  ok("  ... and the next session does not start with it lit (its audio clock starts again from 0)", !/BEHIND/.test(P.st().strip) && P.st().behind === false);
+
+  // ---- F9: a non-finite state is reported, not sat on ---------------------------------------------
+  env.run("function(){ solver.__t = NaN; }");
+  await P.run(3 / 60);
+  q = P.st();
+  ok("a simulation that has gone non-finite stops the page and says so (Reset, then Start)", q.run === false && /non-finite/.test(q.status) && /Reset/.test(q.status) && q.live === false);
+  env.run("function(){ solver.__t = 0; }");
+  await P.click("btnReset");
+
+  // ---- the "blobs dropped" counter accumulates ---------------------------------------------------
+  A.t = P.T; await P.click("btnRun");
+  env.run("function(){ const k = solver.kick; solver.kick = l => { const r = k(l); return { used: r.used, dropped: 2 }; }; }");
+  await P.run(2);
+  q = P.st();
+  ok("blobs a kick() reports dropped are counted across kicks and shown (2 each over " + q.kicks.length + " kicks)",
+     q.kicks.length > 3 && q.dropped === 2 * q.kicks.length && new RegExp(q.dropped + " blobs dropped").test(q.strip));
+  await P.click("btnRun");
+
+  // ---- survivors: a file re-chosen; any track ending; a stale session's track ---------------------
+  const tone = new Float32Array(4 * 44100);
+  A.fileBuffer = c => { const b = c.createBuffer(1, tone.length, 44100); b.getChannelData(0).set(tone); return b; };
+  env.getEl("fMusic").files = [{ name: "a.wav", arrayBuffer: async () => new ArrayBuffer(8) }];
+  await P.pick("file"); A.t = P.T; await P.click("btnRun");
+  ok("a file is playing", P.st().run === true && P.st().kind === "file");
+  env.getEl("fMusic").files = [{ name: "b.wav", arrayBuffer: async () => new ArrayBuffer(8) }];
+  env.getEl("fMusic").onchange({}); await turn();
+  ok("choosing ANOTHER file while one plays stops the session (the next Start plays the new one)", P.st().run === false && P.st().live === false);
+  await P.pick("tab"); A.t = P.T; await P.click("btnRun");
+  const sA = P.FM.last, vA = sA.getVideoTracks()[0], aA = sA.getAudioTracks()[0], oldAudioEnded = aA.onended;
+  ok("a tab capture is live, both tracks carrying an `ended` handler", P.st().run && typeof vA.onended === "function" && typeof aA.onended === "function");
+  vA.readyState = "ended"; vA.onended({}); await turn();
+  ok("the VIDEO track ending ends the session too (any track, not only the audio one), and stops the audio track",
+     P.st().run === false && aA.stops === 1 && /tab capture ended/.test(P.st().status));
+  await P.pick("click"); A.t = P.T; await P.click("btnRun");
+  oldAudioEnded({}); await turn();
+  ok("a track of a session that is OVER ending later does not stop the session that replaced it", P.st().run === true && P.st().kind === "click");
+  await P.click("btnRun");
+
+  // ---- F6: a capture that is not a browser tab is analysed, not played -----------------------------
+  await P.pick("tab");
+  P.FM.nextDisplay = () => P.FM.stream({ audio: { suppressLocalAudioPlayback: true }, video: true, surface: "window", label: "a window" });
+  const nd = ctx.delays.length;
+  A.t = P.T; await P.click("btnRun");
+  q = P.st();
+  ok("a capture whose video track says displaySurface \"window\" is NOT played, though it reports itself silenced: no delay node, nothing at the speakers",
+     q.run && q.play === false && ctx.delays.length === nd && ctx.destination.ins.length === 0 && q.dbg.surface === "window" &&
+     /not a browser tab/.test(q.mode) && /pick a Chrome TAB/.test(q.status));
+  ok("  ... and the request itself excluded system audio", P.FM.display[P.FM.display.length - 1].systemAudio === "exclude");
+  await P.click("btnRun");
+  P.FM.nextDisplay = () => P.FM.stream({ audio: { suppressLocalAudioPlayback: true }, video: true, label: "tab" });
+
+  // ---- F5: a capture that was granted is never left running by a later failure ---------------------
+  for (const [kind, where] of [["tab", "streamSource"], ["tab", "analyser"], ["input", "streamSource"], ["input", "analyser"]]) {
+    await P.pick(kind);
+    A.throwOn = where;
+    await P.click("btnRun");
+    A.throwOn = null;
+    q = P.st();
+    ok("a granted " + (kind === "tab" ? "tab capture" : "input device") + " followed by a throw in " + (where === "streamSource" ? "createMediaStreamSource" : "createAnalyser")
+       + ": every track stopped, nothing running, not stuck in \"starting\", and a message",
+       P.FM.last.getTracks().length > 0 && P.FM.last.getTracks().every(t => t.stops === 1) && q.run === false && q.live === false &&
+       q.starting === false && /could not start/.test(q.status) && ctx.destination.ins.length === 0, q.status.slice(0, 70));
+  }
+  // ... and an input "capture" with no audio track at all
+  await P.pick("input");
+  P.FM.nextUser = () => P.FM.stream({ audio: false, video: true });
+  await P.click("btnRun");
+  ok("an input device that delivers no audio track: its stream is stopped, nothing starts, and the page says so",
+     P.FM.last.getTracks().every(t => t.stops === 1) && P.st().run === false && /no audio track/.test(P.st().status));
+  ok("through all of it the page logged no failure of its own", realFails(env).length === 0, realFails(env).slice(0, 2).join(" | "));
+
+  // ---- F1: a second Start, or a change of source, while resume() is still pending ---------------------
+  for (const kind of ["click", "tab"]) {
+    const Q = await mk();
+    await Q.pick(kind);
+    let release;
+    Q.A.resumeHold = new Promise(r => { release = r; });
+    const p1 = Q.env.getEl("btnRun").onclick({});
+    await turn();
+    const c2 = Q.A.ctxs[0];
+    ok(kind + ": while resume() is pending the page is still \"starting\" (the context is created, suspended, resume called once)",
+       Q.st().starting === true && Q.st().run === false && c2.resumed === 1 && c2.state === "suspended");
+    Q.env.getEl("btnRun").onclick({}); await turn();
+    ok("  ... a second Start click in that window acquires NOTHING more (" + (kind === "tab" ? "one getDisplayMedia" : "one buffer source") + ")",
+       kind === "tab" ? Q.FM.display.length === 1 : c2.sources.length === 1);
+    await Q.pick(kind === "click" ? "file" : "click");            // the visitor changes their mind
+    release(); await turn(); await p1; await turn();
+    const z = Q.st();
+    ok("  ... and a change of source in that window is honoured: when resume() returns nothing starts, " + (kind === "tab" ? "the capture's tracks are stopped" : "the buffer source is never started")
+       + ", nothing reaches the speakers", z.run === false && z.live === false && z.starting === false && c2.destination.ins.length === 0 &&
+       (kind === "tab" ? Q.FM.last.getTracks().every(t => t.stops === 1) : c2.sources[0].started === null));
+    // and with no change of mind, the same hold simply starts when it is released
+    const R = await mk();
+    await R.pick(kind);
+    let rel2; R.A.resumeHold = new Promise(r => { rel2 = r; });
+    const p2 = R.env.getEl("btnRun").onclick({}); await turn();
+    R.env.getEl("btnRun").onclick({}); await turn();
+    rel2(); await turn(); await p2; await turn();
+    ok("  ... left alone, it starts exactly ONE session when resume() returns", R.st().run === true && R.st().kind === kind &&
+       R.A.ctxs[0].destination.ins.length === 1 && (kind === "tab" ? R.FM.display.length === 1 : R.A.ctxs[0].sources.length === 1));
+  }
+
+  // ---- the look-ahead bound scales with the rate (a reviewer survivor) ----------------------------------
+  const Z = await mk();
+  Z.env.run("function(){ solver.__dt = 0.098; }");
+  await Z.input("rRate", 2);
+  const sil = new Float32Array(20 * 44100);
+  Z.A.fileBuffer = c => { const b = c.createBuffer(1, sil.length, 44100); return b; };
+  Z.env.getEl("fMusic").files = [{ name: "silence.wav", arrayBuffer: async () => new ArrayBuffer(8) }];
+  await Z.pick("file"); Z.A.t = Z.T; await Z.click("btnRun");
+  await Z.run(4);
+  const zf = JSON.parse(Z.env.run("function(){ return JSON.stringify(window.musicDebug.frames); }"));
+  const recompute = ahead => { const st = {}; let bad = 0; zf.forEach(f => { if (!f.fresh) return;
+    const c = M.musicClock(st, { running: true, audioT: f.a, simT: f.simT, dt: f.dt, rate: 2, maxSteps: 64, lagMax: 0.25, maxAhead: ahead, kicked: f.kicks > 0 });
+    if (c.n !== f.n) bad++; }); return bad; };
+  ok("at rate 2 in silence the page's step counts are musicClock's with maxAhead = rate / 60 (2/60), and NOT with a fixed 1/60",
+     recompute(2 / 60) === 0 && recompute(1 / 60) > 0 && zf.filter(f => f.n > 0).length > 20, recompute(1 / 60) + " frames differ under 1/60");
+  ok("  ... and silence at rate 2 advances at rate 2 with BEHIND dark: simulation time " + Z.env.run("function(){ return solver.__t; }").toFixed(2) + " after 4 s",
+     Math.abs(Z.env.run("function(){ return solver.__t; }") - 8) < 0.4 && !/BEHIND/.test(Z.st().strip) && Z.env.run("function(){ return window.musicDebug.rebases; }") === 1);
+  // ... and the reviewer's deadlock itself: silence at rate 0.25 and 0.35 on the page
+  for (const rate of [0.25, 0.35]) {
+    const Y = await mk();
+    Y.env.run("function(){ solver.__dt = 0.098; }");
+    await Y.input("rRate", rate);
+    Y.A.fileBuffer = c => c.createBuffer(1, sil.length, 44100);
+    Y.env.getEl("fMusic").files = [{ name: "silence.wav", arrayBuffer: async () => new ArrayBuffer(8) }];
+    await Y.pick("file"); Y.A.t = Y.T; await Y.click("btnRun");
+    const ly = await Y.run(10);
+    const steps = ly.reduce((a, l) => a + l.filter(e => e.op === "step").length, 0), simT = Y.env.run("function(){ return solver.__t; }");
+    ok("silence at rate " + rate + " for 10 s: the page steps at the requested rate (" + steps + " steps of 0.098 = " + simT.toFixed(2) + " for " + (10 * rate).toFixed(2)
+       + "), one rebase, BEHIND never lit", Math.abs(simT - 10 * rate) < 0.2 && steps >= Math.floor(10 * rate / 0.098) - 1 &&
+       Y.env.run("function(){ return window.musicDebug.rebases; }") === 1 && !/BEHIND/.test(Y.st().strip) &&
+       JSON.parse(Y.env.run("function(){ return JSON.stringify(window.musicDebug.frames.map(f => f.rebased)); }")).filter(Boolean).length === 1);
+  }
+}
+
 // ---------------------------------------------------------------------------
 const LEGS = [
   ["1. music.js is pure and self-contained", legPure],
@@ -1516,11 +1998,13 @@ const LEGS = [
   ["5. the click track, and what the detector makes of it", legClick],
   ["6. the clock", legClock],
   ["6b. the live-source rules: constraints, routing, messages", legRules],
+  ["6c. sync from the output latency, the noise floor, the colormaps", legSync],
   ["7. music.html booted: the solver it builds, what the controls do", legBoot],
   ["8. music.html running: kicks, steps, the clock, Stop, a file", legRun],
   ["8b. without ?musicdebug", legPlain],
   ["9. the other two pages: hook null, loop and state mark unchanged", legOthers],
-  ["10. live sources and the delayed speaker branch (M3 / M4)", legLive]
+  ["10. live sources and the delayed speaker branch (M3 / M4)", legLive],
+  ["11. the review's findings and the output-latency sync, on the page", legFix]
 ];
 (async () => {
   const state = {};

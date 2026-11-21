@@ -83,6 +83,11 @@ const MUSIC_SEED = 1;              // blob positions: the same session replays t
 const MUSIC_DEBUG = typeof location !== "undefined" && /[?&]musicdebug\b/.test(location.search);
 const MUSIC_DEBUG_E = typeof location !== "undefined" && /[?&]musicdebug=energy\b/.test(location.search);
 
+// ---- colormaps: magma and brat, on this page only ----------------------------
+// registered before any card or solver exists; their indices follow the shared four
+cmapExtend(MUSIC_CMAPS);
+const MUSIC_CMAP_DEFAULT = CMAP_NAMES.length + MUSIC_CMAPS.findIndex(m => m.name === "magma");
+
 // ---- controls ---------------------------------------------------------------
 controlsBuild({
   topbar: [
@@ -115,12 +120,12 @@ controlsBuild({
        { k: "val", id: "vRate" },
        { k: "lab", t: "click bpm" },
        { k: "num", id: "nBpm", v: 120, w: 70 }],
-      [{ k: "lab", t: "sound delay (ms)" },
-       { k: "rng", id: "rDelay", min: 0, max: MUSIC_DELAY_MAX, step: 5, v: MUSIC_DELAY_DEFAULT,
-         ti: "the page holds the sound back by this much, so that a hit is on screen when it is "
-           + "heard: the detector knows about a hit ~40 ms after it happens. Only where the page "
-           + "is the one playing the audio (click track, file, a silenced tab)." },
-       { k: "val", id: "vDelay" }],
+      [{ k: "lab", t: "sync trim (ms)" },
+       { k: "rng", id: "rTrim", min: -MUSIC_TRIM_MAX, max: MUSIC_TRIM_MAX, step: 5, v: 0,
+         ti: "sound and picture are lined up automatically from the audio output's latency "
+           + "(the line below says how). If they still look off, this nudges it: positive "
+           + "makes the PICTURE later, negative the sound later." },
+       { k: "val", id: "vTrim" }],
       { id: "rowDev", hide: true, items: [
         { k: "lab", t: "input device", for: "selDev" },
         { k: "sel", id: "selDev", o: [["", "default input"]],
@@ -140,7 +145,7 @@ function musicUi() {
   return { thr: musicNum("rThr", 0.3), memory: Math.max(0.05, musicNum("rMem", 1)),
            amp: Math.max(0, musicNum("rMAmp", 1)), rate: Math.max(0.01, musicNum("rRate", 1)),
            bpm: Math.min(300, Math.max(30, musicNum("nBpm", 120))), src: el("selSrc").value,
-           delay: Math.min(MUSIC_DELAY_MAX, Math.max(0, musicNum("rDelay", MUSIC_DELAY_DEFAULT))),
+           trim: Math.min(MUSIC_TRIM_MAX, Math.max(-MUSIC_TRIM_MAX, musicNum("rTrim", 0))),
            dev: el("selDev").value };
 }
 // the drag's energy e-folding RATE, in simulation time: the flow forgets over `memory`
@@ -171,7 +176,10 @@ const music = {
   rng: musicRng(MUSIC_SEED),
   det: null,                // the onset detector (built at Start, at the context's rate)
   audio: null,              // the live source (musicStart): { ctx, an, node, delay, t0, kind,
-                            //   click, stream, route, suppressed, stop() }
+                            //   click, stream, route, suppressed, surface, sync }
+  queue: [],                // onsets waiting out the kick hold-back: { due, o } in arrival order
+  syncAt: -1e9,             // audio time the output latency was last read
+  hidden: false,            // the page was hidden since the last frame (visibilitychange)
   gen: 0,                   // bumped by every Start and Stop: an await that outlives it gives up
   clock: {},                // musicClock's state
   tPush: null,              // audio time of the last spectrum handed to the detector
@@ -189,7 +197,7 @@ function syncLabels() {
   el("vRate").textContent = u.rate.toFixed(2);
   el("vCfl").textContent = musicNum("rCfl", 0.4).toFixed(2);
   el("vCflEvery").textContent = el("rCflEvery").value;
-  el("vDelay").textContent = u.delay.toFixed(0);
+  el("vTrim").textContent = (u.trim > 0 ? "+" : "") + u.trim.toFixed(0);
   el("rowFile").style.display = u.src === "file" ? "" : "none";
   el("rowDev").style.display = u.src === "input" ? "" : "none";
   musicModeLine();
@@ -227,6 +235,7 @@ function applyIC() {
   if (!solver) return;
   solver.setIC(true);
   music.clock.init = false;         // the simulation time jumped back to 0: re-anchor
+  music.queue.length = 0;           // ... and nothing detected before it belongs to the new run
   spsSmooth = 0;
   chartsReset();
 }
@@ -247,22 +256,43 @@ function rebuild() {
 //     source ──> analyser                       (what the detector reads: UNDELAYED)
 //        └─────> delay ──> speakers             (only if musicRouting says the page may play it)
 //
-// so the kick, which the detector can only declare ~40 ms after the sound, is on screen
-// when the DELAYED sound is heard. An input device has no second branch at all.
+// and the sound and the picture are lined up by musicSync (music.js) from the audio
+// output's latency: where the output is quick the SOUND is delayed (the delay node), where
+// it is slow -- Bluetooth -- the KICKS are held back instead (music.queue). An input device
+// has no second branch at all.
 function musicAudioClass() { return window.AudioContext || window.webkitAudioContext || null; }
 const musicMedia = () => (typeof navigator !== "undefined" && navigator.mediaDevices) || null;
+// the run button says what it does: Stop is a full stop (a file starts again from its
+// beginning, a capture is released), not a pause
+function musicRunning(b) {
+  setRunning(b);
+  el("btnRun").textContent = b ? "Stop" : "Start";
+}
 
-// One line saying which of the two modes is in force, and why (musicRouting's sentence).
+// the sync in force for a live source: read the output latency, and move the delay node
+// (smoothly: a jump in a delay line clicks) and the hold-back to match
+function musicSyncApply(A, now) {
+  const u = musicUi();
+  const sy = musicSync({ kind: A.kind, play: A.route.play, outputLatency: A.ctx.outputLatency, trimMs: u.trim });
+  if (A.delay) {
+    const p = A.delay.delayTime;
+    if (now || !p.setTargetAtTime) p.value = sy.D;
+    else p.setTargetAtTime(sy.D, A.ctx.currentTime, 0.05);
+  }
+  A.sync = sy;
+  music.syncAt = A.ctx.currentTime - A.t0;
+  if (MUSIC_DEBUG && window.musicDebug) window.musicDebug.audio = musicDebugAudio(A);
+  return sy;
+}
+// One line saying what is in force, and why (musicSyncText + musicRouting's sentence).
 function musicModeLine() {
   const A = music.audio, u = musicUi();
   let t;
-  if (!A) {
-    const r = u.src === "tab" ? null : musicRouting(u.src, false);
-    t = u.src === "tab" ? "tab audio: compensated if this browser can silence the captured tab, otherwise not (decided at Start)"
-                        : (r.compensated ? "latency compensated: " : "NOT latency compensated: ") + r.why;
-  } else {
-    t = (A.route.compensated ? "latency compensated (sound delayed " + u.delay.toFixed(0) + " ms): "
-                             : "NOT latency compensated: ") + A.route.why;
+  if (A) t = musicSyncText(A.sync, A.route.why);
+  else if (u.src === "tab") t = "another tab's audio: whether the page can play it (and so delay the sound) is decided at Start";
+  else {
+    const r = musicRouting(u.src, false);
+    t = musicSyncText(musicSync({ kind: u.src, play: r.play, outputLatency: music.ctx ? music.ctx.outputLatency : 0, trimMs: u.trim }), r.why);
   }
   el("musicMode").textContent = t;
 }
@@ -281,14 +311,18 @@ async function musicDevices() {
   list.forEach((d, i) => { if (d.deviceId && d.deviceId !== "default") add(d.deviceId, d.label || "audio input " + (i + 1)); });
   sel.value = Array.from(sel.options).some(o => o.value === keep) ? keep : "";
 }
-// end a capture: every track stopped (which is also what clears Chrome's "sharing" bar)
+// end a capture: every track stopped (which is also what clears Chrome's "sharing" bar and
+// the microphone indicator)
 function musicStopStream(stream) {
   if (!stream) return;
   for (const t of stream.getTracks()) { t.onended = null; try { t.stop(); } catch (e) { /* already ended */ } }
 }
 
 // Obtain the source: a node to analyse, plus what goes with it. Throws { name } on failure
-// (musicStartError turns the name into the message). `ctx` exists already.
+// (musicStartError turns the name into the message). `ctx` exists already. A capture that
+// was GRANTED and then cannot be used -- no audio track, or anything throwing while it is
+// being wrapped -- is stopped before the throw leaves here: a stream nobody holds would
+// keep the sharing bar or the microphone indicator on with no way to turn it off.
 async function musicAcquire(kind, ctx, u) {
   if (kind === "click") {
     const click = musicClickTrack({ sr: ctx.sampleRate, bpm: u.bpm, beats: 16, seed: 1 });
@@ -297,7 +331,7 @@ async function musicAcquire(kind, ctx, u) {
     const node = ctx.createBufferSource();
     node.buffer = buffer;
     node.loop = true;                              // the click track is a seamless loop
-    return { node: node, click: click, stream: null, suppressed: null, label: "click track, " + u.bpm + " bpm" };
+    return { node: node, click: click, stream: null, suppressed: null, surface: null, label: "click track, " + u.bpm + " bpm" };
   }
   if (kind === "file") {
     const f = el("fMusic").files && el("fMusic").files[0];
@@ -308,32 +342,26 @@ async function musicAcquire(kind, ctx, u) {
     el("vFile").textContent = f.name + ", " + buffer.duration.toFixed(1) + " s";
     const node = ctx.createBufferSource();
     node.buffer = buffer;
-    return { node: node, click: null, stream: null, suppressed: null, label: f.name };
+    return { node: node, click: null, stream: null, suppressed: null, surface: null, label: f.name };
   }
   const md = musicMedia();
-  if (kind === "tab") {
-    if (!md || !md.getDisplayMedia) throw { name: "unsupported" };
-    const stream = await md.getDisplayMedia(musicTabConstraints());
+  if (kind !== "tab" && kind !== "input") throw { name: "unknown source" };
+  if (!md || !(kind === "tab" ? md.getDisplayMedia : md.getUserMedia)) throw { name: "unsupported" };
+  const stream = kind === "tab" ? await md.getDisplayMedia(musicTabConstraints())
+                                : await md.getUserMedia(musicInputConstraints(u.dev));
+  try {
     const at = stream.getAudioTracks()[0];
-    if (!at) { musicStopStream(stream); throw { name: "noaudio" }; }
-    // The VIDEO track is unused, and it is KEPT ALIVE: whether stopping it leaves the audio
-    // running is browser behaviour this code cannot check, and a dead audio track would be
-    // silent with no error. Keeping it is the choice that cannot break the capture; it was
-    // asked for at 64 px and 1 frame a second to cost as little as it can. (To be confirmed
-    // in Chrome -- plans-webgpu/MUSIC_PLAN.md M3 -- after which it may be stopped here.)
+    if (!at) throw { name: "noaudio" };
     const st = at.getSettings ? at.getSettings() : {};
+    // The tab capture's VIDEO track is unused, and it is KEPT ALIVE: whether stopping it
+    // leaves the audio running is browser behaviour this code cannot check, and a dead
+    // audio track would be silent with no error. It was asked for at 64 px, 1 frame a second.
+    const vt = stream.getVideoTracks()[0], vs = vt && vt.getSettings ? vt.getSettings() : {};
     return { node: ctx.createMediaStreamSource(stream), click: null, stream: stream,
-             suppressed: st.suppressLocalAudioPlayback === true, label: at.label || "a tab", settings: st };
-  }
-  if (kind === "input") {
-    if (!md || !md.getUserMedia) throw { name: "unsupported" };
-    const stream = await md.getUserMedia(musicInputConstraints(u.dev));
-    const at = stream.getAudioTracks()[0];
-    if (!at) { musicStopStream(stream); throw { name: "noaudio" }; }
-    return { node: ctx.createMediaStreamSource(stream), click: null, stream: stream, suppressed: null,
-             label: at.label || "audio input", settings: at.getSettings ? at.getSettings() : {} };
-  }
-  throw { name: "unknown source" };
+             suppressed: kind === "tab" ? st.suppressLocalAudioPlayback === true : null,
+             surface: kind === "tab" ? (vs.displaySurface || null) : null,
+             label: at.label || (kind === "tab" ? "a tab" : "audio input"), settings: st };
+  } catch (e) { musicStopStream(stream); throw e; }
 }
 
 async function musicStart() {
@@ -342,81 +370,101 @@ async function musicStart() {
   if (!AC) { showStatus("this browser has no Web Audio (AudioContext)", "err"); return; }
   const ctx = music.ctx || (music.ctx = new AC());
   const gen = ++music.gen;
+  // `starting` stays true until this function has finished or given up, across EVERY await
+  // below: a second click, or a change of source, in any of those windows must find it set
   music.starting = true;
-  let S;
-  try { S = await musicAcquire(kind, ctx, u); }
-  catch (e) {
+  let S = null;
+  try {
+    try { S = await musicAcquire(kind, ctx, u); }
+    catch (e) {
+      const n = e && e.name;
+      showStatus(n === "nofile" ? "choose an audio file first"
+               : n === "decode" ? "could not decode " + e.file + ": " + e.detail
+               : musicStartError(kind, e), n === "nofile" ? "info" : "err");
+      return;
+    }
+    if (ctx.state === "suspended" && ctx.resume) await ctx.resume();
+    // a Stop, or a change of source, while the picker, the decode or the resume was open:
+    // give the capture back. Checked AFTER the last await -- nothing below yields.
+    if (gen !== music.gen || music.audio) { musicStopStream(S.stream); S = null; return; }
+    const route = musicRouting(kind, S.suppressed, S.surface);
+    const an = ctx.createAnalyser();
+    an.fftSize = MUSIC_NFFT;
+    an.smoothingTimeConstant = 0;                  // the raw spectrum of the last window
+    S.node.connect(an);                            // the analyser is a dead end: it feeds nothing
+    let delay = null;
+    // the ONLY place anything is connected to the speakers. musicRouting never says `play` for
+    // an input device; the second test is there so that no later edit of it can make a
+    // microphone feed back.
+    if (route.play && kind !== "input") {
+      delay = ctx.createDelay(1);
+      S.node.connect(delay);
+      delay.connect(ctx.destination);
+    }
+    music.db = new Float32Array(an.frequencyBinCount);
+    music.mag = new Float64Array(an.frequencyBinCount);
+    // a NEW detector for every source: its running normalisation and reference describe the
+    // audio it has heard, and carried across a switch they would misjudge the next one
+    music.det = new MusicDetector({ sr: ctx.sampleRate, nfft: MUSIC_NFFT, nbands: music.plan.sigmas.length,
+                                    fps: MUSIC_FPS, threshold: u.thr,
+                                    fluxFloor: MUSIC_FLUX_FLOOR, peakDecayS: MUSIC_PEAK_DECAY });
+    music.tPush = null;
+    music.clock = {};                              // a new session: no anchor, no BEHIND left over
+    music.behind = false;
+    music.queue.length = 0;
+    music.hidden = false;
+    const A = { ctx: ctx, an: an, node: S.node, delay: delay, t0: ctx.currentTime, kind: kind,
+                click: S.click, stream: S.stream, route: route, suppressed: S.suppressed, surface: S.surface,
+                label: S.label, settings: S.settings || null, sync: null };
+    if (S.stream) {
+      // the capture ending from outside: Chrome's "Stop sharing", the tab closed, the device
+      // unplugged. ANY track ending ends the session -- but only THIS session: the handler
+      // of a capture that has already been replaced must not stop its successor.
+      for (const t of S.stream.getTracks())
+        t.onended = () => { if (music.audio === A) { musicStop(); showStatus("the " + (kind === "tab" ? "tab capture" : "audio input") + " ended", "info"); } };
+    } else {
+      S.node.onended = () => { if (music.audio === A) musicStop(); };
+      S.node.start();
+    }
+    A.t0 = ctx.currentTime;                        // audio time 0 = the source's first sample
+    musicSyncApply(A, true);
+    music.audio = A;
+    S = null;                                      // owned by the session from here on
+    if (MUSIC_DEBUG) musicDebugInit();
+    musicRunning(true);
+    showStatus(kind === "tab" && route.play === false && A.surface !== "browser"
+               ? "that capture is not a browser tab: it is analysed, not played -- pick a Chrome TAB for a synced picture" : "", "info");
+    syncLabels();
+    if (kind === "input") musicDevices();          // the labels exist now
+  } catch (e) {
+    // anything thrown after the capture was granted: do not leave it running
+    showStatus("could not start: " + (e && e.message || e), "err");
+  } finally {
+    if (S) {                                       // acquired, and never handed to a session
+      musicStopStream(S.stream);
+      try { S.node.disconnect(); } catch (e) { /* never connected */ }
+    }
     music.starting = false;
-    const n = e && e.name;
-    showStatus(n === "nofile" ? "choose an audio file first"
-             : n === "decode" ? "could not decode " + e.file + ": " + e.detail
-             : musicStartError(kind, e), n === "nofile" ? "info" : "err");
-    return;
   }
-  music.starting = false;
-  // a Stop, or a change of source, while the picker or the decode was open: give it back
-  if (gen !== music.gen || music.audio) { musicStopStream(S.stream); return; }
-  if (ctx.state === "suspended" && ctx.resume) await ctx.resume();
-  const route = musicRouting(kind, S.suppressed);
-  const an = ctx.createAnalyser();
-  an.fftSize = MUSIC_NFFT;
-  an.smoothingTimeConstant = 0;                  // the raw spectrum of the last window
-  S.node.connect(an);                            // the analyser is a dead end: it feeds nothing
-  let delay = null;
-  // the ONLY place anything is connected to the speakers. musicRouting never says `play` for
-  // an input device; the second test is there so that no later edit of it can make a
-  // microphone feed back.
-  if (route.play && kind !== "input") {
-    delay = ctx.createDelay(1);
-    delay.delayTime.value = u.delay / 1000;
-    S.node.connect(delay);
-    delay.connect(ctx.destination);
-  }
-  music.db = new Float32Array(an.frequencyBinCount);
-  music.mag = new Float64Array(an.frequencyBinCount);
-  // a NEW detector for every source: its running normalisation and reference describe the
-  // audio it has heard, and carried across a switch they would misjudge the next one
-  music.det = new MusicDetector({ sr: ctx.sampleRate, nfft: MUSIC_NFFT, nbands: music.plan.sigmas.length,
-                                  fps: MUSIC_FPS, threshold: u.thr });
-  music.tPush = null;
-  music.clock.init = false;
-  const A = music.audio = { ctx: ctx, an: an, node: S.node, delay: delay, t0: ctx.currentTime, kind: kind,
-                            click: S.click, stream: S.stream, route: route, suppressed: S.suppressed,
-                            label: S.label, settings: S.settings || null };
-  if (S.stream) {
-    // the capture ending from outside: Chrome's "Stop sharing", the tab closed, the device
-    // unplugged. Any track ending ends the session.
-    for (const t of S.stream.getTracks())
-      t.onended = () => { if (music.audio === A) { musicStop(); showStatus("the " + (kind === "tab" ? "tab capture" : "audio input") + " ended", "info"); } };
-  } else {
-    S.node.onended = () => { if (music.audio === A) musicStop(); };
-    S.node.start();
-  }
-  A.t0 = ctx.currentTime;                        // audio time 0 = the source's first sample
-  if (MUSIC_DEBUG) musicDebugInit();
-  setRunning(true);
-  showStatus("", "info");
-  syncLabels();
-  if (kind === "input") musicDevices();          // the labels exist now
 }
 function musicStop() {
   const A = music.audio;
   music.audio = null;
   music.gen++;                                   // whatever Start is still awaiting gives up
-  setRunning(false);
+  musicRunning(false);
+  music.clock = {};                              // the anchor AND the BEHIND hold: audio times
+  music.behind = false;                          //   of a session that is over mean nothing
+  music.queue.length = 0;
+  music.hidden = false;
   if (!A) { syncLabels(); return; }
   if (A.stream) musicStopStream(A.stream);
   else { A.node.onended = null; try { A.node.stop(); } catch (e) { /* already ended */ } }
   try { A.node.disconnect(); A.an.disconnect(); if (A.delay) A.delay.disconnect(); } catch (e) { /* nothing connected */ }
-  music.clock.init = false;
-  music.behind = false;
   syncLabels();
 }
-// the delay slider, live
-function musicDelayApply() {
-  const A = music.audio, u = musicUi();
-  if (A && A.delay) A.delay.delayTime.value = u.delay / 1000;
-  if (MUSIC_DEBUG && window.musicDebug && A) window.musicDebug.audio = musicDebugAudio(A);
+// the trim slider, live
+function musicTrimApply() {
+  if (music.audio) musicSyncApply(music.audio, false);
   syncLabels();
 }
 
@@ -431,33 +479,51 @@ async function musicStep(sv) {
   // gone -- then this frame takes no step and the readback at its end is the fresh one).
   // Read BEFORE the kicks below, which move the mark themselves.
   const s = statsCache.s, fresh = !!s && statsCache.at === stateMark();
-  let nk = 0;
+  // a state that has gone non-finite cannot be stepped back: say so and stop, instead of
+  // sitting there with a clock that returns "no steps" for ever
+  if (fresh && !(isFinite(s[1]) && isFinite(s[2]) && isFinite(s[3]))) {
+    musicStop();
+    showStatus("the simulation went non-finite (too large an amp or cfl?) -- press Reset, then Start", "err");
+    return 0;
+  }
+  // back from a hidden tab: whatever was waiting belongs to audio that has long played
+  const resumed = music.hidden;
+  music.hidden = false;
+  if (resumed) music.queue.length = 0;
+  // the output device can change under a session (earphones connected): look once a second
+  if (tA - music.syncAt >= 1) { musicSyncApply(A, false); musicModeLine(); }
   if (musicShouldPush(tA, music.tPush, MUSIC_FPS)) {
     music.tPush = tA;
     A.an.getFloatFrequencyData(music.db);
     const db = music.db, mag = music.mag;
     for (let k = 0; k < mag.length; k++) mag[k] = Math.pow(10, db[k] / 20);   // -Infinity dB -> 0
-    let eBefore = fresh ? s[2] + s[3] : NaN;
-    for (const o of music.det.push(mag, tA)) {
-      // ONE kick per onset: KICK_MAX holds one band's blobs, and two onsets merged into
-      // one list could need twice that and would lose the overflow
-      const r = sv.kick(musicKickList(music.rng, music.plan, o.band, u.amp, o.strength));
-      nk++;
-      music.dropped += r.dropped;
-      music.lit[o.band] = performance.now();
-      if (MUSIC_DEBUG) {
-        // the energy a kick adds enters no accumulator: difference two readbacks
-        const k = { tOnset: o.t, tFire: o.tFire, tApplied: A.ctx.currentTime - A.t0, band: o.band,
-                    strength: o.strength, eBefore: NaN, eAfter: NaN, simT: fresh ? s[1] : NaN,
-                    used: r.used, dropped: r.dropped, sched: musicSched(A, o.t) };
-        window.musicDebug.kicks.push(k);
-        if (MUSIC_DEBUG_E) {
-          const sa = await sv.readStats();
-          if (solver !== sv) return 0;
-          k.eBefore = eBefore;
-          k.eAfter = sa[2] + sa[3];
-          eBefore = k.eAfter;
-        }
+    // every onset WAITS for the hold-back before it kicks (0 where the sound is delayed
+    // instead): due at the audio time it was declared plus H
+    for (const o of music.det.push(mag, tA)) music.queue.push({ due: tA + A.sync.H, o: o });
+  }
+  let nk = 0, eBefore = fresh ? s[2] + s[3] : NaN;
+  // ... and the ones that are due kick now, in the order they were declared (the head of the
+  // queue first: a later onset never overtakes an earlier one, even if H has just shrunk)
+  while (music.queue.length && music.queue[0].due <= tA) {
+    const q = music.queue.shift(), o = q.o;
+    // ONE kick per onset: KICK_MAX holds one band's blobs, and two onsets merged into
+    // one list could need twice that and would lose the overflow
+    const r = sv.kick(musicKickList(music.rng, music.plan, o.band, u.amp, o.strength));
+    nk++;
+    music.dropped += r.dropped;
+    music.lit[o.band] = performance.now();
+    if (MUSIC_DEBUG) {
+      // the energy a kick adds enters no accumulator: difference two readbacks
+      const k = { tOnset: o.t, tFire: o.tFire, tDue: q.due, tApplied: A.ctx.currentTime - A.t0, band: o.band,
+                  strength: o.strength, eBefore: NaN, eAfter: NaN, simT: fresh ? s[1] : NaN,
+                  used: r.used, dropped: r.dropped, sched: musicSched(A, o.t) };
+      window.musicDebug.kicks.push(k);
+      if (MUSIC_DEBUG_E) {
+        const sa = await sv.readStats();
+        if (solver !== sv || music.audio !== A) return 0;
+        k.eBefore = eBefore;
+        k.eAfter = sa[2] + sa[3];
+        eBefore = k.eAfter;
       }
     }
   }
@@ -465,7 +531,8 @@ async function musicStep(sv) {
   if (fresh)
     c = musicClock(music.clock, { running: true, audioT: tA, simT: s[1], dt: s[0], rate: u.rate,
                                   maxSteps: MUSIC_MAX_STEPS, lagMax: MUSIC_LAG_MAX,
-                                  maxAhead: u.rate / MUSIC_FPS, kicked: nk > 0 });
+                                  maxAhead: u.rate / MUSIC_FPS, kicked: nk > 0, resumed: resumed });
+  else if (resumed) music.hidden = true;           // no readback to re-anchor on yet: next frame
   music.behind = c.behind;
   musicStrip();
   if (MUSIC_DEBUG) musicDebugFrame(tA, s, fresh, c, nk);
@@ -475,8 +542,9 @@ async function musicStep(sv) {
 // ---- ?musicdebug ------------------------------------------------------------------
 // window.musicDebug, for measuring sync and latency in a real browser without extra code:
 //   kicks   one record per kick -- tOnset (audio s, the analysis-window centre of the peak
-//           frame), tFire (audio s when the detector declared it), tApplied (audio s when
-//           kick() returned), band, strength, simT, used, dropped, and for the click track
+//           frame), tFire (audio s when the detector declared it), tDue (tFire + the
+//           hold-back then in force), tApplied (audio s when kick() returned), band,
+//           strength, simT, used, dropped, and for the click track
 //           `sched`: the nearest scheduled click { t, kind, dt = tOnset - t }. With
 //           ?musicdebug=energy also eBefore / eAfter, the total energy from stats
 //           readbacks either side of THAT kick (NaN otherwise)
@@ -497,12 +565,16 @@ function musicSched(A, t) {
   }
   return best;
 }
-// what was playing and how it was routed: everything a browser session needs to report
+// what was playing, how it was routed and how it is being kept in sync: everything a
+// browser session needs to report
 function musicDebugAudio(A) {
+  const sy = A.sync || { D: 0, H: 0, lout: 0, ldet: MUSIC_LDET, trim: 0, residual: 0 };
   return { kind: A.kind, label: A.label, sampleRate: A.ctx.sampleRate, baseLatency: A.ctx.baseLatency,
            outputLatency: A.ctx.outputLatency, compensated: A.route.compensated, played: A.route.play,
-           delayMs: A.delay ? 1000 * A.delay.delayTime.value : 0, suppressed: A.suppressed,
-           mode: A.route.why, bpm: A.click ? A.click.bpm : null, trackSettings: A.settings,
+           delayMs: 1000 * sy.D, holdMs: 1000 * sy.H, trimMs: 1000 * sy.trim, ldetMs: 1000 * sy.ldet,
+           outputLatencyUsedMs: 1000 * sy.lout, residualMs: 1000 * sy.residual,
+           suppressed: A.suppressed, surface: A.surface, mode: musicSyncText(sy, A.route.why),
+           bpm: A.click ? A.click.bpm : null, trackSettings: A.settings,
            videoTrackAlive: A.stream ? A.stream.getVideoTracks().some(t => t.readyState === "live") : null,
            nfft: MUSIC_NFFT, bins: A.an.frequencyBinCount };
 }
@@ -568,11 +640,17 @@ async function boot() {
     onLayout: syncLabels
   });
   el("btnRun").onclick = () => { if (running) musicStop(); else musicStart(); };
+  el("btnRun").textContent = "Start";
   el("btnReset").onclick = () => applyIC();
   el("selSrc").onchange = () => { if (running || music.starting) musicStop(); syncLabels();
                                   if (el("selSrc").value === "input") musicDevices(); };
   el("selDev").onchange = () => { if (running && music.audio && music.audio.kind === "input") musicStop(); };
-  el("rDelay").oninput = musicDelayApply;
+  el("rTrim").oninput = musicTrimApply;
+  // back from a hidden tab: the next frame re-anchors quietly instead of calling the
+  // absence "behind". (An ASSIGNED handler: devtools' stub document has no addEventListener.)
+  if (typeof document !== "undefined")
+    document.onvisibilitychange = () => { if (document.visibilityState === "hidden") music.hidden = true; };
+  // another file chosen while one plays: stop it (the next Start plays the new one)
   el("fMusic").onchange = () => { if (music.audio && music.audio.kind === "file") musicStop(); };
   for (const id of ["rThr", "rMem", "rMAmp", "rRate", "rCfl", "rCflEvery"]) el(id).oninput = applyControls;
   el("nBpm").onchange = () => { if (running && music.audio && music.audio.kind === "click") musicStop(); syncLabels(); };
@@ -581,7 +659,8 @@ async function boot() {
   manifestForcing = () => {
     const u = musicUi(), A = music.audio;
     return { source: A ? A.kind : u.src, compensated: A ? A.route.compensated : null,
-             delayMs: (A && A.delay) ? u.delay : 0,
+             delayMs: (A && A.sync) ? 1000 * A.sync.D : 0, holdMs: (A && A.sync) ? 1000 * A.sync.H : 0,
+             trimMs: u.trim,
              bpm: (A && A.click) ? A.click.bpm : null, threshold: u.thr,
              memory: u.memory, amp: u.amp, rate: u.rate, mu: solver ? solver.p.mu : null,
              bands: music.plan.sigmas.length, sigmas: music.plan.sigmas, nblobs: music.plan.nblobs,
@@ -589,7 +668,7 @@ async function boot() {
   };
   rebuild();
   // |u| is where a kick shows (7-13x the baseline frame change against 1.5x in vorticity)
-  cardsLayout({ disp: [{ sel: 4 }], charts: ["energy", "spectrum"] });
+  cardsLayout({ disp: [{ sel: 4, cmap: MUSIC_CMAP_DEFAULT }], charts: ["energy", "spectrum"] });
   loop();
 }
 boot();

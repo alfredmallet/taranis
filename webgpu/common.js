@@ -155,11 +155,29 @@ const CMAP_COEF = {
     [-45.023288, -18.545760, -84.065776]
   ]
 };
+// EXTRA colormaps a page registers for itself (music.html: magma, brat), in the same
+// degree-6 form. Empty on every other page, and then nothing below differs from before it
+// existed: `cmapNames()` is CMAP_NAMES, cmapRGB never reaches the extra branch, and
+// physics.js's cmapWGSL() returns CMAP_WGSL itself, character for character. An extra map's
+// index is CMAP_NAMES.length + its position; register BEFORE the first card or solver.
+const CMAP_EXTRA = [];
+function cmapExtend(list) {
+  for (const m of list) {
+    if (!m || typeof m.name !== "string" || !Array.isArray(m.coef) || m.coef.length !== 7 ||
+        !m.coef.every(r => Array.isArray(r) && r.length === 3 && r.every(v => typeof v === "number" && isFinite(v))))
+      throw new Error("cmapExtend: a colormap is { name, coef: 7 rows of 3 finite numbers }");
+    if (CMAP_NAMES.indexOf(m.name) >= 0 || CMAP_EXTRA.some(e => e.name === m.name))
+      throw new Error("cmapExtend: a colormap named " + m.name + " already exists");
+    CMAP_EXTRA.push({ name: m.name, coef: m.coef.map(r => r.slice()) });
+  }
+}
+const cmapNames = () => CMAP_NAMES.concat(CMAP_EXTRA.map(m => m.name));
 const _clamp01 = v => Math.max(0, Math.min(1, v));
-// which = index into CMAP_NAMES, x already mapped into [0,1]; returns [r,g,b] in [0,1]
+// which = index into cmapNames(), x already mapped into [0,1]; returns [r,g,b] in [0,1]
 function cmapRGB(which, x) {
   const t = _clamp01(x);
-  const co = which === 1 ? CMAP_COEF.viridis : (which === 2 ? CMAP_COEF.rdbu : null);
+  const ex = which >= CMAP_NAMES.length ? CMAP_EXTRA[which - CMAP_NAMES.length] : null;
+  const co = ex ? ex.coef : which === 1 ? CMAP_COEF.viridis : (which === 2 ? CMAP_COEF.rdbu : null);
   if (co) {
     const out = [0, 0, 0];
     for (let c = 0; c < 3; c++) {
@@ -4739,7 +4757,7 @@ class DisplayCard {
     // both only mean anything with contours on
     this.selLev.style.display = "none";
     this.selBg.style.display = "none";
-    this.selCmap = _sel(head, CMAP_NAMES.map((n, i) => ({ v: i, t: n })), "colormap");
+    this.selCmap = _sel(head, cmapNames().map((n, i) => ({ v: i, t: n })), "colormap");
     this.btnClose = _mk("button", "x", head);
     this.btnClose.innerHTML = "&times;";
     this.btnClose.title = "close this display";

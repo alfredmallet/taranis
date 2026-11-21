@@ -868,6 +868,29 @@ leave untracked or commit — they are dev-only, nothing in the apps loads them.
   the destination even when its track claims to be "suppressed"; the device list before and
   after access; the delay slider moving the live node; a new detector on every Start; the
   `musicDebug.audio` record; a 48 kHz context.
+  Since the review-and-fix round (387 rows): (6c) `musicSync` over the cases — speakers
+  0 and 20 ms, Bluetooth 168 ms, an unreported latency, each routing, trims of both signs,
+  108 combinations of the invariants (D and H never negative, never both in force, D only
+  where the page plays the source, exact where it does); the noise floor on the fixture's
+  signal followed by 32 s of noise at −60 and −80 dB (a stream of onsets without it, none
+  with it, the music's own count unchanged); the detector's history trimming against an
+  untrimmed twin; the two colormaps against `fixtures/music_cmap.json` (`../gen_musiccmap.py`)
+  — magma within 0.023 of matplotlib's table, brat's endpoints, exact linearity and
+  monotone lightness; (11) on the page: the colormap menu, default and the EMITTED
+  colorize kernel's coefficients equal to the CPU table's, with both other pages showing
+  the four maps and `cmapWGSL() === CMAP_WGSL`; the Bluetooth scenario (the fake context's
+  `outputLatency` is the leg's to set, mid-session too) — nothing on the sound, every kick
+  due at declared + H and applied within a frame after, applied + queued = declared across
+  a rebase, the latency re-read within a second and the delay moved by `setTargetAtTime`,
+  the queue emptied by Stop and by a hidden tab; and every review finding as a scenario:
+  a second Start or a source change while `resume()` is pending (a promise the leg holds),
+  silence at rate 0.25 / 0.35 / 2, BEHIND not surviving a session, a slow frame on a
+  visible page, a throw after a capture was granted (tab and input, at two points), a
+  capture that is not a tab, a non-finite state, the dropped-blob counter, another file
+  chosen, a video track ending, a stale session's track ending. The clock rows in leg 6
+  were rewritten for the bounded hold-back, the one-step ahead allowance, `resumed`, and a
+  kicked frame stepping even when ahead. **None of the fix-round rows has been
+  mutation-tested** (no round was run, by agreement).
   **Things to know before editing it.** The stub's stats readback is all zeros, so leg 8
   replaces `readStats` with a MODEL (t advances by a fixed dt per step, the energy by 1 per
   kick): what is verified there is the page's arithmetic and ORDER given a readback, not

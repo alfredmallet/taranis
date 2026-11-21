@@ -25,14 +25,15 @@ disagree, the file is right.
 
 - **MUSIC_PLAN.md** — live music drives the 2D demo: per-band onsets become impulsive
   gaussian-blob kicks, with the audio clock as the master of simulation time. Drafted
-  2026-11-21. The offline reference is `examples/music_turbulence.py` (JAX). **M1** (the
-  `blobKick` kernel, `Solver.kick`, the uniform drag; `devtools/checkkick.js`) is committed
-  as 14ed94b and **M2** (`music.html` + `music.js`: band plan, causal onset detector,
-  audio-clock stepping, click track and file; `devtools/checkmusic.js`) as c960488 — it
-  runs in Chrome on the M1. **M3 + M4** (tab capture, input devices, the delayed speaker
-  branch that puts a hit on screen when it is heard) are implemented, uncommitted,
-  awaiting one fresh review and a real-browser pass whose checklist is in the plan. The
-  page is unlinked and pruned from the deploy; shipping it is Alfred's call.
+  2026-11-21. The offline reference is `examples/music_turbulence.py` (JAX). Committed:
+  **M1** (the `blobKick` kernel, `Solver.kick`, the uniform drag — 14ed94b), **M2**
+  (`music.html` + `music.js`: band plan, causal onset detector, audio-clock stepping,
+  click track and file — c960488), **M3 + M4** (tab capture, input devices, the delayed
+  speaker branch — cc92edd). Uncommitted: a **review-and-fix round** — nine reviewer
+  findings, automatic sync from the audio output's latency (kicks held back on Bluetooth),
+  a detector noise floor, the magma and brat colormaps. Gated by `devtools/checkkick.js`
+  and `devtools/checkmusic.js`. It runs in Chrome on the M1; the page is unlinked and
+  pruned from the deploy, and shipping it is Alfred's call.
 - **FFTPERF_PLAN.md** — what the step's transforms actually cost, and what to do about it.
   Written 2026-08-21, **closed 2026-08-22**. Phase 0 built the `?bench` harness (whole-step,
   per-kernel, a copy / constant-twiddle / full ladder per FFT kernel, a per-lane `grads hash`)

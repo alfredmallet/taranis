@@ -81,7 +81,8 @@ def test_signal():
 
 # option sets, in the PORT's names (music.js MusicDetector) -> the python keyword
 KEYS = dict(nbands="nbands", fmin="fmin", fmax="fmax", fps="fps", nfft="nfft", threshold="threshold",
-            minGap="min_gap_s", meanS="mean_s", refDecayS="ref_decay_s", normS="norm_s", warmupS="warmup_s")
+            minGap="min_gap_s", meanS="mean_s", refDecayS="ref_decay_s", normS="norm_s", warmupS="warmup_s",
+            fluxFloor="flux_floor", peakDecayS="peak_decay_s")
 CASES = [
     ("the page's settings: 4 bands, threshold 0.3", dict(nbands=4, threshold=0.3)),
     ("the detector's defaults: 3 bands, threshold 0.15", dict()),
@@ -94,6 +95,12 @@ CASES = [
     ("a narrower frequency range (100-2000 Hz)", dict(nbands=4, threshold=0.3, fmin=100.0, fmax=2000.0)),
     ("30 frames per second", dict(nbands=4, threshold=0.3, fps=30.0)),
     ("nfft 256", dict(nbands=3, threshold=0.3, nfft=256)),
+    # the noise floor (off in every case above). This signal has no quiet stretch for a
+    # realistic floor to act on, so the two cases set it ABOVE the band's own peak-hold
+    # (1.5x): every strength is then scaled by it and the weaker onsets drop out, which is
+    # what makes the option, and the peak-hold's decay time, show in the answer.
+    ("a noise floor of 1.5 of the band's 30 s peak-hold", dict(nbands=4, threshold=0.3, fluxFloor=1.5)),
+    ("a noise floor of 1.5 of a 0.5 s peak-hold", dict(nbands=4, threshold=0.3, fluxFloor=1.5, peakDecayS=0.5)),
 ]
 
 
@@ -121,7 +128,20 @@ def main():
         full = dict(nfft=512)
         full.update(opts)
         kw = {KEYS[k]: v for k, v in full.items()}
-        t, b, s, edges, tf = mt.detect_onsets_causal(SR, x, **kw)
+        # (detect_onsets_causal itself has no floor argument: it stays what it was. The floor
+        # cases drive the class directly, cut into frames exactly as that function cuts them.)
+        if "flux_floor" in kw:
+            det = mt.CausalOnsetDetector(SR, **kw)
+            win, rows = np.blackman(kw["nfft"]), []
+            for i in range(int(len(x) / SR * det.fps)):
+                end = int(round((i + 1) / det.fps * SR))
+                if end >= kw["nfft"]:
+                    rows += det.push(np.abs(np.fft.rfft(win * x[end - kw["nfft"]:end])) / kw["nfft"], end / SR)
+            rows.sort(key=lambda r: r[0])
+            t, b, s, tf, edges = ([r[0] for r in rows], [r[1] for r in rows], [r[2] for r in rows],
+                                  [r[3] for r in rows], det.edges)
+        else:
+            t, b, s, edges, tf = mt.detect_onsets_causal(SR, x, **kw)
         cases.append(dict(tag=tag, opts=full, edges=[float(v) for v in edges],
                           onsets=[[float(tf[i]), int(b[i]), float(s[i]), float(t[i])] for i in range(len(t))]))
     out["cases"] = cases

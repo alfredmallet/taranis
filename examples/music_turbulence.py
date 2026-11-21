@@ -161,11 +161,19 @@ class CausalOnsetDetector:
     All windows are counted in FRAMES at the nominal `fps`, so the caller must push at about
     that rate. A gap longer than `gap_s` (a hidden tab, a seek) only re-primes the previous
     spectrum: the flux across a gap is the music having moved on, not an onset.
+
+    `flux_floor` (default 0 = off, and then nothing here differs from before it existed) is
+    the noise floor the live page turns on: a band's normaliser is held at no less than
+    `flux_floor` times a peak-hold of that band's own flux decaying over `peak_decay_s`, so
+    flux far below what the band recently carried is not an onset. Its failure mode is the
+    other side of that: after a loud passage, onsets weaker than `flux_floor` of it are
+    missed until the peak-hold has decayed; and a source that is noise from its first
+    sample (a microphone in a quiet room) has no louder past to be measured against.
     """
 
     def __init__(self, sr, nbands=3, fmin=40.0, fmax=10000.0, fps=60.0, nfft=2048,
                  threshold=0.15, min_gap_s=0.07, mean_s=0.20, ref_decay_s=30.0,
-                 norm_s=20.0, warmup_s=0.5, gap_s=0.1):
+                 norm_s=20.0, warmup_s=0.5, gap_s=0.1, flux_floor=0.0, peak_decay_s=30.0):
         freqs = np.fft.rfftfreq(nfft, 1.0 / sr)
         self.sr, self.nfft, self.nbands, self.fps = sr, nfft, nbands, fps
         self.edges = np.geomspace(fmin, min(fmax, 0.5 * sr), nbands + 1)
@@ -177,6 +185,13 @@ class CausalOnsetDetector:
         self.ref, self.prev, self.t_last = 0.0, None, None
         self.hist = [[] for _ in range(nbands)]          # raw band flux, all frames so far
         self.last_fire = [-np.inf] * nbands
+        # the noise floor (OFF at flux_floor = 0, which leaves every number below as it was):
+        # each band keeps a slow peak-hold of its own raw flux, and its normaliser is never
+        # allowed below flux_floor times that peak. Without it the running 99th percentile
+        # promotes ANY non-zero floor to "full strength" once the music stops.
+        self.flux_floor = flux_floor
+        self.pdecay = np.exp(-1.0 / (peak_decay_s * fps))
+        self.peak = [0.0] * nbands
 
     def push(self, mag, t_now):
         fps = self.fps
@@ -193,9 +208,13 @@ class CausalOnsetDetector:
         for b in range(self.nbands):
             h = self.hist[b]
             h.append(float(flux[self.sels[b]].sum()))
+            if self.flux_floor > 0.0:
+                self.peak[b] = max(self.peak[b] * self.pdecay, h[-1])
             if len(h) < 3 or t_now < self.warmup_s:
                 continue
             q = np.percentile(h[-self.nnorm:], 99.0) + 1e-30
+            if self.flux_floor > 0.0:
+                q = max(q, self.flux_floor * self.peak[b])
             s0, s1, s2 = h[-3] / q, h[-2] / q, h[-1] / q      # s1 is the candidate peak
             mean = np.mean(h[-1 - self.nmean:-1]) / q         # trailing, ends at the candidate
             t_peak = t_now - 1.0 / fps

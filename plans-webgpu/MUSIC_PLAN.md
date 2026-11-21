@@ -1,10 +1,10 @@
 # MUSIC_PLAN — live music drives the 2D demo
 
-> **STATUS: drafted 2026-11-21; M0 measured; M1 (solver) committed (14ed94b); M2 (page, clock,
-> click track and file) committed (c960488), runs in Chrome on the M1 and looked in sync by
-> eye; M3 (tab capture, input devices) and M4 (latency compensation) implemented the same
-> day, uncommitted, awaiting one fresh review and a real-browser pass. The page is unlinked
-> and pruned from the deploy.** Phase M0 was three
+> **STATUS: drafted 2026-11-21; M0 measured; M1 committed (14ed94b), M2 (c960488), M3 + M4
+> (cc92edd). A review-and-fix round — the reviewer's nine findings, automatic sync from the
+> audio output's latency (Bluetooth), a detector noise floor, two colormaps — is implemented
+> and uncommitted. The page runs in Chrome on the M1; it is unlinked and pruned from the
+> deploy.** Phase M0 was three
 > measurements that decided the design (results below).
 > **M0.a answered 2026-11-21: tab audio capture works** for both the Spotify and the
 > Pandora web players (Alfred, Chrome on the M1) — tab capture is the primary route.
@@ -151,418 +151,162 @@ Consequences: the drag and the kick never appear in `rmhd2d.html` (which keeps s
 unmodified RMHD), nothing has to be pinned and restored, and `pages.yml`'s staging and
 `docs.html` each gain one page.
 
-## Phases and gates
+## Real-browser record after M4 (2026-11-21, M1, Chrome)
 
-**Process (changed 2026-11-21, agreed with Alfred).** M1 went implementer → fresh adversarial
-reviewer → fix round, the standing flow, and it paid: the reviewer found the stale-dt hazard
-and 13 real gate holes. But gate and mutation runs were most of the wall time, and what
-remains is page glue and audio plumbing, where a mistake shows when the page is opened. So
-from M2 on: implementer only, gates for the pure logic, no mutation quota (M2's one round
-was already in flight), and **one fresh reviewer pass after M4** over everything since
-14ed94b, aimed at the clock and the detector port. Alfred tried M2's page on the real GPU
-(M1, Chrome) with the click track and a file on 2026-11-21: "looks good", in sync by eye.
+- **Tab capture: Alfred, by eye and ear — "works extremely well".** His debug record:
+  `kind "tab"`, **`suppressed true`**, `played true`, `compensated true`, `delayMs 50`,
+  mode "the tab is silenced and the page plays its audio, delayed", 48000 Hz, nfft 2048,
+  `videoTrackAlive true`, track `deviceId …?local_echo=false`, `outputLatency 0.168`. So
+  **Chrome honours `suppressLocalAudioPlayback` and reports it in `getSettings()`** — the
+  compensated tab path is the live one, and the "no sound at all" failure did not occur.
+- **Microphone: not assessed** (a loud room). The missing noise-floor guard is the known
+  gap there.
+- **Click track on cc92edd, 22 s, by automation:** plays through the delay, mode line
+  "latency compensated (sound delayed 50 ms)", 0 rebases, 0 frames at the cap, kick
+  latency 0.039 s. `lagAfterSeconds` mean −0.0023, min −0.0066, max 0 — after a frame's
+  steps the simulation is within a step of the audio clock, which confirms that the
+  ~15 ms `lag` in the M2 record is the pre-step reading and not an offset in the picture.
+- **Output latency — was OPEN, now built (fix round, below).** That run reported
+  `outputLatency` 0.168 s where the M2 run reported 0: the device was AirPods (Bluetooth),
+  so the 0.168 s is real, and with the 50 ms sound delay of cc92edd on top the picture LED
+  the sound by roughly 168 + 50 − 39 − 17 ≈ 160 ms in the session Alfred judged good. A
+  DelayNode can only delay sound; when the output is already later than the detection,
+  the kicks must wait instead. See "Review and fix round", part B.
 
-**M0 — measure, no `webgpu/` code.**
-- a. **DONE 2026-11-21.** Chrome on the M1, a tab playing the Spotify web player, then
-  Pandora, captured with "Also share tab audio": audio comes through for both (Alfred,
-  with a throwaway `getDisplayMedia` + `AnalyserNode` level-meter page). Tab capture is
-  the documented route; loopback is the fallback for desktop apps. System-audio capture
-  on macOS was not tested and is not needed.
-- b. **MEASURED 2026-11-21; Alfred's verdict on the movies pending.**
-  `detect_onsets_causal` in `examples/music_turbulence.py` (`--causal`): the last 2048
-  samples under a Blackman window once per 60 Hz frame, peak-hold compression reference
-  (30 s), trailing 20 s 99th-percentile normalisation, trailing 0.2 s mean, a peak declared
-  one frame late, 70 ms refractory. Against `detect_onsets`, 4 bands, threshold 0.3,
-  onsets matched per band within 30 ms:
+## Review and fix round (2026-11-21, after cc92edd) — uncommitted
 
-  | signal | offline /s | causal /s | recall | precision | recall, strength ≥ 0.8 | ≥ 0.95 |
-  |---|---|---|---|---|---|---|
-  | click track, 30 s | 7.2 | 7.2 | 0.99–1.00 | 1.00 | — | — |
-  | Goldberg var. 1, 115 s | 18.6 | 14.7 | 0.61–0.83 by band (0.73 pooled) | 0.80–0.99 | 0.92 | 0.96 |
-  | rock track, 251 s | 10.9 | 9.9 | 0.65–0.87 by band (0.71 pooled) | 0.74–0.79 | 0.84 | 0.91 |
+One fresh reviewer read M3/M4 and mutation-tested the gate; Alfred used the page on
+Bluetooth earphones. **No wrong number was found in the detector or in the clock's
+tracking.** What was found were state-machine and policy bugs, each reproduced under the
+stub, plus one design gap (output latency). Light process, by agreement: gates where
+cheap and where a failure would be silent, the affected gates run once, **no mutation
+round** — none of the rows added here has been mutation-tested, and there is no further
+review.
 
-  Matched onsets differ in time by +2 to +6 ms mean, 5–10 ms scatter; matched strengths
-  agree in the mean (ratio 0.94–1.02) and correlate at 0.5–0.7. The page knows about an
-  onset **40 ms** after its window centre (half a window + one frame).
-  What the disagreement is made of (rock track, first 60 s): whole-clip instead of running
-  normalisation changes nothing (recall 0.68 vs 0.69) — **the causal normalisation is
-  free**; the hop is what matters — **30 Hz polling drops recall to 0.44**, 100 Hz raises
-  it only to 0.72 at lower precision (0.64). So ~30% of the weaker onsets are simply
-  picked differently by two equally arbitrary peak-pickers, and that part is not worth
-  chasing. Consequence for the design: a page that renders below 60 Hz loses onsets, so
-  either music mode requires 60 Hz or the detector moves to an `AudioWorklet` with a fixed
-  hop (decide in M2, with the measured frame rate).
-  Side by side (40 s, 256², same settings; blob positions differ because the two onset
-  lists consume the RNG differently): `examples/data/music/m0b_offline_left_causal_right.mp4`.
-  Gate: Alfred prefers neither, or the difference is understood. **PASSED 2026-11-21: accepted.**
-- c. **LAPTOP MEASURED 2026-11-21** (M1, Chrome, `apple metal-3`, `?bench` at 256²,
-  `cflEvery` 4): whole step 1.475 ms median (1.465 min), i.e. 678 steps/s of pure GPU;
-  the running app reads **~600 steps/s** with the display on. Need, from the offline runs
-  of the rock track at 256²: 290 steps per second of audio with the offline detector and
-  4 bands, 236 with the causal one, 330 on an 8 s clip with 3 bands — so **1.8–2.5×
-  headroom**, over the ≥ 400 target. (FFTPERF_PLAN's older ~525 is superseded for this
-  machine.) Per kernel the step is still transform-bound: `rowsC2R` 148 µs and `colsInv`
-  86 µs of the 1475.
-  **Still open:** the phone; and whether auto-diss lands near the offline rule
-  (3·amp/(n/6)⁴ at hyper 2).
+### A. The review's findings
 
-**M1 — solver.** `blobKick` + drag. **IMPLEMENTED 2026-11-21, through one adversarial
-review round the same day, committed as 14ed94b; nothing has run on a real GPU.** Developer notes:
-`webgpu/README.md`, "The impulsive kick and the drag".
+| | finding | what changed | gated? |
+|---|---|---|---|
+| F1 | a second Start (or a source change) while `ctx.resume()` was pending orphaned a source that played for ever | `music.starting` stays true across every await of `musicStart`; the generation is re-checked after the LAST one; a stale acquisition is given back | yes — a `resume()` promise the leg holds, click and tab |
+| F2 | at `rate` < 0.37 the hold-back and the 0.25 s rebase deadlocked: no steps, BEHIND lit falsely | the hold-back applies only while the simulation is less than half of `lagMax` behind; being AHEAD is allowed `lagMax` plus one step before a rebase | yes — pure, and on the page: silence at rate 0.25, 0.35 and 2 |
+| F3 | BEHIND latched across sessions | Stop and Start reset `music.clock` and `music.behind` | yes |
+| F4 | a device that cannot keep up never lit BEHIND (a long frame was excused as a hidden tab) | "hidden" comes from `visibilitychange` (`resumed`), not from the frame gap; a long gap while visible is behind | yes — both |
+| F5 | a granted capture leaked if anything threw afterwards | `musicAcquire` stops the stream on any throw after the grant; `musicStart` stops whatever it acquired and did not hand to a session | yes — tab and input, at two points each |
+| F6 | the tab path never checked the capture was a tab | `systemAudio: "exclude"` in the request; the page plays a capture only if its video track reports `displaySurface === "browser"` | yes |
+| F7 | after music, any noise floor became ~8 kicks/s at strength 0.9 | a noise floor on the normaliser (below) | yes — parity with the python on two option sets, and behaviour on signal + noise |
+| F8 | with `cfl_every` 4 the simulation can end a frame up to ~50 ms ahead in a decaying flow | **noted, not changed.** dt is frozen for four steps while the flow slows, so `n·dt` overshoots the target; bounded by one `cfl_every` block, self-correcting at the next CFL step. `cfl_every` 1 on the page's slider removes it at the cost of a reduction per step | no |
+| F9 | docs named `lagSeconds` for the within-a-frame criterion; `pages.yml` said "these two lines" of four; the run button said Pause for a full stop; a non-finite state froze silently | the text names `lagAfterSeconds`; the comment says which line; the button reads Start / Stop; a non-finite readback stops the page with a message | button and non-finite: yes; the two texts: no |
 
-*What landed.*
-- `physics.js`: `KICK_MAX` = 32 and `blobKickWGSL`. `solver2d.js`: the gated emission, and
-  on `Solver` the parameters `mu` / `kick`, `_packKicks`, `kick(list)`, `_dragLin`,
-  `setDrag(mu)`, and the `_cflStale` mark `step` honours. `gen_kickfixture.py` +
-  `devtools/fixtures/kick_offline.json`.
-- `devtools/checkkick.js`, 201 rows, all green: the emitted kernel against a real-space
-  DFT and against the offline `make_kick`'s own output (max |δ|/peak ≤ 1.4e-7); k = 0 and
-  the out-of-band modes untouched bit for bit; the Elsasser map and additivity exact;
-  `kick()`'s upload / encoder / dispatch / submit and a snapshot that nothing else about
-  the solver moves; the stale-CFL mark as kick-then-step dispatch logs; the drag column,
-  its refusals, and E(T)/E(0) = e^(−μT) through the real `stage` kernel to 9e-8 — at
-  hyper 1–4, on a rectangular grid, and in the music configuration (`kick: true` + `mu`).
-- Existing gates all green with the same verdict rows as before, and both pages' full
-  kernel dumps byte-identical to HEAD; a never-kicked solver's dispatch log and uploaded
-  bytes are identical to HEAD's (one-time out-of-tree comparison, 4 configurations).
-  `checksolver2d` is fully green, 34 rows: the new JavaScript is its fourth allowance
-  (`MUSIC_SHADERS` / `MUSIC_SOLVER`, 11 blocks), and in the same pass the `makeGrid` row
-  that f1f5f23 had left red since 2026-11-13 was restored by recording that commit's two
-  lines as their own allowance (`F1F5_GRID`) — shown live on a scratch clone.
+Reviewer's surviving mutations closed with rows: the look-ahead bound scaling with
+`rate`; Stop clearing `music.behind`; the dropped-blob counter accumulating; an input
+device with no audio track; another file chosen mid-play; ANY track ending the session; a
+stale session's track not stopping its successor; the detector's history trimming (a
+600-frame run against an untrimmed twin).
 
-*Differences from the plan as drafted.*
-1. **The kernel is emitted only for `kick: true`** (as `srcInit` is for `eqsrc`), so
-   `rmhd2d.html` emits exactly the kernels it did and no gate's `ADDED` list changed —
-   the "kick never appears in the 2D app" decision, made literal.
-2. **The drag is applied by the Solver to `makeGrid`'s column, not inside `makeGrid`.**
-   Same numbers (`fl32(lin) − μ/2`).
-3. **`mu ≠ 0` with `eqsrc` is refused as well as `pm ≠ 1`** — the maintained-flux source
-   reads the same column.
-4. **`kick()` also refreshes the energy scalars, counts itself in `solver.nkicks`, and
-   marks the CFL stale** (review F1, below).
-5. **Overflow policy**: first `KICK_MAX` per channel kept, the rest dropped and the count
-   returned (`{used, dropped}`).
-6. **Validation**: every blob is checked before anything is packed — any list position,
-   zero amplitude included — on what is actually uploaded: non-finite input, σ ≤ 0, and
-   an fp32-infinite weight or σ all throw. `x`, `y` are packed modulo the box.
-7. **`@workgroup_size(64, 1, 1)`**, spelled out, because the devtools interpreter runs a
-   one-argument `(64)` four times per invocation id and this kernel accumulates.
-8. **Out-of-band modes and k = 0 are "untouched", not "exactly zero"**: an early return,
-   which is the stronger statement. k = 0 is inert, not zeroed.
-9. **The fixture stops at σ = 0.5**: the offline gaussian is minimum-image, the kernel's
-   fully periodic; they differ by 3e-6 of the peak at σ = 0.625 and 3e-9 at 0.5.
-10. **The Nyquist lines are covered by the cut, not by a reality check**: no retained mode
-    lies on them; the ky = 0 row is exactly hermitian.
+**Two more changes to the clock that F2 required**, beyond the reviewer's suggested bound:
+the ahead-rebase threshold became `lagMax` plus one step (with the bound alone, the single
+step taken at rate 0.25 lands 0.27 s ahead, rebases, and the simulation runs three times
+too fast); and a frame that kicked now takes its one step even when the simulation is
+ahead (at a low rate it can be ahead by most of a step when a kick lands, and the kicked
+flow must not wait for the audio to catch up — the step is a small, freshly computed one).
 
-*The review round (2026-11-21).* A fresh reviewer mutation-tested the gate. No wrong
-number; one hazard, one poison channel, and fourteen surviving mutants that were all holes
-in what the gate observed. Fixed:
-- **F1, hazard — a kick left a stale dt.** `step(cflEvery)` recomputes dt only at
-  `nsteps % cflEvery == 0`, so up to `cflEvery − 1` steps ran on the pre-kick dt; after
-  silence that is the quiescent floor `cfl·dx/0.1`, ~10·amp times the CFL dt. Now `kick`
-  sets `_cflStale` and the next `step` recomputes dt regardless, then clears it. A solver
-  that is never kicked is on the unchanged schedule.
-- **F5, poison — `{sigma: 1e13, amp: 1}`** packed an infinite fp32 weight and the kernel
-  wrote NaN to every mode. The packed weight and σ are now checked in fp32, and positions
-  are wrapped so a huge finite `x` cannot overflow the phase either.
-- **F2/F3/F6/F7, gate holes**: the gate now wraps the command encoder (a `clearBuffer` or
-  copy inside the kick, or a pass never ended, is visible), snapshots the solver around a
-  kick, builds the music configuration and hyper 3/4 and a rectangular grid for every drag
-  path, checks the dispatch count where NM/64 is not an integer, and refuses bad blobs at
-  every list position including at zero amplitude. All sixteen re-applied survivor
-  mutations are killed.
+**The noise floor (F7) — what was chosen and how it fails.** Each band keeps a peak-hold
+of its own raw flux decaying over `peak_decay_s`; its normaliser is the running 99th
+percentile as before, but never less than `flux_floor` times that peak. Off by default in
+the python `CausalOnsetDetector` (`flux_floor = 0`: `detect_onsets_causal` is bitwise
+what it was at 94030e1, re-checked), on in the page at **0.3 over 120 s**. Measured (rock
+track 30 s, then 60 s of white noise, 4 bands, threshold 0.3, a 30 s hold):
 
-*What M2 inherits from this — obligations, not suggestions.*
-- **Construct the music solver with `kick: true`, `epsP: 0`, `epsM: 0`, `pm: 1`,
-  `eqsrc` off.** The `Solver` defaults are `epsP = epsM = 0.15`: left alone, the OU shell
-  forcing and its lagged scales run underneath the kicks.
-- **One `kick()` per onset, never a merged list.** `KICK_MAX` = 32 per channel fits one
-  band (15 at 256², 30 at 512²); two onsets in one frame merged can need 60. Check the
-  returned `dropped` and treat non-zero as a bug.
-- **The clock formula in Design uses a stale dt after a kick.** `n = ceil((target − simT)
-  / dt_last)` takes `dt_last` from the last readback, which is the PRE-kick dt until one
-  step has run — the solver now recomputes its own dt on that step, but the page's `n`
-  was computed from the old one and over-estimates the advance per step. After a kick,
-  take one step, re-read, then compute `n` (or bound `n` by the post-kick CFL).
-- **M0.c's ~600 steps/s was measured at `cflEvery` 4.** Each kick now forces one extra
-  CFL reduction; at ~15 kicks/s against ~300 steps/s that is small, but the headroom
-  figure should be re-measured with kicks at the real rate, and at `cflEvery` 1 if the
-  page uses it.
-- **Key redraws and the stats cache on `nkicks` as well as `nsteps`** (`common.js`
-  `stateMark`): a kick changes the state without a step.
-- **The energy jump per kick must be differenced from two readbacks.** Kick energy enters
-  no accumulator; with the drag on, `sc[6]`/`sc[7]` are hyperviscous + μE.
-- **Amplitude convention**: a lone ζ⁺ blob of amplitude `amp` has peak |u| = |b| = amp/2
-  (the offline script's convention too — the page's `amp` slider means the same thing).
-- **`setDrag(0)` on a fresh solver can move the column by one ulp** (it rebuilds through
-  `refreshDissipation`'s fp32-k² formula); construction at `mu = 0` cannot.
+| noise level re the music | −40 dB | −60 dB | −75 dB | −90 dB |
+|---|---|---|---|---|
+| kicks/s without the floor | 8.8 | 9.4 | 9.3 | 9.5 |
+| kicks/s with 0.3 | 4.9 | 0.0 | 0.0 | 0.0 |
 
-**M2 — the page, the clock, the click track and a file.** **IMPLEMENTED 2026-11-21,
-uncommitted.** Alfred has since tried it in Chrome on the M1's GPU with the click track and
-a file and reports it looked in sync; the three NUMBERS below (lag, energy jump, latency)
-have not been read off yet, and nothing else on the browser-only list is checked. Developer notes:
-`webgpu/README.md`, "The music page".
+On the music itself it removes 0.1% of the onsets (rock and Goldberg, 90 s each). The
+page's 120 s hold was chosen so the protection lasts minutes, not one; **the cost figure
+was measured at 30 s and not re-measured at 120 s.** Failure modes: (1) a source that is
+noise from its first sample — a microphone in a quiet room — has no louder past, so it
+still kicks; (2) after a loud passage, onsets weaker than 0.3 of it are missed for up to a
+couple of minutes; (3) noise only 40 dB down is halved, not removed.
 
-*Decisions for M2* (made by the coordinating session while Alfred was away, 2026-11-21,
-and recorded here as theirs, not his — each is cheap to revisit):
-1. `music.html` is its own page on the shared framework with a reduced control set.
-   Fixed: N = 256, a 2π box, hyper 2, Pm 1, `epsP = epsM = 0`, no spacebar blobs, a solver
-   built with `kick: true` and `mu = 1/(memory·rate)`, `diss = 3·amp/(n/6)⁴` recomputed on
-   an amp change, |u| displayed. **Not linked from any page**; linking it is Alfred's.
-2. The logic is `music.js`, pure, so node can run it; the audio glue is a thin layer.
-3. The clock is the audio clock, through a hook in the shared loop that is null on the
-   other pages; one `kick()` per onset; rebase past 0.25 s of lag; `stateMark` keyed on
-   `nkicks`; `cflEvery` as the other pages use it.
-4. Energy per kick is differenced from readbacks; a `?musicdebug` record.
-5. Warm-up and running normalisation as in the python.
+### B. Output latency: automatic sync
 
-*What landed.*
-- `webgpu/music.js` (pure): `musicBandPlan`, `MusicDetector`, `musicShouldPush`,
-  `musicRng`, `musicBlobsFor`, `musicKickList`, `musicClickTrack`, `musicClock`.
-- `webgpu/music.html`: the control spec, `uiParams`, Start/Stop/Reset, the audio graph
-  (source → analyser → destination, fftSize 2048, smoothing 0), `musicStep` (detector →
-  kicks → clock), the band strip, the BEHIND indicator, `?musicdebug` /
-  `?musicdebug=energy`.
-- `webgpu/common.js`: `stepHook` (null elsewhere), `stateMark` appending `/k<nkicks>` only
-  when a solver has been kicked, and `_forcingRecord` knowing a kicked run. Every existing
-  page's emitted WGSL is byte-identical to 14ed94b, and `checkidle`'s 54 legs are
-  unchanged.
-- `examples/music_turbulence.py`: `detect_onsets_causal`'s per-frame core is now the class
-  `CausalOnsetDetector` (takes magnitude spectra), which `MusicDetector` ports line for
-  line. Its output is bitwise what it was at 94030e1 on the click track, the Goldberg
-  variation and the rock track (4 bands / 0.3 and 3 bands / 0.15).
-- `webgpu/gen_musicfixture.py` → `devtools/fixtures/music_ref.json` (279 kB; regenerates
-  byte for byte): `band_plan` at eleven argument sets, and `CausalOnsetDetector` on a
-  stored 8 s test signal under eleven option sets.
-- `devtools/checkmusic.js`, 226 rows, all green: bandPlan == the python's (σ to 1e-14,
-  counts exact); the detector gives the python's onsets — same frame, same band, strength
-  to 1e-15 — in all eleven option sets; the click track's kicks, snares and hats are
-  found in the bass, middle and top bands at their scheduled times in the page's
-  configuration; the clock's count, cap, look-ahead rule and every rebase; and the page
-  booted and DRIVEN under the stub with a fake `AudioContext` whose analyser computes the
-  true spectrum of the page's own click track — one `kick()` per onset with the band's σ
-  and count per channel, kicks before steps, the steps taken equal to the clock's,
-  simulation time within a frame of the audio over 12 s, rebase and indicator when it
-  cannot keep up, Stop, restart, bpm change, a file source, a file that fails to decode.
-  Mutation-tested once by the implementer: 131 one-line mutations of `music.js`, the
-  page glue and the loop hook, 123 killed; the 8 survivors each became a row, but those rows
-  were NOT re-run against their mutants (the round was cut short by agreement, and there is
-  no separate reviewer round for M2 — one fresh review follows M4).
-- `.github/workflows/pages.yml`: `music.html` and `music.js` are pruned from the deployed
-  site, as `game.html` is. **This is the implementer's call, not a recorded decision** —
-  without it the next push to main would publish an unlinked development page. Delete the
-  two lines to ship.
+`musicSync` (pure, in `music.js`). Two delays the page did not choose — the detection
+latency `MUSIC_LDET` = 0.039 s (measured) + one frame = 0.0557 s, and the output latency
+`Lout` = `AudioContext.outputLatency` — and two it can add: D on the sound (a DelayNode,
+only where the page plays the source) and H on the kicks (a queue). A hit entering the
+analyser at 0 is heard at D + Lout and seen at Ldet + H. With `v = Lout − Ldet + trim`:
 
-*Deviations from the plan and from the M2 decisions.*
-1. **`n` is not always `ceil((target − simT)/dt)`.** Two additions, both in `musicClock`
-   and both gated: (a) a step that would overshoot the target by more than one frame is
-   not taken yet (`n` rounds down) — at rest dt is six frames long, and rounding up left
-   the simulation that far *ahead*, where a kick then hung frozen on screen until the
-   audio caught up; (b) a frame that kicked takes at least one step when behind at all,
-   since the dt in hand is a pre-kick one and the solver recomputes it on that step. This
-   is "let the next frame's feedback absorb the stale dt", with the one-step floor that
-   makes there be feedback. Nothing loops on a stale dt.
-2. **The detector is fed at ≈ 60 Hz, not once per frame**, on displays faster than that
-   (`musicShouldPush`): its windows are counted in frames. At 60 Hz it is once per frame.
-3. **The debug energies need `?musicdebug=energy`.** A readback per kick costs a GPU round
-   trip each, which would distort the timing numbers the plain flag is for.
-4. **The parity fixture is at 11025 Hz / nfft 512**, not the page's 44100 / 2048: the same
-   46 ms window and the same code path at a quarter of the bins, which is what keeps the
-   committed fixture at 279 kB. The page's configuration is exercised by the click-track
-   leg and the end-to-end leg instead (no python reference there — the gate computes the
-   spectra).
-5. **The JS click track is its own synthesiser**, not a port of the offline one (which
-   uses numpy's RNG and scipy filters): same instruments and schedule, no kick-less
-   closing quarter (it loops), seamless.
-6. **Blob positions come from mulberry32**, not numpy's stream: a live session is not
-   comparable blob for blob with an offline movie. Distribution and rule are the same.
-7. **A saved `params.json` now says the run was kick-driven** (`_forcingRecord`, a small
-   addition to shared code keyed on the solver's own `g.kick`).
-8. Stop restarts a file from its beginning on the next Start (no pause/resume position).
+| routing | rule | laptop speakers (Lout ≈ 0) | AirPods (Lout 0.168) |
+|---|---|---|---|
+| the page plays it (click, file, silenced tab) | v ≥ 0: H = v, D = 0; v < 0: D = −v, H = 0 | D 56 ms, H 0 | D 0, H 112 ms |
+| a tab the page does not play | H = max(0, v); D unavailable | H 0, picture 56 ms late | H 112 ms, exact |
+| an input device | Lout does not apply (v = −Ldet + trim); H = max(0, v) | H 0, picture 56 ms late | the same |
 
-*Measured on a real GPU, 2026-11-21* (the coordinating session, through browser
-automation: the COMMITTED M2 page, a `git archive` of c960488 served from a scratch
-directory, Chrome on the M1, tab visible, click track at 120 bpm).
-- **Sync** (`?musicdebug`, 67.2 s, 3736 frames = 56.8 fps; context at 48000 Hz,
-  `baseLatency` 5.3 ms, `outputLatency` reported 0): `rebases` 0, `framesAtCap` 0. `lag`
-  over the whole run: mean 0.0159 s, min 0.0061, max 0.0685; after the first 10 s: min
-  0.0061, 5% 0.0119, median 0.0145, 95% 0.0294, max 0.0685. Never negative. 68 of 3736
-  frames exceed two frames (0.034 s), the earliest at 0.14–0.44 s (start-up). Steps per
-  frame mean 4.43 (2–14): **246 steps/s against the ~600 available.**
-- **How to read that lag.** `lag` is `target − simT` with `simT` from the PREVIOUS frame's
-  readback, i.e. it is taken BEFORE the frame's steps: the simulation ended the last frame
-  on its target, the audio clock has since moved one frame on, so a steady run reads about
-  one frame (0.0145 s median at 56.8 fps is 0.82 of one) by construction. The steps then
-  taken bring it to the target, and the frame is rendered after them. So the picture is
-  not a frame behind the audio clock; the record was. The M2 gate "within a frame" is met
-  in the median and not at the 95th percentile (1.8 frames) *in that pre-step number* — the
-  tail is frames that followed a long one. From this round the record also carries
-  `lagAfter` (the lag expected once the frame's steps are taken, at the dt in hand;
-  `summary().lagAfterSeconds`), which is the number to hold against the gate; it has not
-  been measured on a GPU yet. **An option, not taken:** the count could aim half a frame
-  past the target so that the pre-step lag centres on zero, but that puts the rendered
-  state half a frame AHEAD of the audio clock on every frame, and ahead of a kick that is
-  about to land — the thing the look-ahead rule exists to prevent. Leave it.
-- **Latency**, onset → `kick()` returning: band 0 (the kick drum) `latencySeconds` mean
-  0.0388 (0.0380–0.0433), `latencyFromScheduled` mean 0.0374 (0.0267–0.0773); band 1
-  0.0388 / 0.0372; band 3 (hats) from scheduled 0.0460 (0.0407–0.0793). About 38 ms plus
-  presentation, as estimated: **M4's 50 ms default delay is the right size.**
-- **Energy jump per kick** (`?musicdebug=energy`, 23.2 s, rebases 0), mean (min–max):
-  band 0 **0.361** (0.147–0.579) over 46 kicks, band 1 0.130 over 46, band 2 0.102 over
-  23, band 3 0.055 over 66. Offline click track: 0.30 / 0.24 / 0.16 / 0.08. The bass jump
-  is +20% of the offline figure, inside the plan's ~20%; the mid bands are lower (a
-  different synthesiser and detector).
-- **Not measured:** a file source, a 120 Hz display, a hidden-tab return, the save and
-  record buttons.
+- **Trim** is signed: positive makes the picture later, negative the sound later. It
+  enters `v`, so it comes off whichever side is in force and spills to the other; both
+  are ≥ 0 by construction and capped at 1 s.
+- **The queue.** Onsets are queued with `due = declared + H` and applied on the first
+  frame at or after it: one `kick()` each, before that frame's steps, head of the queue
+  first. Cleared by Stop, a change of source, Reset and the return from a hidden tab; a
+  behind-rebase leaves it alone.
+- **The clock's target is not shifted** — agreed with the coordinating session's reading:
+  a constant offset in audio time does not change the tracking, and simulation time's
+  origin is arbitrary. Only when a kick is applied moved.
+- `outputLatency` is re-read once a second; D moves by `setTargetAtTime`.
+- The slider is now "sync trim (ms)", ±150, default 0. The 50 ms default delay of cc92edd
+  is gone: on speakers the automatic value is 56 ms, the same thing by another route.
 
-*What only a real browser can say — unverified except where noted (it runs, and looked
-in sync by eye, 2026-11-21).*
-- That WebGPU runs `blobKick` at all (M1 never ran on a GPU either): blobs appear in |u|
-  when the click track's kick sounds.
-- That a real `AnalyserNode`'s spectrum is what the gate's is: Blackman window, 1/N
-  scaling, dB, smoothing 0, the window ending "now". The detector's behaviour on real
-  audio rests on that.
-- Sync: simulation time against `rate` × audio time over 60 s.
-- The energy jump per bass kick on the click track, against the offline 0.30.
-- Sound → picture latency, including the audio output latency and one frame of display.
-- That audio is audible, starts on the click (autoplay policy), and that
-  `decodeAudioData` takes an mp3 / m4a.
-- The frame rate the page actually holds at 256² with kicks, whether the 64-step cap or
-  the BEHIND indicator ever engages on the M1, and what a 120 Hz display does.
-- A hidden tab's return; the save / record buttons on this page.
+### C. Colormaps (Alfred's request)
 
-  *How to measure the three numbers M2 asks for* (Chrome on the M1):
-  `cd webgpu && python -m http.server 8766`, open
-  `http://localhost:8766/music.html?musicdebug`, leave the source on **click track**,
-  press **Start**, wait 65 s, and in the console evaluate `musicDebug.summary()`.
-  - *Sync*: `lagSeconds.min` / `.max` should stay within about ±1/60 s (0.017) with
-    `rebases` 0 and `framesAtCap` 0; `musicDebug.frames` has it frame by frame (`a`,
-    `target`, `simT`, `lag`, `n`).
-  - *Latency*: `bands[0].latencyFromScheduled.mean` is seconds from a kick drum's scheduled
-    time to `kick()` returning — expect ≈ 0.04 (23 ms half window + one frame + up to one
-    more). What is *heard* is later than scheduled by `musicDebug.audio.outputLatency`, and
-    what is *seen* later than `kick()` by about a frame; perceived lag ≈ that mean
-    − `outputLatency` + 0.017.
-  - *Energy jump*: reload as `…/music.html?musicdebug=energy`, Start, wait 30 s,
-    `musicDebug.summary().bands[0].energyJump.mean` — the offline click-track figure is
-    0.30 at these settings (different kick synthesiser and detector, so "near", not equal).
+`magma` (matplotlib's — the offline |u| movies' map; a degree-6 least-squares fit to its
+256-point table, **max channel error 0.0226**, against 0.017 for the shared viridis) and
+`brat` (black → #8ACE00, linear and exact). They are a music-page extension: `MUSIC_CMAPS`
+in `music.js`, registered through a new opt-in `cmapExtend` in `common.js`; with nothing
+registered `cmapNames()` is `CMAP_NAMES` and `cmapWGSL()` returns `CMAP_WGSL` itself, so
+the other pages' menus and emitted WGSL are unchanged. The speed display starts on magma;
+the user picks either from the display card's colormap select, where they follow the
+shared four. Canvas, colour bar and a saved PNG's bar read one table.
 
-*What M3 must do.*
-- Tab capture and the input-device picker are two more ways to obtain a `MediaStream`;
-  `musicStart` already separates "get a buffer/source" from "analyser, detector, clock".
-  A stream source has no buffer, no `onended` in the same sense and no known duration.
-- With a live stream **audio time is `ctx.currentTime` only** — there is no schedule to
-  compare against, so `sched` stays null and latency is `tApplied − tOnset`.
-- Re-measure M0.c's headroom with kicks at a real rate (each kick forces one extra CFL
-  reduction) and decide the detector's home: on the frame as now, or an `AudioWorklet`
-  with a fixed hop if the frame rate measured in a browser is not a steady 60.
-- The delay compensation of M4 belongs between the source and the destination only — the
-  analyser must keep reading the undelayed signal.
-- Decide whether the page ships: remove the `pages.yml` prune and link it, or keep it a
-  development build.
+### What stays browser-only after this round
 
-**M3 — live sources, and M4 — latency compensation.** **IMPLEMENTED together 2026-11-21,
-uncommitted, awaiting the one fresh review. Nothing in this entry has run in a real
-browser** — the checklist at its end is what to do there. Developer notes:
-`webgpu/README.md`, "The music page".
+- Everything about `outputLatency` as a NUMBER: that Chrome's value for a device is the
+  delay actually heard (it is an estimate; the trim exists for that), that it updates when
+  the output device changes mid-session, and what it reads on speakers on this machine
+  (the M2 run said 0).
+- That `setTargetAtTime` on the delay is click-free, and that a kick hold of ~110 ms looks
+  right on Bluetooth.
+- `displaySurface` being reported as `"browser"` for a tab in Chrome — if it is not, a
+  tab would be analysed and NOT played while still silenced: **no sound at all**. Look
+  for that first.
+- `document.onvisibilitychange` firing as assumed.
+- The noise floor on a real microphone and on a tab left silent for minutes.
+- How magma and brat look.
 
-*Process.* By agreement these two phases ran under a lighter rule than M1/M2: gates for
-the pure logic and for anything that could be silently wrong, no mutation round, the
-existing gates run once at the end.
-
-*What landed.*
-- `music.js` (pure): `MUSIC_SOURCES`, `MUSIC_DELAY_DEFAULT` / `_MAX`,
-  `musicTabConstraints`, `musicInputConstraints`, `musicRouting`, `musicStartError`.
-- `music.html`: the source select gains "another tab's audio" and "audio input device";
-  `musicAcquire` (one function per way of obtaining a source), `musicStart` /
-  `musicStop` with a generation counter for anything still awaiting, the device list,
-  the delay slider, the mode line, `musicDebug.audio`.
-- The graph is `source → analyser` (a dead end, undelayed) plus, only where
-  `musicRouting` allows, `source → DelayNode → speakers`. M2's `analyser → speakers`
-  connection is gone.
-- `devtools/checkmusic.js`: 295 rows (was 226), all green — legs 6b and 10.
-
-*Decisions taken in this round* (the coordinating session's, with Alfred's agreement to
-the lighter process; each cheap to revisit):
-1. **A captured tab is played by the page only if its audio track reports
-   `suppressLocalAudioPlayback === true`.** Otherwise it is analysed and not played, the
-   page runs uncompensated and says so. No double audio in either case.
-2. **An input device is never played.** Uncompensated by construction.
-3. **Default delay 50 ms, slider 0–150 ms**, applied live.
-4. **No `docs.html` section, no nav link, no `?demo=` preset**: the page is unpublished.
-
-*Implementer's choices, flagged for the browser pass.*
-1. **The tab capture's video track is kept alive**, requested at 64 px and 1 frame a
-   second. I believe stopping it leaves the audio running in Chrome, but could not check,
-   and the failure would be silent. If the browser pass shows stopping it is safe, stop it
-   in `musicAcquire` (one line) and drop `videoTrackAlive` from the worry list.
-2. **The analyser is left unconnected** on its output side. The Web Audio spec allows it
-   and it is the common way to analyse a microphone; if a browser did not pull an
-   unconnected analyser the page would show no kicks at all for input devices and
-   unsilenced tabs — visible at once.
-3. **`getSettings().suppressLocalAudioPlayback`** is where suppression is read from. If
-   Chrome applies the constraint without reporting it there, a silenced tab would be
-   treated as unsilenced: the tab would be SILENT (suppressed) and the page would not play
-   it either. That is the one combination to look for.
-4. A microphone's noise floor is not gated (see the README's "known limit").
-
-*Still browser-only after this round.* Everything in M2's list, plus:
-- that tab capture delivers audio through this code path (M0.a tested a throwaway page);
-- whether `suppressLocalAudioPlayback` takes effect, and is reported, in Chrome on macOS;
-- whether the unused video track can be stopped;
-- that an unconnected analyser is processed;
-- device labels appearing after permission; a loopback driver (BlackHole) as an input;
-- that the 50 ms default actually lines the picture up with the sound, by eye and by
-  `summary()`;
-- Chrome's "Stop sharing" bar ending the session cleanly; a tab closed mid-capture.
-
-*The real-browser checklist* (Chrome on the M1; serve with
-`cd webgpu && python -m http.server 8766`, open
-`http://localhost:8766/music.html?musicdebug`). After each Start, the line under the
-sliders is the mode line; `musicDebug.audio` in the console is the record.
-1. **Click track.** Source "click track" → Start. Mode line: "latency compensated (sound
-   delayed 50 ms): the page plays this source, delayed". `musicDebug.audio`: `kind
-   "click"`, `played true`, `compensated true`, `delayMs 50`, `suppressed null`,
-   `sampleRate` 44100 or 48000. Move "sound delay" to 0 and to 150: at 0 the picture
-   should trail the click slightly, at 150 lead it; `delayMs` follows. After 65 s,
-   `musicDebug.summary()`: `lagSeconds` within ±0.017, `rebases` 0, `framesAtCap` 0;
-   `bands[0].latencyFromScheduled.mean` ≈ 0.04, and perceived ≈ that − `delayMs`/1000 −
-   `audio.outputLatency` + 0.017.
-2. **File.** Source "audio file" → choose an mp3 → Start. Same mode line; `kind "file"`,
-   `label` the file name. It stops by itself at the end of the file.
-3. **Tab.** Play something in the Spotify web player in another tab. Source "another
-   tab's audio" → Start → in Chrome's picker choose **Chrome Tab**, the Spotify tab,
-   "Also share tab audio" ON → Share. Then read `musicDebug.audio.suppressed`:
-   - `true`: the mode line says "…the tab is silenced and the page plays its audio,
-     delayed". You should hear the music ONCE, coming from the page. `played true`,
-     `delayMs 50`.
-   - `false`: "NOT latency compensated: this browser did not silence the captured tab…".
-     You should hear the music ONCE, from the tab. `played false`, `delayMs 0`.
-   - **Report if you hear it twice, or not at all** — those are the two ways this can be
-     wrong (choice 3 above).
-   Also read `videoTrackAlive` (expected `true`) and `trackSettings`. Then press Chrome's
-   "Stop sharing": the page should stop and say "the tab capture ended".
-4. **Tab, wrong pick.** Start again and choose a *window* or turn the audio toggle off:
-   the page should not start and should say to pick a Chrome TAB and switch on "Also share
-   tab audio". Start again and press Cancel: "the tab capture was cancelled or not
-   allowed".
-5. **Input device.** Source "audio input device": the list shows "default input" and
-   nameless entries. Start → allow the microphone → names appear. Mode line: "NOT latency
-   compensated: an input device is never played back…". **Nothing should come out of the
-   speakers from the page** (clap: the picture kicks, no echo). `kind "input"`, `played
-   false`, `delayMs 0`. If BlackHole is installed, pick it and route the system output
-   through it.
-6. **Switching.** While the tab capture is live, change the source to "click track": the
-   sharing bar should go away and the page stop. Start: no flurry of kicks in the first
-   second.
-7. **To settle choice 1** (optional): in the console during a live tab capture,
-   `music.audio.stream.getVideoTracks()[0].stop()` — if the kicks carry on, the video
-   track can be stopped in the code.
-
-*What is left after M4.* The single fresh review of M3/M4; the browser pass above; the
-decision to ship (remove the `pages.yml` prune, link the page, write its `docs.html`
-section); the noise-floor guard for microphones; the detector on an `AudioWorklet` if a
-device cannot hold 60 Hz; 512² live, which needs about five times the M1's step rate.
+**Checklist** (serve as before, open `…/music.html?musicdebug`):
+1. **Laptop speakers, click track.** Start. Mode line: "sound delayed 56 ms, kicks held
+   0 ms (output latency 0 ms, detection 56 ms): the page plays this source" (the first
+   number drops by whatever `outputLatency` Chrome reports). `musicDebug.audio`:
+   `delayMs ≈ 55.7 − outputLatencyUsedMs`, `holdMs 0`, `residualMs 0`, `trimMs 0`,
+   `ldetMs 55.7`. The button reads Stop.
+2. **AirPods, click track.** Connect them BEFORE Start. Mode line: "sound delayed 0 ms,
+   kicks held ~112 ms (output latency ~168 ms, …)". `musicDebug.audio`: `outputLatency
+   ≈ 0.168`, `delayMs 0`, `holdMs ≈ 1000·outputLatency − 55.7`, `residualMs 0`.
+   `musicDebug.kicks.slice(-5)`: `tDue − tFire ≈ holdMs/1000`, `tApplied ≥ tDue`. By eye
+   and ear the hit and the blobs should coincide; if not, move "sync trim" and report the
+   value that fixes it.
+3. **Switch output mid-session** (disconnect the AirPods while it plays): within about a
+   second the mode line and `musicDebug.audio` change to the speakers' numbers, with no
+   click in the sound.
+4. **Tab on AirPods** (the session that showed the problem): the numbers of 2, with
+   `kind "tab"`, `suppressed true`, **`surface "browser"`**, `played true`. If `surface`
+   is anything else you will hear NOTHING — report it.
+5. **Slow rate.** Rate slider to 0.25, click track: slow motion, no BEHIND.
+6. **Hidden tab.** Switch tabs for 20 s and back: no BEHIND, no burst of kicks.
+7. **Colormaps.** The display card's colormap select lists afmhot, viridis, RdBu,
+   grayscale, magma, brat; it starts on magma; the colour bar follows the choice; a saved
+   PNG shows the same map.
+8. **Stop / Start.** Stop while BEHIND is lit: the next Start begins without it.
 
 ## Decisions (Alfred, 2026-11-21)
 
