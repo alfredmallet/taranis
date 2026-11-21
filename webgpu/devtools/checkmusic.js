@@ -988,9 +988,9 @@ async function legBoot(state) {
     hook: stepHook === musicStep, run: running, plan: music.plan, kmax: KICK_MAX, mark: stateMark(),
     sel: cards.disp.map(c => c.selField.value), charts: cards.chart.map(c => c.type()), dbg: MUSIC_DEBUG,
     hasDbg: typeof window.musicDebug }); }`));
-  const diss = 3 / Math.pow(256 / 6, 4);
-  ok("the solver is 256^2 in a 2pi box, hyper 2, Pm 1, no equilibrium source",
-     q.p.nx === 256 && q.p.ny === 256 && q.p.Lx === 2 * Math.PI && q.p.Ly === 2 * Math.PI && q.p.hyper === 2 && q.p.pm === 1 && q.p.eqsrc === false);
+  const diss = 48 / Math.pow(256 / 3, 8);     // rate 48*amp at the cutoff n/3, hyper 4 (k^8)
+  ok("the solver is 256^2 in a 2pi box, hyper 4, Pm 1, no equilibrium source",
+     q.p.nx === 256 && q.p.ny === 256 && q.p.Lx === 2 * Math.PI && q.p.Ly === 2 * Math.PI && q.p.hyper === 4 && q.p.pm === 1 && q.p.eqsrc === false);
   ok("  ... built with kick: true (kernel, pipeline and buffer present) and NOT in blob mode",
      q.p.kick === true && q.gk === true && q.pl && q.buf && q.blob === false && q.nk === 0);
   ok("  ... the OU forcing is OFF: epsP = epsM = 0 (the Solver's own defaults are 0.15)", q.p.epsP === 0 && q.p.epsM === 0);
@@ -1028,9 +1028,9 @@ async function legBoot(state) {
   ok("rate 0.5 -> mu = 1 / (2 * 0.5) = 1: the memory is in seconds of AUDIO", v.mu === 1 && v.lin0 === -0.5 && env.getEl("vRate").textContent === "0.50");
   await P.input("rMAmp", 2);
   v = sv();
-  ok("amp 2 -> the dissipation doubles (the offline rule scales with amp), the drag untouched, hyper still 2",
-     Math.abs(v.diss / (2 * diss) - 1) < 1e-14 && v.mu === 1 && v.lin0 === -0.5 && v.hyper === 2 &&
-     Math.abs(v.lin1 - Math.fround(-2 * diss * v.k1 * v.k1 - 0.5)) < 1e-9, "diss " + v.diss.toExponential(4));
+  ok("amp 2 -> the dissipation doubles (the offline rule scales with amp), the drag untouched, hyper still 4",
+     Math.abs(v.diss / (2 * diss) - 1) < 1e-14 && v.mu === 1 && v.lin0 === -0.5 && v.hyper === 4 &&
+     Math.abs(v.lin1 - Math.fround(-2 * diss * Math.pow(v.k1, 4) - 0.5)) < 1e-9, "diss " + v.diss.toExponential(4));
   await P.input("rCfl", 0.25);
   ok("cfl_safety 0.25 -> solver.p.cfl", sv().cfl === 0.25 && env.getEl("vCfl").textContent === "0.25");
   for (const [id, val] of [["rMem", 1], ["rRate", 1], ["rMAmp", 1], ["rCfl", 0.4]]) await P.input(id, val);

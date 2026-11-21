@@ -173,7 +173,7 @@ unmodified RMHD), nothing has to be pinned and restored, and `pages.yml`'s stagi
   DelayNode can only delay sound; when the output is already later than the detection,
   the kicks must wait instead. See "Review and fix round", part B.
 
-## Review and fix round (2026-11-21, after cc92edd) — uncommitted
+## Review and fix round (2026-11-21, after cc92edd) — committed as f4c92f2
 
 One fresh reviewer read M3/M4 and mutation-tested the gate; Alfred used the page on
 Bluetooth earphones. **No wrong number was found in the detector or in the clock's
@@ -307,6 +307,25 @@ shared four. Canvas, colour bar and a saved PNG's bar read one table.
    grayscale, magma, brat; it starts on magma; the colour bar follows the choice; a saved
    PNG shows the same map.
 8. **Stop / Start.** Stop while BEHIND is lit: the next Start begins without it.
+
+## Dissipation order: k⁸ (changed 2026-11-21, Alfred's request)
+
+Where this plan says "hyper 2" and "3·amp/(n/6)⁴", the page and the offline script now use
+**hyper 4 (k⁸)** with the rule restated as **rate 48·amp at the dealiasing cutoff n/3**
+(`diss = 48·amp/(n/3)^(2·hyper)`; at hyper 2 that is the old number exactly). Measured
+offline, 256², 14 s click track, final spectrum normalised to k = 10:
+
+| dissipation | rate = 3 at k | E(40) | E(60) | E(84) | bass jump |
+|---|---|---|---|---|---|
+| k⁴, rate 48 at cutoff (old default) | 43 | 2.3e-2 | 1.0e-3 | 2.1e-5 | 0.35 |
+| k⁸, rate 200 at cutoff | 51 | 6.0e-2 | 2.8e-3 | 3.2e-6 | 0.33 |
+| **k⁸, rate 48 at cutoff (now)** | 60 | 6.8e-2 | 1.1e-2 | 2.1e-4 | 0.33 |
+| k⁸, rate 12 at cutoff | 72 | 7.2e-2 | 2.1e-2 | 3.9e-3 | 0.33 |
+
+Rate 12 flattens at the cutoff (the pile-up again); 48 still falls ×50 over the last 24
+wavenumbers. One short run, judged on the spectrum only — not on dense music, and not by
+eye. The solver's drag was already gated at hyper 4 (M1 review). The step-rate and sync
+measurements in this plan were taken at k⁴; offline the step count rises ~5%.
 
 ## Decisions (Alfred, 2026-11-21)
 

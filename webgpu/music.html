@@ -70,7 +70,7 @@
 
 // ---- what this page fixes (MUSIC_PLAN decisions) ---------------------------
 const MUSIC_N = 256;               // the grid: live music is a 256^2 feature (M0.c)
-const MUSIC_HYPER = 2;             // with the offline dissipation rule below
+const MUSIC_HYPER = 4;             // k^8, with the offline dissipation rule below
 const MUSIC_FPS = 60;              // the detector's nominal frame rate
 const MUSIC_NFFT = 2048;           // the analyser's window: 46 ms at 44.1 kHz
 const MUSIC_MAX_STEPS = 64;        // per frame, the cap `stepsPerFrame` has always had
@@ -151,10 +151,13 @@ function musicUi() {
 // the drag's energy e-folding RATE, in simulation time: the flow forgets over `memory`
 // seconds of AUDIO, which is memory * rate simulation time units
 const musicMu = u => 1 / (u.memory * u.rate);
-// the offline script's dissipation rule: the hyperviscous rate is 3*amp at k = n/6, i.e.
-// ~50*amp at the dealiasing cutoff (hyper 2). It scales with amp because the strain it has
-// to beat does; a rate of ~5 there leaves a grid-scale pile-up no timestep fixes.
-const musicDiss = u => 3 * Math.max(u.amp, 0.1) / Math.pow(MUSIC_N / 6, 2 * MUSIC_HYPER);
+// the offline script's dissipation rule: the hyperviscous rate nu*k^(2*hyper) is 48*amp at
+// the dealiasing cutoff k = n/3, whatever the order. It scales with amp because the strain
+// it has to beat does; a rate of ~5-12 there leaves a grid-scale pile-up no timestep fixes.
+// At hyper 4 (k^8) the rate falls to 3*amp at k = n/4.2 (60 at 256^2) where hyper 2 (k^4,
+// the rule's first form, 3*amp/(n/6)^4 -- the same number) reached it at n/6 (43): a
+// sharper cutoff and ~1.4x more undamped range.
+const musicDiss = u => 48 * Math.max(u.amp, 0.1) / Math.pow(MUSIC_N / 3, 2 * MUSIC_HYPER);
 
 function uiParams() {
   const u = musicUi();

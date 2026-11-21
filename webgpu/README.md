@@ -1698,9 +1698,9 @@ tab's audio, and an audio input device. It is the live twin of the offline
     cd webgpu && python -m http.server 8766
     # then http://localhost:8766/music.html            (add ?musicdebug to keep a record)
 
-**What the page fixes** (`uiParams`): N = 256, a 2π box, hyper 2, Pm 1, no equilibrium
+**What the page fixes** (`uiParams`): N = 256, a 2π box, hyper 4 (k⁸), Pm 1, no equilibrium
 source, **`epsP = epsM = 0`** (no OU forcing — the `Solver` defaults are 0.15), a solver
-built with `kick: true` and `mu = 1/(memory·rate)`, and `diss = 3·amp/(n/6)⁴`, the offline
+built with `kick: true` and `mu = 1/(memory·rate)`, and `diss = 48·amp/(n/3)⁸` (rate 48·amp at the dealiasing cutoff), the offline
 rule. The initial condition is rest. Its controls are few: source, Start/Reset, threshold
 (0.3), memory (1 s), amp (1), rate (1), the click track's bpm, the sync trim (0), the
 input device, and the two CFL knobs the

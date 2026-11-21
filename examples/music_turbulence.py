@@ -398,7 +398,7 @@ def pad(blobs):
 # driver
 # ---------------------------------------------------------------------------------------
 def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=None, diss=None,
-        hyper=2, cfl=0.4, threshold=0.15, causal=False, field="speed", sigma_min=None, seed=0,
+        hyper=4, cfl=0.4, threshold=0.15, causal=False, field="speed", sigma_min=None, seed=0,
         duration=None, audio_path=None, quiet=False):
     import imageio
     from matplotlib import colormaps
@@ -419,12 +419,15 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
                   f"{np.sum(b_on == b) / T:4.1f} kicks/s", flush=True)
     nframes = int(T * fps)
     if diss is None:
-        # hyperviscous rate nu k^(2 hyper) = 3 amp at k = n/6, i.e. ~50 amp at the dealiasing
-        # cutoff n/3 (hyper 2): enough that the spectrum falls ~3 decades over the last
-        # octave. A cutoff rate of ~5 left a flat, upturning tail -- grid-scale noise that
-        # looks like a CFL problem but does not respond to the timestep. Scales with amp
-        # because the strain rate the dissipation has to beat does.
-        diss = 3.0 * amp / (n / 6.0) ** (2 * hyper)
+        # hyperviscous rate nu k^(2 hyper) = 48 amp at the dealiasing cutoff n/3, whatever
+        # the order (at hyper 2 this is the earlier 3 amp/(n/6)^4). A cutoff rate of ~5-12
+        # leaves a flat, upturning tail -- grid-scale noise that looks like a CFL problem but
+        # does not respond to the timestep. Scales with amp because the strain rate the
+        # dissipation has to beat does. hyper 4 (k^8) is the default: the rate falls to
+        # 3 amp at k = n/4.2 where k^4 reached it at n/6, ~1.4x more undamped range, with
+        # the same bass energy jump per kick (256^2 click track: E(40)/E(10) 6.8e-2 against
+        # 2.3e-2, E(60)/E(10) 1.1e-2 against 1.0e-3, tail still falling to 2e-4 at k = 84).
+        diss = 48.0 * amp / (n / 3.0) ** (2 * hyper)
 
     step = Stepper(n, rate / (4.0 * fps), diss, hyper, cfl)
     kick, observe = make_kick(step.p, step.kg)
@@ -529,7 +532,9 @@ def main():
     ap.add_argument("--duration", type=float, default=None, help="seconds (default: whole file; 20 for the click track)")
     ap.add_argument("--field", choices=FIELDS, default="speed")
     ap.add_argument("--diss", type=float, default=None,
-                    help="hyperviscosity nu = eta (default: 3 amp/(n/6)^4, see run())")
+                    help="hyperviscosity nu = eta (default: rate 48 amp at the cutoff n/3, see run())")
+    ap.add_argument("--hyper", type=int, default=4,
+                    help="dissipation order: nu k^(2 hyper); 4 = k^8 (default), 2 = k^4")
     ap.add_argument("--cfl", type=float, default=0.4)
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
@@ -542,7 +547,7 @@ def main():
     else:
         sr, audio = load_wav(a.wav)
         audio_path, duration = a.wav, a.duration
-    res = run(sr, audio, a.out, n=a.n, fps=a.fps, rate=a.rate, amp=a.amp, memory=a.memory or None, nbands=a.bands, sigma_min=a.sigma_min, diss=a.diss, cfl=a.cfl, threshold=a.threshold, causal=a.causal,
+    res = run(sr, audio, a.out, n=a.n, fps=a.fps, rate=a.rate, amp=a.amp, memory=a.memory or None, nbands=a.bands, sigma_min=a.sigma_min, diss=a.diss, hyper=a.hyper, cfl=a.cfl, threshold=a.threshold, causal=a.causal,
               field=a.field, seed=a.seed, duration=duration, audio_path=audio_path)
     t_on, b_on, _ = res["onsets"]
     print(f"wrote {a.out}  ({res['wall']:.0f} s wall, {res['nsteps']} steps, diss = {res['diss']:.2e}, "
