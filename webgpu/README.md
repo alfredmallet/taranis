@@ -1900,6 +1900,28 @@ same graph round whatever it returns):
   registered `cmapNames()` is `CMAP_NAMES` and `cmapWGSL()` returns `CMAP_WGSL` itself.
   The canvas (`colorize`), the colour bar and a saved PNG's bar (`cmapRGB`) read the same
   coefficients. Regenerate with `python webgpu/gen_musiccmap.py`.
+- **Fixed colour scale** (box "fixed colour scale", ON by default; slider "scale max
+  (× amp)", logarithmic 0.25–4, default 1.5). The shared display divides by its own
+  maximum, recomputed every frame, so a flow that is dying away in a quiet passage just
+  renormalises and the picture stays at full brightness. With the box ticked the full-scale
+  value is `m · amp` instead (`amp` is the kick-amplitude slider): 0 … m·amp for a
+  magnitude, ±m·amp for a signed field, and anything beyond it saturates (`dispX` and
+  `cmap` clamp, neither wraps). It applies to whatever field the card shows and there is
+  no per-field scaling: `amp` is a velocity, so the multiple is dimensionless for |u|, |b|
+  and the Elsasser magnitudes and only a number that sets the range for the potentials,
+  vorticity and current. σ_c / σ_r keep their own pinned ±1.
+  How: nothing shared changed. The range colorize divides by is the chain's 4-byte
+  `maxVal` buffer, which `maxFinal` writes every render. The page wraps `render` on its
+  own solver INSTANCE (`musicScaleInstall`, in `rebuild`): before each card's render
+  `musicScaleApply` points that chain's `maxFinal` bind group at a scratch buffer
+  (`D.buf.musicAuto`, freed with the chain) and queues a 4-byte write of `m · amp` into
+  `maxVal`. The same kernels run the same number of times; the autoscale still gets
+  computed and lands in the scratch buffer, which the readout quotes ("the autoscale
+  would be …", read back twice a second; `musicDebug.scale` under `?musicdebug`). The
+  colour bar, a saved PNG's bar and a recording all read `maxVal` or the canvas, so they
+  show the same range. Either slider or the box redraws at once with no rebuild and no
+  step. Box off: the original bind group is in place, nothing is written, and the render
+  is the class's own, dispatch for dispatch.
 
 **`?musicdebug`** keeps a record on `window.musicDebug` for measuring sync and latency in
 a real browser:

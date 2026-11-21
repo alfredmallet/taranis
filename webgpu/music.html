@@ -126,6 +126,18 @@ controlsBuild({
            + "(the line below says how). If they still look off, this nudges it: positive "
            + "makes the PICTURE later, negative the sound later." },
        { k: "val", id: "vTrim" }],
+      [{ k: "cbl", id: "cbFixScale", t: "fixed colour scale", v: true,
+         ti: "ON: full scale is a fixed multiple of the amp slider, so the picture DIMS when the "
+           + "music goes quiet. OFF: the display rescales to its own maximum every frame, and a "
+           + "fading flow stays at full brightness." },
+       { k: "lab", t: "scale max (× amp)" },
+       { k: "rng", id: "rScale", min: -2, max: 2, step: 0.01, v: 0.585,
+         ti: "full scale = this multiple of amp (0.25 to 4, logarithmic), for whatever field the "
+           + "card shows: 0..max for a magnitude, ±max for a signed field, anything beyond it "
+           + "saturates. amp is a VELOCITY: for |u|, |b| and the Elsasser magnitudes the multiple "
+           + "is dimensionless, for the potentials and for vorticity / current it is only a "
+           + "number that sets the range (those are not velocities)." },
+       { k: "val", id: "vScale" }],
       { id: "rowDev", hide: true, items: [
         { k: "lab", t: "input device", for: "selDev" },
         { k: "sel", id: "selDev", o: [["", "default input"]],
@@ -146,6 +158,9 @@ function musicUi() {
            amp: Math.max(0, musicNum("rMAmp", 1)), rate: Math.max(0.01, musicNum("rRate", 1)),
            bpm: Math.min(300, Math.max(30, musicNum("nBpm", 120))), src: el("selSrc").value,
            trim: Math.min(MUSIC_TRIM_MAX, Math.max(-MUSIC_TRIM_MAX, musicNum("rTrim", 0))),
+           // the fixed colour scale: on/off, and its multiple of amp (the slider is log2)
+           fix: !!el("cbFixScale").checked,
+           scaleM: Math.pow(2, Math.min(2, Math.max(-2, musicNum("rScale", 0.585)))),
            dev: el("selDev").value };
 }
 // the drag's energy e-folding RATE, in simulation time: the flow forgets over `memory`
@@ -183,6 +198,7 @@ const music = {
   queue: [],                // onsets waiting out the kick hold-back: { due, o } in arrival order
   syncAt: -1e9,             // audio time the output latency was last read
   hidden: false,            // the page was hidden since the last frame (visibilitychange)
+  autoMax: NaN, autoAt: -1e9,   // what the autoscale would be (musicScaleProbe), and when it was read
   gen: 0,                   // bumped by every Start and Stop: an await that outlives it gives up
   clock: {},                // musicClock's state
   tPush: null,              // audio time of the last spectrum handed to the detector
@@ -194,6 +210,8 @@ for (let b = 0; b < music.plan.sigmas.length; b++) music.lit.push(-1e9);
 
 function syncLabels() {
   const u = musicUi();
+  el("vScale").textContent = u.fix ? u.scaleM.toFixed(2) + " → " + musicScaleMax(u).toPrecision(3) : "auto";
+  el("rScale").disabled = !u.fix;
   el("vThr").textContent = u.thr.toFixed(2);
   el("vMem").textContent = u.memory.toFixed(1);
   el("vMAmp").textContent = u.amp.toFixed(1);
@@ -221,10 +239,81 @@ function musicStrip() {
     + (music.dropped ? "   |   " + music.dropped + " blobs dropped" : "");
 }
 
+// ---- the fixed colour scale ---------------------------------------------------
+// The display normally divides by its own maximum, recomputed every frame (maxPartial ->
+// maxFinal -> the 4-byte `maxVal` buffer, which colorize reads). Then a flow that is dying
+// away just renormalises: the picture freezes at full brightness instead of dimming. With
+// the box ticked the full-scale value is a FIXED multiple of the amp slider instead.
+//
+// It is done without touching the solver class or any kernel, on THIS page's solver object:
+//   * `render` is wrapped on the instance. Before each card's render the wrapper points
+//     that chain's `maxFinal` bind group at a scratch buffer (`musicAuto`) instead of
+//     `maxVal`, and writes m * amp into `maxVal` itself -- 4 bytes, queued ahead of the
+//     pass. The same kernels are dispatched the same number of times; the autoscale is still
+//     computed, it just lands in the scratch buffer (which is what the readout quotes as
+//     "autoscale would be"), and colorize divides by the fixed value.
+//   * everything downstream reads `maxVal` and so follows by itself: the colour bar's ticks
+//     (dispMaxRead), a saved PNG's bar, a recording (it is the canvas).
+//   * the sigma modes are left alone: their kernel is pinned to +-1 and uses maxFinal for
+//     its floor, so there the original bind group is put back.
+//   * with the box off the original bind group is in place and nothing is written: the
+//     render is the shared one, dispatch for dispatch.
+// Values beyond the range saturate: dispX clamps a signed field to +-1 and cmap clamps a
+// magnitude to [0, 1] (physics.js), neither wraps.
+const musicScaleMax = u => Math.max(1e-6, u.scaleM * u.amp);
+function musicScaleInstall(sv) {
+  const render = sv.render.bind(sv);              // the class's own method
+  sv.render = function (ctx, ci) { musicScaleApply(sv, ci || 0); return render(ctx, ci); };
+}
+function musicScaleApply(sv, ci) {
+  const D = sv.chain(ci), u = musicUi(), fixed = u.fix && !dispIsSigma(D.mode);
+  if (!D.musicBg) {                               // once per chain
+    D.buf.musicAuto = sv.device.createBuffer({ size: 4, usage: SQ });   // freed with the chain
+    D.musicBg = { auto: D.bg.maxFinal,
+                  fixed: sv.device.createBindGroup({ layout: sv.pl.maxFinal.getBindGroupLayout(0),
+                    entries: [{ binding: 0, resource: { buffer: D.buf.maxPart } },
+                              { binding: 1, resource: { buffer: D.buf.musicAuto } }] }) };
+  }
+  D.bg.maxFinal = fixed ? D.musicBg.fixed : D.musicBg.auto;
+  D.musicFixed = fixed;
+  if (fixed) sv.device.queue.writeBuffer(D.buf.maxVal, 0, new Float32Array([musicScaleMax(u)]));
+}
+// the box or either slider moved: redraw every card now (a paused or silent page takes no
+// step that would), and put the new range on the colour bars without waiting for a readback
+function musicScaleChanged() {
+  const u = musicUi();
+  for (const c of cards.disp) {
+    c.dirty = true;
+    c.barAt = 0;
+    if (u.fix && solver && !dispIsSigma(solver.modeOf(c.ci))) c.setBarRange(musicScaleMax(u));
+    else if (!u.fix) c.setBarRange(NaN);          // the autoscale's own value arrives with the next readback
+  }
+}
+// what the autoscale WOULD be, for the readout: the scratch buffer of the first card, read
+// back at most twice a second (frameHook; one 4-byte map)
+async function musicScaleProbe(sv) {
+  const now = performance.now(), D = sv.disp && sv.disp[0];
+  if (!D || !D.musicFixed || !D.buf.musicAuto || now - music.autoAt < 500) return;
+  music.autoAt = now;
+  const v = await readBuf(sv.device, D.buf.musicAuto, 4);
+  if (sv === solver) { music.autoMax = v[0]; if (MUSIC_DEBUG && window.musicDebug) window.musicDebug.scale = musicScaleRecord(); }
+}
+function musicScaleRecord() {
+  const u = musicUi();
+  return { fixed: u.fix, m: u.scaleM, amp: u.amp, max: u.fix ? musicScaleMax(u) : null, autoscale: music.autoMax };
+}
+function musicScaleReadout() {
+  const u = musicUi();
+  return u.fix ? "colour scale fixed at " + musicScaleMax(u).toPrecision(3) + " (" + u.scaleM.toFixed(2) + " × amp)"
+                 + (isFinite(music.autoMax) ? "; the autoscale would be " + music.autoMax.toPrecision(3) : "")
+               : "colour scale: autoscale";
+}
+
 // slider -> the live solver. The drag and the dissipation share one column of gridB, so
 // they are uploaded together: set diss, then setDrag rebuilds from (diss, hyper, mu).
 function applyControls() {
   syncLabels();
+  musicScaleChanged();              // the range is m * amp: the amp slider moves it too
   const u = musicUi();
   if (music.det) music.det.threshold = u.thr;
   if (!solver) return;
@@ -247,6 +336,7 @@ function rebuild() {
   // old solver's buffers. Retire it and free it at the top of a later frame.
   if (solver) { graveyard.push(solver); solver = null; }
   solver = new Solver(device, uiParams());
+  musicScaleInstall(solver);
   cardsSync();
   stepsPerFrame = 1;
   applyIC();
@@ -649,6 +739,10 @@ async function boot() {
                                   if (el("selSrc").value === "input") musicDevices(); };
   el("selDev").onchange = () => { if (running && music.audio && music.audio.kind === "input") musicStop(); };
   el("rTrim").oninput = musicTrimApply;
+  el("rScale").oninput = () => { syncLabels(); musicScaleChanged(); };
+  el("cbFixScale").onchange = () => { syncLabels(); musicScaleChanged(); };
+  frameHook = async sv => { if (sv === solver) await musicScaleProbe(sv); };
+  readoutExtra = musicScaleReadout;
   // back from a hidden tab: the next frame re-anchors quietly instead of calling the
   // absence "behind". (An ASSIGNED handler: devtools' stub document has no addEventListener.)
   if (typeof document !== "undefined")

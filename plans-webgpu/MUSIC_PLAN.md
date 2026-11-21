@@ -347,6 +347,25 @@ wavenumbers. One short run, judged on the spectrum only — not on dense music, 
 eye. The solver's drag was already gated at hyper 4 (M1 review). The step-rate and sync
 measurements in this plan were taken at k⁴; offline the step count rises ~5%.
 
+## Fixed colour scale (2026-11-21, Alfred's request)
+
+The display autoscaled to the per-frame maximum, so quiet passages renormalised instead of
+dimming. The page now has a "fixed colour scale" box (default on) and a "scale max" slider:
+full scale = m · amp, m logarithmic 0.25–4, default 1.5; box off is the old autoscale.
+No shared kernel, no solver-class change and no pin allowance: the page wraps `render` on
+its solver instance, redirects that chain's `maxFinal` output to a scratch buffer and writes
+m · amp into `maxVal`, which colorize and the colour-bar readback already read
+(webgpu/README.md, "Fixed colour scale"). One multiple for every field, no per-field
+scalings; the sigma modes keep ±1. Gated in `checkmusic.js` leg 12 (25 rows; 412 in all):
+the value written at six (m, amp), both sliders live without a rebuild or a step, the bar's
+ticks, the sigma exception, box off equal to the class's own render entry for entry, a
+rebuilt solver, the other two pages unwrapped. Kernel dumps of rmhd2d.html and rmhd3d.html
+identical to 818a1e7 (the dumper does not boot music.html; no shader text was touched).
+
+Browser-only: that 1.5 × amp is a good default for |u| on real music (the stub renders no
+pixels); that the picture dims in a quiet passage and saturates cleanly at a loud one; the
+bar and a saved PNG showing the fixed range; the "autoscale would be" figure in the readout.
+
 ## Decisions (Alfred, 2026-11-21)
 
 1. **Resolution: 256² for live use.** Accepted; M0.c shows ~2× headroom on the M1.

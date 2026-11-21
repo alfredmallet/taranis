@@ -2022,6 +2022,125 @@ async function legFix(state) {
   }
 }
 
+// ===========================================================================
+// 12. the fixed colour scale (2026-11-21)
+// ===========================================================================
+// What the display divides by is the chain's 4-byte `maxVal` buffer. Fixed: the page writes
+// m * amp there before each render and the autoscale's maxFinal lands in a scratch buffer.
+// Off: nothing is written and the render is the class's own, dispatch for dispatch.
+async function legScale() {
+  const P = await musicPage("?musicdebug"), env = P.env;
+  env.run(`function(){
+    window.__w = [];
+    const q = device.queue, wb = q.writeBuffer.bind(q);
+    q.writeBuffer = (b, off, data) => { if (solver && solver.disp[0] && b === solver.disp[0].buf.maxVal) window.__w.push(Array.from(new Float32Array(data.buffer || data))[0]); return wb(b, off, data); };
+  }`);
+  // one render of card 0 through whatever `solver.render` is (or the class's own method),
+  // returned as [pipeline, which buffer maxFinal/colorize use, dispatch counts]
+  const RENDER = `function(own){
+    const D = solver.chain(0), c = cards.disp[0];
+    gpu0 = null; window.__w.length = 0; __env_reset();
+    if (own) Solver.prototype.render.call(solver, c.ctx, 0); else solver.render(c.ctx, 0);
+    return 0;
+  }`;
+  const render = own => {
+    env.gpuReset();
+    env.run(RENDER.replace("gpu0 = null; ", "").replace("__env_reset();", ""), !!own);
+    const names = env.run("function(){ const D = solver.disp[0]; return [D.buf.maxVal, D.buf.musicAuto, D.buf.maxPart]; }");
+    const tag = b => b === names[0] ? "maxVal" : b === names[1] ? "musicAuto" : b === names[2] ? "maxPart" : "-";
+    const log = env.gpu.dispatches.map(x => x.pipe.__name + "(" + x.d.join(",") + ")"
+      + (x.pipe.__name === "maxFinal" ? "->" + tag(x.bg.__buffers[1]) : "")
+      + (x.pipe.__name === "colorize" ? "<-" + (x.bg.__buffers.some(b => b === names[0]) ? "maxVal" : "?") : ""));
+    return { log: log, w: JSON.parse(env.run("function(){ return JSON.stringify(window.__w); }")) };
+  };
+  const ui = () => JSON.parse(env.run("function(){ const u = musicUi(); return JSON.stringify({ fix: u.fix, m: u.scaleM, amp: u.amp, max: musicScaleMax(u) }); }"));
+  const bar = () => JSON.parse(env.run("function(){ const c = cards.disp[0]; c.barMode = solver.modeOf(0); return JSON.stringify({ max: c.barMax, ticks: c.barTicks() }); }"));
+  const f32 = x => Math.fround(x);
+
+  ok("the page has the box (ticked) and the slider, at 1.5 x amp", ui().fix === true && Math.abs(ui().m - 1.5) < 2e-3 && Math.abs(ui().max - 1.5) < 2e-3,
+     JSON.stringify(ui()));
+  ok("  ... the slider spans 0.25 to 4, logarithmically", (() => { const r = env.getEl("rScale"); return Math.pow(2, +r.min) === 0.25 && Math.pow(2, +r.max) === 4; })());
+  ok("  ... the solver's render is wrapped on the INSTANCE; the class method is untouched",
+     env.run("function(){ return Object.prototype.hasOwnProperty.call(solver, 'render') && !/musicScale/.test(String(Solver.prototype.render)); }"));
+
+  const on = render(false);
+  ok("fixed: one write of m * amp to maxVal ahead of the render", on.w.length === 1 && on.w[0] === f32(ui().max), JSON.stringify(on.w));
+  ok("  ... the autoscale is still computed, into the scratch buffer, and colorize reads maxVal",
+     on.log.filter(l => /^maxFinal/.test(l)).length === 1 && on.log.some(l => /^maxFinal\(1,1,1\)->musicAuto$/.test(l)) &&
+     on.log.some(l => /^colorize.*<-maxVal$/.test(l)), on.log.join(" "));
+
+  let all = true, note = [];
+  for (const [sl, amp] of [[-2, 0.5], [-1, 2], [0, 0.3], [1, 1.7], [2, 3], [0.585, 1]]) {
+    await P.input("rScale", sl); await P.input("rMAmp", amp);
+    const u = ui(), want = Math.pow(2, sl) * amp, b0 = bar(), r = render(false);
+    const good = Math.abs(u.max - want) < 1e-12 && r.w.length === 1 && r.w[0] === f32(want) && b0.max === u.max;
+    if (!good) { all = false; note.push(sl + "/" + amp + ": " + JSON.stringify([u.max, r.w, b0.max])); }
+  }
+  ok("the range handed to the display is m * amp at six (m, amp), and the colour bar holds the same number at once", all, note.join(" | "));
+
+  // live: moving either slider marks the card dirty, and the frame loop's own render writes it
+  await P.input("rScale", 1); await P.input("rMAmp", 2);
+  env.run("function(){ window.__w.length = 0; }");
+  ok("  ... either slider marks the card for a redraw (no step needed)", env.run("function(){ return cards.disp[0].dirty === true; }"));
+  // (read before the frames: the stub's readback of maxVal is zeros, a real one returns the 4 just written)
+  const tk = bar();
+  ok("  ... the colour bar's ticks are that range (0 .. m * amp for |u|)", tk.max === 4 && /4/.test(tk.ticks[2]) && /2/.test(tk.ticks[1]), JSON.stringify(tk));
+  const built = env.run("function(){ window.__sv = solver; return solver.nsteps; }");
+  await P.frame(); await P.frame();
+  const lw = JSON.parse(env.run("function(){ return JSON.stringify(window.__w); }"));
+  ok("  ... and the frame loop's next render writes the new value, with no rebuild and no step",
+     lw.length >= 1 && lw[lw.length - 1] === f32(4) && env.run("function(){ return window.__sv === solver; }") &&
+     env.run("function(){ return solver.nsteps; }") === built, JSON.stringify(lw));
+  ok("  ... the readout and musicDebug name it", /fixed at 4\.00/.test(env.run("function(){ return musicScaleReadout(); }")) &&
+     env.run("function(){ const r = musicScaleRecord(); return r.fixed === true && r.max === 4 && r.m === 2 && r.amp === 2; }"));
+
+  // a signed field: +-max on the bar
+  env.run("function(){ solver.disp[0].mode = 0; musicScaleChanged(); }");
+  const sg = bar();
+  ok("  ... a signed field's bar reads -max .. +max", /4/.test(sg.ticks[0]) && sg.ticks[1] === "0" && /^\+4/.test(sg.ticks[2]), JSON.stringify(sg.ticks));
+  const sgr = render(false);
+  ok("  ... and is rendered against the same fixed value", sgr.w.length === 1 && sgr.w[0] === 4 && sgr.log.some(l => /->musicAuto/.test(l)));
+
+  // a sigma mode keeps its own pinned +-1 path
+  const sig = env.run("function(){ for (let m = 0; m < 40; m++) if (dispIsSigma(m)) return m; return -1; }");
+  env.run("function(m){ solver.disp[0].mode = m; }", sig);
+  const s1 = render(false), s2 = render(true);
+  ok("a sigma mode is left alone: nothing written, maxFinal back on maxVal, the class's own log",
+     sig >= 0 && s1.w.length === 0 && s1.log.join() === s2.log.join() && s1.log.some(l => /^maxFinal.*->maxVal$/.test(l)), s1.log.join(" "));
+  env.run("function(){ solver.disp[0].mode = 4; }");
+
+  // box off: today's autoscale exactly
+  const fixedLog = render(false).log;
+  env.getEl("cbFixScale").checked = false; env.getEl("cbFixScale").onchange({}); await turn();
+  const off = render(false), cls = render(true);
+  ok("box off: nothing is written to maxVal and maxFinal writes it, as before", off.w.length === 0 && off.log.some(l => /^maxFinal\(1,1,1\)->maxVal$/.test(l)) &&
+     !off.log.some(l => /musicAuto/.test(l)), off.log.join(" "));
+  ok("  ... the dispatch log is the class's own render, entry for entry", off.log.join() === cls.log.join() && off.log.length > 3);
+  ok("  ... and the fixed render differs from it ONLY in where maxFinal writes",
+     fixedLog.join().replace("->musicAuto", "->maxVal") === off.log.join());
+  ok("  ... the bar drops the fixed range and waits for the autoscale readback; the slider is disabled",
+     bar().max === null && env.getEl("rScale").disabled === true && /autoscale/.test(env.run("function(){ return musicScaleReadout(); }")),
+     JSON.stringify([bar().max, env.getEl("rScale").disabled, env.run("function(){ return musicScaleReadout(); }")]));
+  env.getEl("cbFixScale").checked = true; env.getEl("cbFixScale").onchange({}); await turn();
+  ok("  ... ticking it again restores the fixed range at once", bar().max === 4 && render(false).w[0] === 4);
+
+  // a rebuild (Restart builds a new Solver) keeps the option
+  env.run("function(){ rebuild(); }"); await turn();
+  env.run("function(){ solver.chain(0).mode = 4; }");
+  const rb = render(false);
+  ok("a rebuilt solver is wrapped again, and its scratch buffer is freed with the chain",
+     rb.w.length === 1 && rb.w[0] === 4 && env.run("function(){ return 'musicAuto' in solver.disp[0].buf; }"), JSON.stringify(rb.w));
+  ok("no failure logged on the page", realFails(env).length === 0, realFails(env).slice(0, 3).join(" | "));
+
+  // the other pages: no control, no wrapper
+  for (const pg of ["rmhd2d.html", "rmhd3d.html"]) {
+    const E = await boot(dir, pg); await turn();
+    ok(pg + ": render is the class's own method, and the page has neither control",
+       E.run("function(){ return !Object.prototype.hasOwnProperty.call(solver, 'render') && typeof musicScaleApply === 'undefined'; }") === true &&
+       !/cbFixScale|rScale/.test(fs.readFileSync(path.join(dir, pg), "utf8")));
+  }
+}
+
 // ---------------------------------------------------------------------------
 const LEGS = [
   ["1. music.js is pure and self-contained", legPure],
@@ -2037,7 +2156,8 @@ const LEGS = [
   ["8b. without ?musicdebug", legPlain],
   ["9. the other two pages: hook null, loop and state mark unchanged", legOthers],
   ["10. live sources and the delayed speaker branch (M3 / M4)", legLive],
-  ["11. the review's findings and the output-latency sync, on the page", legFix]
+  ["11. the review's findings and the output-latency sync, on the page", legFix],
+  ["12. the fixed colour scale", legScale]
 ];
 (async () => {
   const state = {};

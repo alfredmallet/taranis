@@ -868,6 +868,12 @@ leave untracked or commit — they are dev-only, nothing in the apps loads them.
   the destination even when its track claims to be "suppressed"; the device list before and
   after access; the delay slider moving the live node; a new detector on every Start; the
   `musicDebug.audio` record; a 48 kHz context.
+  Since the fixed colour scale (412 rows): (12) the value the page writes to the chain's
+  `maxVal` is m · amp at six (m, amp) and the colour bar holds it at once; either slider
+  redraws through the frame loop with no rebuild and no step; `maxFinal` writes the scratch
+  buffer and colorize reads `maxVal`; a sigma mode and the box off both give the class's own
+  render, entry for entry, with nothing written; a rebuilt solver is wrapped again; the
+  other two pages have neither control nor wrapper.
   Since the review-and-fix round (387 rows): (6c) `musicSync` over the cases — speakers
   0 and 20 ms, Bluetooth 168 ms, an unreported latency, each routing, trims of both signs,
   108 combinations of the invariants (D and H never negative, never both in force, D only
