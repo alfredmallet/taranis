@@ -255,6 +255,9 @@ else running, plugged in.
 - `style.css` — the shared dark theme.
 - `SPEC.md`, `SPEC3D.md` — the implementation contracts, extracted from the JAX source;
   read these before touching the math.
+- `gen_kickfixture.py` — records `devtools/fixtures/kick_offline.json`, the offline
+  `make_kick`'s own output for `devtools/checkkick.js` (see "The impulsive kick and the
+  drag"). Pruned from the deployed site with the other `*.py`.
 - `gen_refvectors.py`, `refvectors.json`, `gen_refvectors3d.py`, `refvectors3d.json` —
   reference-vector generators and their output.
 - `devtools/` — the sandbox verification tooling (no GPU needed): the shared DOM+WebGPU
@@ -1540,6 +1543,134 @@ and decay; add one of the opposite polarity and the pair must tangle immediately
 blob that stirs means polarity is leaking across the (φ, ψ) map — with the one exception
 that at Pm ≠ 1 the two potentials damp at different rates, so a lone ζ⁺ blob grows a
 little ζ⁻ of its own and eventually moves. Run that check at the default Pm = 1.
+
+### The impulsive kick and the drag (2D solver; MUSIC_PLAN M1, no page uses them yet)
+
+Two additions to `solver2d.js` for the music page `plans-webgpu/MUSIC_PLAN.md` plans. Both
+are **off by default** — `mu: 0`, `kick: false` in the `Solver` parameters — and
+`rmhd2d.html` asks for neither, so its kernel list, every kernel's text and every number
+it computes are what they were (`devtools/checksolver2d.js` records the new JavaScript as
+its fourth allowance and still pins the WGSL byte for byte; a dump of both pages' kernels
+is identical before and after, and so are the dispatch log and every uploaded byte of a
+solver that is never kicked).
+
+**`kick(list)` is an impulse, not a forcing.** `list` is `setBlobs`' — `[{x, y, sigma,
+amp, pol}]`, `pol < 0` the ζ⁻ channel — but `amp` is the peak |∇ζ| the blob **adds** to
+its channel, an increment, where `setBlobs`' is a rate. One call packs the list
+(`_packKicks`), uploads it and dispatches `blobKick` once over `ceil(NM/64)` workgroups:
+
+    φ += (ζ⁺ + ζ⁻)/2,   ψ += (ζ⁺ − ζ⁻)/2
+
+with ζ± the sum of that channel's blobs, evaluated analytically in k space exactly as
+`blobBuild` does (same weight, `icBlobPeak(amp, σ)·2πσ²·nx·ny/(Lx·Ly)`). It then
+refreshes the energy scalars (so a stats readback sees the post-kick energy), bumps
+`solver.nkicks` and marks the CFL stale. Nothing else is written — not `t`, not the
+forcing state, not `blobMode`, not any other buffer. Call it between steps.
+
+- **The amplitude is an ELSASSER increment.** u = (ζ⁺ + ζ⁻)/2 and b = (ζ⁺ − ζ⁻)/2, so a
+  lone ζ⁺ blob of amplitude `amp` has peak |u| = peak |b| = **amp/2**. Only the same blob
+  in both channels is a pure velocity kick of peak `amp`.
+- **A kick does not move `nsteps`.** Anything that keys a redraw or a cached readback on
+  `nsteps` alone (`common.js`' `stateMark`) will miss it: key on `nkicks` as well.
+- **A kick does not refresh dt, so the next step does.** `step(cflEvery)` recomputes dt
+  only when `nsteps % cflEvery == 0`; after a kick `sc[0]` still holds the PRE-kick dt,
+  and after silence that is the quiescent floor `cfl·dx/0.1` — about 10·amp times what
+  the kicked flow allows. `kick` therefore sets `_cflStale`, and the next `step` runs the
+  CFL reduction whatever its `cflEvery` says, then clears the mark. One bit: two kicks
+  before a step force one recompute; an empty or refused kick marks nothing; a solver
+  that is never kicked steps on the unchanged schedule. **What this does not fix:** the
+  dt a caller *read back* before the kick is still the old one, so a step count derived
+  as `ceil((target − t)/dt_last)` right after a kick over-estimates how far each step
+  goes (MUSIC_PLAN's clock formula — re-read dt after the first post-kick step).
+- **Kick energy enters no budget accumulator.** `sc[7]` integrates the dissipation rate
+  and nothing integrates what a kick adds; the energy jump of a kick is the difference of
+  two energy readbacks, before and after.
+- **Only for a solver built with `kick: true`.** `buildShaders` emits `blobKick` behind
+  `g.kick`, the way `srcInit` sits behind `eqsrc`; without the flag there is no kernel,
+  pipeline, bind group or buffer, and `kick()` throws.
+- **Its own table, sized for ONE onset.** `KICK_MAX` = 32 slots per channel
+  (`physics.js`) in its own `kicks` buffer; `BLOB_FORCE_MAX` = 8, `setBlobs` and the
+  spacebar mode are not involved. The music map's densest band needs 15 blobs per channel
+  at 256² and 30 at 512², so **call `kick` once per onset**: two onsets of one frame merged
+  into one list can need 60 and would lose the overflow.
+- **What it does with a bad list.** EVERY blob is validated before anything is packed,
+  wherever it sits in the list and whether or not its amplitude is zero: a non-finite
+  `x`/`y`/`amp`, a `sigma` that is not a finite positive number, or a blob whose packed
+  **fp32 weight** is not finite (`sigma: 1e13` is a finite number and an infinite weight)
+  throws, naming the blob, with the table untouched and nothing dispatched. A NaN or
+  infinite weight would poison every mode of both fields permanently — a kick has no next
+  step to overwrite it. `x` and `y` are packed **modulo the box** (same blob on a periodic
+  domain; it keeps the kernel's phase k·x₀ bounded and accurate in fp32 — a position
+  already in [0, L) is packed bit for bit). `amp == 0` is then skipped and takes no slot.
+  More than `KICK_MAX` in a channel keeps the first `KICK_MAX` in list order and **drops
+  the rest, reporting the count**: `kick` returns `{used: [n⁺, n⁻], dropped}`. An empty
+  list dispatches nothing.
+- **Two classes of mode are left untouched bit for bit**, by an early return rather than
+  by adding zero: k = 0 — which is *inert*, not zeroed: whatever the fields hold there
+  stays, the kick just adds nothing to the mean of a potential — and everything outside
+  the 2/3 cut (a gaussian is not compactly supported in k, and the fields are dealiased
+  everywhere else).
+- **`@workgroup_size(64, 1, 1)` is spelled out on purpose.** It is the same workgroup as
+  every other kernel's `(64)`, but devtools' WGSL interpreter reads the one-argument form
+  digit by digit — as a 6 × 4 workgroup, each invocation id run four times. A kernel that
+  *writes* its output cannot tell; this one *accumulates*, so the short form would make
+  `checkkick.js` see four kicks. Do not "tidy" it.
+- A lone ζ⁺ kick is still a stationary solution (previous section): a fresh blob only
+  starts to distort where it overlaps the other channel.
+- **The OU forcing is still there unless the page turns it off.** A kick solver steps the
+  ordinary OU path (`ou` + `scale`), and the `Solver` defaults are `epsP = epsM = 0.15`.
+  The music page must construct with `epsP: 0, epsM: 0`, or the shell forcing and its
+  lagged scales run underneath the kicks.
+
+**The drag is one column of `gridB`.** `mu` is the **energy** e-folding rate of a uniform
+linear drag: every mode's amplitude decays as e^(−μt/2) on top of the hyperviscosity.
+`_dragLin` subtracts μ/2 from the linear diagonal the kernels already read
+(`gridB.y = −diss·k^(2·hyper) − μ/2`), so `stage`'s exact exponential carries it and **no
+WGSL changes** — a solver with `mu ≠ 0` compiles the same shader modules text for text.
+It is applied to `makeGrid`'s column in the constructor and to the rebuilt one in
+`refreshDissipation`; `setDrag(mu)` changes it on a live solver through that same
+rebuild (`makeGrid` itself is unchanged).
+
+- **What "off is bit-identical" covers, exactly.** At `mu = 0` `_dragLin` returns before
+  touching anything, so *construction* gives `makeGrid`'s column bit for bit and
+  *`refreshDissipation`* writes exactly what it always wrote. **`setDrag(0)` on a fresh
+  solver is not a no-op on the bits**: it rebuilds through `refreshDissipation`, whose
+  long-standing formula takes k² from `gridA`'s fp32 where `makeGrid` uses fp64, so the
+  column can move by one ulp — the same thing any dissipation-slider move has always done.
+  Nothing calls `setDrag` unless a page does.
+- **The dissipation readout becomes the total sink.** `energyPartial`'s rate lane is
+  `−gridB.y·(e_k + e_m)`, so with the drag on `sc[6]` is hyperviscous dissipation **plus
+  μE**, and `sc[7]` its time integral. That is the honest number for an energy budget;
+  label it as such wherever it is shown.
+- **Refused, loudly, instead of being silently wrong:** `mu ≠ 0` with `pm ≠ 1` (`_dissLin`
+  multiplies the φ half's exponent by Pm, which would scale the drag on φ too) and
+  `mu ≠ 0` with `eqsrc` (the maintained-flux source is `−gridB.y·ψ_eq`, which would then
+  hold the equilibrium up against the drag as well). Also a negative, non-finite or
+  non-number `mu`. A refused `setDrag` leaves `p.mu` and both copies of the column as
+  they were.
+- It damps **every** mode, k = 0 and the modes past the cut included (the latter are zero
+  anyway; the former is inert).
+
+**The gate is `devtools/checkkick.js`** (201 rows): the emitted `blobKick` executed byte
+for byte against a real-space DFT written in the gate *and* against
+`devtools/fixtures/kick_offline.json`, which `gen_kickfixture.py` records from the
+offline reference implementation itself (`make_kick` in `examples/music_turbulence.py`,
+fp64); the two untouched classes, additivity and the Elsasser map at the bit level;
+`kick()` on the stub device with the queue *and the command encoder* wrapped (one upload,
+one pass begun and ended around three dispatches, one submit, no `clearBuffer` or copy,
+and a snapshot showing nothing else about the solver moved); kick-then-step dispatch
+logs for the stale-CFL mark; and the drag as the column, the refusals, and the decay it
+produces through the real `stage` kernel — at hyper 1, 2, 3 and 4, on a rectangular grid,
+and in the music configuration itself (`kick: true` with `mu`, hyper 2). Regenerate the
+fixture with
+
+    python webgpu/gen_kickfixture.py
+
+Its σ are all ≤ 0.5 on purpose: `make_kick`'s gaussian is minimum-image and the kernel's
+analytic form is the fully periodic one, which differ by e^(−(L/2)²/2σ²) of the peak —
+3e-9 at σ = 0.5 but 3e-6 at 0.625 (9e-4 on the weakest retained modes). The music map's
+widest blob is 0.45. **Nothing here has run on a real GPU**: the stub records what was
+encoded and the interpreter executes the kernel text.
 
 ## Alfvén-wave collision: directions, placement, χ
 

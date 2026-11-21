@@ -18,9 +18,10 @@
 //      its own script, the 3D page does not load it at all, and no module syntax reaches
 //      any of it (Chrome blocks module scripts from file://).
 //   5  the verbatim move: each definition's text equals the BASE commit's, byte for byte
-//      -- `class Solver` and `buildShaders` after their RECORDED allowances are stripped
+//      -- after their RECORDED allowances are stripped: `makeGrid`'s is f1f5f23's
+//      out-of-band forcing-shell refusal (two lines), `class Solver`'s and `buildShaders`'s
 //      (IO_PLAN item 4's field export, FFTPERF_PLAN 2C's gradient chunking, c81527d's
-//      spacebar blob forcing).
+//      spacebar blob forcing, MUSIC_PLAN M1's kick and drag).
 //   6  reusability: solver2d.js's free identifiers resolve against common.js + physics.js
 //      + builtins ALONE -- never against rmhd2d.html's inline script, which is the whole
 //      reason a second page can load it.
@@ -324,11 +325,226 @@ const BLOB_SOLVER = [
    "      p.setPipeline(this.pl.scale); p.setBindGroup(0, this.bg.scale); p.dispatchWorkgroups(1);",
    "    }"] },
 ];
+// THE FOURTH SANCTIONED EDIT, in the same idiom: MUSIC_PLAN M1's impulsive blob kick and
+// uniform drag (plans-webgpu/MUSIC_PLAN.md; webgpu/README.md, "The impulsive kick and the
+// drag"). UNLIKE the blob forcing it adds NO kernel to either page: `blobKick` is emitted
+// only for a solver built with `kick: true`, which neither page does, so `ADDED` above is
+// unchanged and leg 2's byte-identity still covers every kernel a page emits. What moves is
+// this JavaScript: the gated emission in `buildShaders`; in `class Solver` the two new
+// parameters, the drag applied to makeGrid's column and to refreshDissipation's rebuilt
+// one, the kick's state / buffer / pipeline / bind group (each behind the flag), and the
+// four new methods. All of those are INSERTIONS (no `was`). There is exactly ONE
+// replacement, in `step`: BASE's `const doCFL = ...` line gains `this._cflStale ||` and is
+// followed by the line that clears the mark -- a kick leaves a pre-kick dt in sc[0], so the
+// first step after one recomputes it whatever cflEvery says (review F1). On a solver that is
+// never kicked `_cflStale` is false for ever and the expression is BASE's, value for value.
+// `makeGrid` itself is not touched -- the drag is applied to its result. Both features are
+// OFF by default (mu = 0, kick = false), and what the numbers are is
+// devtools/checkkick.js's business, not this file's. Recorded as the exact lines and WHERE
+// they go.
+//
+// Three of these blocks sit directly after a blob-forcing block and so share its base line
+// (180 in buildShaders, 29 and 432 in the class): they must be stripped AFTER it, which is
+// why MUSIC_* is concatenated last below -- Array.prototype.sort is stable, so equal `at`
+// keeps that order.
+const MUSIC_SHADERS = [
+  { tag: "the gated blobKick emission", at: 180,
+    lines: [
+   "  // ---- the impulsive blob kick (MUSIC_PLAN M1): emitted ONLY for a solver built with",
+   "  // `kick: true`, exactly as srcInit is only emitted for `eqsrc` -- so a page that never",
+   "  // asks (rmhd2d.html) emits the kernel list it always did, name for name",
+   "  if (g.kick) S.blobKick = blobKickWGSL(Object.assign({}, C, { nkick: KICK_MAX }));"] }
+];
+const MUSIC_SOLVER = [
+  { tag: "mu / kick, the two new parameters and their defaults (constructor)", at: 10,
+    lines: [
+   "      // MUSIC_PLAN M1, both off by default: `mu` is the uniform drag (energy e-folding",
+   "      // rate; see _dragLin) and `kick` asks for the impulsive blob kick's kernel and buffer",
+   "      mu: 0, kick: false,"] },
+  { tag: "the drag on makeGrid's column (constructor)", at: 14,
+    lines: [
+   "    this._dragLin(grid.gridB, grid.nm);   // a no-op at mu = 0: gridB is makeGrid's, bit for bit"] },
+  { tag: "g.kick, what buildShaders gates the emission on (constructor)", at: 16,
+    lines: [
+   "    this.g.kick = !!q.kick;"] },
+  { tag: "_kicks / nkicks / _cflStale, the kick's packed upload, its count and the stale-CFL mark (constructor)", at: 29,
+    lines: [
+   "    // the kick's packed upload, the same 4 floats per slot (z+ slots then z-), and a count",
+   "    // of the kicks applied: a kick changes the state WITHOUT moving nsteps. `_cflStale` is",
+   "    // set by a kick and makes the NEXT step recompute dt whatever its cflEvery says (step)",
+   "    this._kicks = new Float32Array(2 * KICK_MAX * 4);",
+   "    this.nkicks = 0;",
+   "    this._cflStale = false;"] },
+  { tag: "the kicks buffer (_buildBuffers)", at: 71,
+    lines: [
+   "    // the kick's blob table: 2 * KICK_MAX vec4 (x0, y0, sigma, w), z+ half then z-",
+   "    if (this.p.kick) this.buf.kicks = d.createBuffer({ size: 2 * KICK_MAX * 16, usage: SQ });"] },
+  { tag: "the blobKick pipeline (_buildPipelines)", at: 225,
+    lines: [
+   "    if (S.blobKick) this.pl.blobKick = cp(S.blobKick, \"blobKick\");"] },
+  { tag: "the blobKick bind group (_buildPipelines)", at: 269,
+    lines: [
+   "    if (this.pl.blobKick)",
+   "      this.bg.blobKick = bg(this.pl.blobKick, [B.fields, B.gridA, B.gridB, B.kicks]);"] },
+  { tag: "the drag on the rebuilt column (refreshDissipation)", at: 292,
+    lines: [
+   "    this._dragLin(gb, this.g.nm);         // the rebuilt column carries the drag too"] },
+  { tag: "_dragLin + setDrag + _packKicks + kick", at: 432,
+    lines: [
+   "  // ---- uniform drag (MUSIC_PLAN M1) ---------------------------------------",
+   "  // `p.mu` is the ENERGY e-folding rate of a uniform linear drag: every mode's amplitude",
+   "  // decays as exp(-mu t/2) on top of the hyperviscosity. It is folded into the linear",
+   "  // diagonal the kernels already read -- gridB.y = -diss*ksq^hyper - mu/2 -- so the stage",
+   "  // kernel's exact exponential carries it and NO WGSL changes: this function is the whole",
+   "  // of the drag. Called on makeGrid's column in the constructor and on the rebuilt one in",
+   "  // refreshDissipation; with mu = 0 it returns before touching anything, so the default",
+   "  // gridB is makeGrid's bit for bit (not even a `- 0`).",
+   "  //",
+   "  // Everything that reads gridB.y sees the drag, and that is intended for exactly one",
+   "  // reader besides `stage`: energyPartial's dissipation rate, so sc[6] (and its time",
+   "  // integral sc[7]) become the TOTAL sink, hyperviscous + mu*E. Two readers would be wrong",
+   "  // with it and are refused instead:",
+   "  //   * Pm != 1: _dissLin multiplies the PHI half's exponent by Pm, which would scale the",
+   "  //     drag on phi by Pm too;",
+   "  //   * eqsrc: nlAssemble's maintained-flux source is -gridB.y * psi_eq, which would then",
+   "  //     hold the equilibrium up against the drag as well as the resistivity.",
+   "  _dragLin(gb, nm) {",
+   "    const q = this.p, mu = q.mu;",
+   "    if (mu === 0 || mu === undefined) return;",
+   "    if (typeof mu !== \"number\" || !isFinite(mu) || mu < 0)",
+   "      throw new Error(\"drag: mu must be a finite number >= 0, got \" + mu);",
+   "    if (q.pm !== undefined && q.pm !== 1)",
+   "      throw new Error(\"drag: mu != 0 needs Pm = 1 (the phi exponent is scaled by Pm), got pm = \" + q.pm);",
+   "    if (q.eqsrc)",
+   "      throw new Error(\"drag: mu != 0 cannot be combined with the maintained-equilibrium source (eqsrc)\");",
+   "    for (let m = 0; m < nm; m++) gb[4 * m + 1] -= 0.5 * mu;",
+   "  }",
+   "  // change the drag on a live solver: the column is rebuilt from diss/hyper by the same",
+   "  // path a dissipation change takes, so there is one place the two are combined",
+   "  setDrag(mu) {",
+   "    const old = this.p.mu;",
+   "    this.p.mu = mu;",
+   "    try { this.refreshDissipation(this.p.diss, this.p.hyper); }",
+   "    catch (e) { this.p.mu = old; this.refreshDissipation(this.p.diss, this.p.hyper); throw e; }",
+   "  }",
+   "",
+   "  // ---- impulsive blob kick (MUSIC_PLAN M1) ---------------------------------",
+   "  // list: [{ x, y, sigma, amp, pol }] with setBlobs' conventions -- x/y in box coordinates,",
+   "  // sigma in the same units, pol < 0 the z- channel and anything else z+ -- except that",
+   "  // `amp` is here the peak |grad z| the blob ADDS to its channel -- an increment, not a",
+   "  // rate, and an ELSASSER one: u = (z+ + z-)/2 and b = (z+ - z-)/2, so a lone z+ blob of",
+   "  // amplitude amp has peak |u| = peak |b| = amp/2. Packs KICK_MAX slots per channel,",
+   "  // (x0, y0, sigma, w) with w = icBlobPeak(amp, sigma) * 2*pi*sigma^2 * (nx*ny)/(Lx*Ly),",
+   "  // setBlobs' weight.",
+   "  //",
+   "  // What it does with a list it cannot take as given:",
+   "  //   * EVERY blob is validated before anything is packed, zero-amplitude ones included:",
+   "  //     a non-finite x/y/amp, a sigma that is not a finite positive number, or a blob whose",
+   "  //     packed fp32 weight is not finite (sigma = 1e13 is a finite number and an infinite",
+   "  //     weight) THROWS, naming the blob, with the table untouched. A NaN or infinite weight",
+   "  //     would poison every mode of both fields for good -- a kick has no next step to",
+   "  //     overwrite it;",
+   "  //   * x and y are packed MODULO the box. The blob is periodic, so nothing changes for",
+   "  //     the physics; what changes is that the kernel's phase k.x0 stays bounded and",
+   "  //     accurate in fp32 (x0 = 1e30 is finite and k.x0 is not). A position already in",
+   "  //     [0, L) is packed bit for bit;",
+   "  //   * amp == 0 is then skipped and takes no slot;",
+   "  //   * more than KICK_MAX per channel: the first KICK_MAX in list order are kept and the",
+   "  //     rest DROPPED (setBlobs' buffer policy), and the count comes back as `dropped` so the",
+   "  //     caller can see it. KICK_MAX = 32 holds ONE band's blobs (15 at 256^2, 30 at 512^2):",
+   "  //     call kick once per onset -- merging two onsets of one frame into one list can",
+   "  //     exceed it.",
+   "  // Returns { used: [n+, n-], dropped }. No device is touched (checkkick calls it on a bare",
+   "  // `{ p, _kicks }` receiver).",
+   "  _packKicks(list) {",
+   "    const q = this.p, a = this._kicks, n = KICK_MAX;",
+   "    const w0 = 2 * Math.PI * (q.nx * q.ny) / (q.Lx * q.Ly);",
+   "    const slots = (list || []).map((b, i) => {",
+   "      const x = +b.x, y = +b.y, sg = +b.sigma, amp = +b.amp;",
+   "      if (!isFinite(x) || !isFinite(y) || !isFinite(amp) || !isFinite(sg) || !(sg > 0))",
+   "        throw new Error(\"kick: blob \" + i + \" is not finite with sigma > 0 (x \" + b.x + \", y \" + b.y",
+   "                        + \", sigma \" + b.sigma + \", amp \" + b.amp + \")\");",
+   "      const w = icBlobPeak(amp, sg) * sg * sg * w0;",
+   "      if (!isFinite(Math.fround(w)) || !isFinite(Math.fround(sg)))",
+   "        throw new Error(\"kick: blob \" + i + \" overflows fp32 (sigma \" + b.sigma + \", amp \" + b.amp",
+   "                        + \" give the weight \" + w + \")\");",
+   "      return { h: b.pol < 0 ? 1 : 0, x: x - q.Lx * Math.floor(x / q.Lx),",
+   "               y: y - q.Ly * Math.floor(y / q.Ly), sg: sg, w: w, amp: amp };",
+   "    });",
+   "    a.fill(0);",
+   "    const used = [0, 0];",
+   "    let dropped = 0;",
+   "    for (const b of slots) {",
+   "      if (b.amp === 0) continue;",
+   "      if (used[b.h] >= n) { dropped++; continue; }",
+   "      const o = 4 * (b.h * n + used[b.h]++);",
+   "      a[o] = b.x; a[o + 1] = b.y; a[o + 2] = b.sg; a[o + 3] = b.w;",
+   "    }",
+   "    return { used: used, dropped: dropped };",
+   "  }",
+   "",
+   "  // ONE kick, applied now: call it BETWEEN steps (after `step` returns, the LSRK registers",
+   "  // hold nothing a later step reads -- `step` clears delta first). phi += (z+ + z-)/2 and",
+   "  // psi += (z+ - z-)/2 over every retained mode but k = 0 (blobKickWGSL), then the energy",
+   "  // scalars are refreshed so a stats readback sees the post-kick state. Nothing else is",
+   "  // written: not t, not the forcing state, not blobMode, and not dt -- sc[0] still holds the",
+   "  // PRE-kick dt until the next step, which is why this sets `_cflStale` (step recomputes",
+   "  // it then, whatever cflEvery is). An empty (or all-zero-amplitude) list dispatches",
+   "  // nothing and marks nothing. Needs a solver built with `kick: true`.",
+   "  kick(list) {",
+   "    if (!this.pl.blobKick) throw new Error(\"kick: this solver was built without `kick: true`\");",
+   "    const r = this._packKicks(list);",
+   "    if (r.used[0] + r.used[1] === 0) return r;",
+   "    const d = this.device;",
+   "    d.queue.writeBuffer(this.buf.kicks, 0, this._kicks);",
+   "    const enc = d.createCommandEncoder();",
+   "    const p = enc.beginComputePass();",
+   "    p.setPipeline(this.pl.blobKick); p.setBindGroup(0, this.bg.blobKick);",
+   "    p.dispatchWorkgroups(Math.ceil(this.g.nm / 64));",
+   "    p.setPipeline(this.pl.energyPartial); p.setBindGroup(0, this.bg.energyPartial);",
+   "    p.dispatchWorkgroups(this.nPartM);",
+   "    p.setPipeline(this.pl.energyFinal); p.setBindGroup(0, this.bg.energyFinal);",
+   "    p.dispatchWorkgroups(1);",
+   "    p.end();",
+   "    d.queue.submit([enc.finish()]);",
+   "    this.nkicks++;",
+   "    this._cflStale = true;          // the next step recomputes dt from the kicked state",
+   "    return r;",
+   "  }",
+   ""] },
+  { tag: "the stale-CFL mark a kick leaves, honoured and cleared (step)", at: 460,
+    was: ["    const doCFL = (this.nsteps % Math.max(1, cflEvery | 0)) === 0;"],
+    lines: [
+   "    // a kick since the last step makes the dt in sc[0] a PRE-kick dt: after silence that is",
+   "    // the quiescent floor, ~10*amp times what the kicked flow allows, and with cflEvery > 1",
+   "    // it would otherwise stand for up to cflEvery - 1 steps. So the first step after a kick",
+   "    // recomputes it regardless (MUSIC_PLAN M1, review F1). Never kicked => `false || x`.",
+   "    const doCFL = this._cflStale || (this.nsteps % Math.max(1, cflEvery | 0)) === 0;",
+   "    this._cflStale = false;"] }
+];
+// THE ONE SANCTIONED EDIT to `makeGrid`: f1f5f23's refusal of an out-of-band forcing shell
+// ("Fail loudly: non-finite runs, bad cadence, out-of-band forcing, spectra bins",
+// 2026-11-13). The forcing is added to the RHS unmasked, so a shell mode past the 2/3 cut
+// would populate a mode the IC removed and alias into retained ones; makeGrid now throws
+// instead, as taranis' setup_kgrids does. Two inserted lines, after the empty-shell check
+// and before the return -- behaviour for every shell that was legal before is unchanged, and
+// no emitted kernel moves (leg 2). That commit did not record itself here, which left the
+// makeGrid row red from 2026-11-13 until this block (2026-11-21): a pin that is always red
+// pins nothing, so `makeGrid` was in effect unpinned for that week. Recorded now, in the
+// same idiom and as its OWN block -- it is not part of the MUSIC_PLAN allowance above, which
+// does not touch makeGrid at all.
+const F1F5_GRID = [
+  { tag: "the out-of-band forcing-shell refusal (f1f5f23)", at: 39,
+    lines: [
+   "  // the forcing is added unmasked: a shell mode beyond the 2/3 cut would alias into retained modes",
+   "  if (shell.some(e => gridB[4 * e.m] < 0.5)) throw new Error(\"forcing shell reaches outside the dealiasing region\");"] }
+];
 // every recorded block per pinned definition, in BASE-line order (which is what lets each
 // block's found index BE its base line -- see stripBlocks)
 const ALLOWED = {
-  "function buildShaders(g) {": FFT2C_SHADERS.concat(BLOB_SHADERS).sort((a, b) => a.at - b.at),
-  "class Solver {": FFT2C_SOLVER.concat(IO4_INSERTS, BLOB_SOLVER).sort((a, b) => a.at - b.at)
+  "function makeGrid(p) {": F1F5_GRID.slice().sort((a, b) => a.at - b.at),
+  "function buildShaders(g) {": FFT2C_SHADERS.concat(BLOB_SHADERS, MUSIC_SHADERS).sort((a, b) => a.at - b.at),
+  "class Solver {": FFT2C_SOLVER.concat(IO4_INSERTS, BLOB_SOLVER, MUSIC_SOLVER).sort((a, b) => a.at - b.at)
 };
 // the text with every recorded block taken back out (a replacement putting its `was` lines
 // back), plus whichever blocks were not found WHERE THEY ARE RECORDED. Blocks are listed
@@ -607,7 +823,8 @@ if (bd) {
   for (const h of DEFS) {
     const a = defText(baseInline, h), raw = defText(SOLVER, h);
     // a definition with recorded allowances is compared with them stripped (their base
-    // lines put back); one without is compared raw, and makeGrid must never need any.
+    // lines put back); one without would be compared raw. (All three have one now: makeGrid's
+    // is f1f5f23's two-line shell refusal, F1F5_GRID, and nothing else of it may move.)
     const st = raw === null ? null
              : ALLOWED[h] ? stripBlocks(raw, ALLOWED[h]) : { txt: raw, miss: [] };
     const b = st && st.txt;

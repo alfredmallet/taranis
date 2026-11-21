@@ -398,6 +398,69 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ---------------------------------------------------------------------------
+// gaussian blob KICK: an impulse on the fields, not a forcing (MUSIC_PLAN M1)
+// ---------------------------------------------------------------------------
+// The same analytic transform as blobBuild above -- per blob, w * exp(-s^2 k^2/2) *
+// exp(-i k.x0), with the caller's weight w = P*2*pi*s^2*(NX*NY)/(Lx*Ly) -- but ADDED to
+// the fields once, between steps, instead of written to the forcing buffer every step:
+//   phi += (z+ + z-)/2,   psi += (z+ - z-)/2
+// where z+- is the sum of that Elsasser channel's blobs. So the amplitude is an INCREMENT of
+// the Elsasser field (peak |grad z| of the blob; a lone z+ blob of amplitude amp has peak
+// |u| = |b| = amp/2), independent of dt, and no forcing term exists.
+//
+// Two classes of mode are left alone, bit for bit, by an early return rather than by adding
+// zero (fields + 0 would turn a -0 into +0):
+//   * k = 0: whatever the fields hold there stays (it is INERT, not zeroed -- the mean of a
+//     potential drives nothing), and the kick adds nothing to it, as the offline reference
+//     (examples/music_turbulence.py make_kick) adds nothing;
+//   * every mode outside the 2/3 cut: the fields are dealiased at the IC and by nlAssemble,
+//     and a gaussian is not compactly supported in k, so its tail must not land there.
+// One invocation per mode m owns BOTH halves' writes, so there is no race and no second
+// dispatch. Reality on the ky = 0 row is exact for the reason blobBuild's is: theta(-kx, 0)
+// is exactly -theta(kx, 0), cos is even, sin is odd. (The ky and kx Nyquist lines, where the
+// analytic form is real-consistent only up to the alias sum, are outside the cut.)
+//
+// KICK_MAX slots per Elsasser channel, z+ slots then z-; a slot with w = 0 adds nothing.
+// Its own constant and its own buffer: BLOB_FORCE_MAX and blobBuild are not involved.
+//
+// `@workgroup_size(64, 1, 1)` is spelled out in full ON PURPOSE. It is the same workgroup as
+// every other kernel's `(64)`, but devtools' WGSL interpreter (wgsl_reflect 1.5.0) reads the
+// one-argument form digit by digit -- "64" becomes a 6 x 4 workgroup, i.e. every
+// global_invocation_id.x runs FOUR times. A kernel that WRITES its output cannot tell; this
+// one ACCUMULATES, so under the short form devtools/checkkick.js would see four kicks.
+const KICK_MAX = 32;
+function blobKickWGSL(C) {
+  return C.pre + `
+@group(0) @binding(0) var<storage, read_write> fields: array<vec2<f32>>;
+@group(0) @binding(1) var<storage, read> gridA: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> gridB: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> kicks: array<vec4<f32>>;
+const NKICK: u32 = ${C.nkick}u;
+fn chan(A: vec4<f32>, half: u32) -> vec2<f32> {
+  var acc: vec2<f32> = vec2<f32>(0.0, 0.0);
+  for (var b: u32 = 0u; b < NKICK; b = b + 1u) {
+    let B: vec4<f32> = kicks[half * NKICK + b];   // (x0, y0, sigma, w)
+    if (B.w == 0.0) { continue; }
+    let th: f32 = A.x * B.x + A.y * B.y;
+    acc = acc + (B.w * exp(-0.5 * B.z * B.z * A.z)) * vec2<f32>(cos(th), -sin(th));
+  }
+  return acc;
+}
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let m: u32 = gid.x;
+  if (m >= NM) { return; }
+  let A: vec4<f32> = gridA[m];                 // (kx, ky, ksq, 1/ksq)
+  if (A.z == 0.0) { return; }                  // k = 0: untouched
+  if (gridB[m].x == 0.0) { return; }           // outside the 2/3 cut: untouched
+  let zp: vec2<f32> = chan(A, 0u);
+  let zm: vec2<f32> = chan(A, 1u);
+  fields[m]      = fields[m] + 0.5 * (zp + zm);
+  fields[NM + m] = fields[NM + m] + 0.5 * (zp - zm);
+}`;
+}
+
+// ---------------------------------------------------------------------------
 // once-per-step power normalization (lagged by design)
 // ---------------------------------------------------------------------------
 // Two reductions over the forcing shell, sharing one vec4 accumulator:

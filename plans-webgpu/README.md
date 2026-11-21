@@ -23,6 +23,16 @@ disagree, the file is right.
 
 ## Live
 
+- **MUSIC_PLAN.md** — live music drives the 2D demo: per-band onsets become impulsive
+  gaussian-blob kicks, with the audio clock as the master of simulation time. Drafted
+  2026-11-21. The offline reference is `examples/music_turbulence.py` (JAX). Phase M0's
+  three measurements are in (tab audio from the streaming web players is capturable, a
+  causal onset detector matches the offline one on strong onsets, 256² has ~2× step-rate
+  headroom on the M1). **M1, the solver half — the `blobKick` kernel, `Solver.kick` and
+  the uniform drag, gated by `devtools/checkkick.js` — is implemented and through one
+  adversarial review round (uncommitted, never run on a real GPU);
+  the page (`music.html`), the audio front end and the audio-clock stepping are not
+  started.**
 - **FFTPERF_PLAN.md** — what the step's transforms actually cost, and what to do about it.
   Written 2026-08-21, **closed 2026-08-22**. Phase 0 built the `?bench` harness (whole-step,
   per-kernel, a copy / constant-twiddle / full ladder per FFT kernel, a per-lane `grads hash`)

@@ -667,8 +667,14 @@ leave untracked or commit — they are dev-only, nothing in the apps loads them.
   and no `type="module"` / `import` / `export` anywhere in the three js files or the two
   inline scripts (Chrome blocks module scripts from `file://`). Then the move itself,
   VERBATIM: each definition's text — located by its header line and its closing brace at
-  column 0 — byte for byte against `git show <base>:webgpu/rmhd2d.html`, `class Solver`
-  and `buildShaders` after their RECORDED allowances are stripped (`IO4_INSERTS`: the exact
+  column 0 — byte for byte against `git show <base>:webgpu/rmhd2d.html`, each after its
+  RECORDED allowances are stripped (`F1F5_GRID`, `makeGrid`'s only one: the two lines of
+  f1f5f23's out-of-band forcing-shell refusal, inserted after the empty-shell check and
+  before the return. That commit did not record itself here, so the `makeGrid` row was red
+  from 2026-11-13 until the block was added on 2026-11-21 — and a pin that is always red
+  pins nothing. It is live again: on a scratch clone an unrelated one-line edit inside
+  `makeGrid` turns the row red, and so does editing, moving, duplicating or deleting one of
+  the two allowed lines; `IO4_INSERTS`: the exact
   lines IO_PLAN item 4's field export inserted — two pinned Mode uniforms, their two
   `prepDisp` bind groups and `encodeExport`, buffers and bind groups only, which is why the
   WGSL leg above does not move with it; `FFT2C_SOLVER` / `FFT2C_SHADERS`: FFTPERF_PLAN 2C's
@@ -681,7 +687,16 @@ leave untracked or commit — they are dev-only, nothing in the apps loads them.
   upload, the `blobs` buffer, `blobBuild`'s emission, pipeline and bind group, the two
   `setBlob*` methods, and the branches in `_uploadIC` and `step` that dispatch `blobBuild`
   in place of `ou` + `scale`, the last three recorded as REPLACEMENTS whose `was` lines ARE
-  base's own, i.e. the `else` each branch keeps). The allowances are the `dispoffsets.js` idiom: they are put
+  base's own, i.e. the `else` each branch keeps; `MUSIC_SOLVER` / `MUSIC_SHADERS`:
+  MUSIC_PLAN M1's impulsive blob kick and uniform drag — the gated `blobKick` emission, the
+  `mu` / `kick` parameters, the drag applied to `makeGrid`'s column and to
+  `refreshDissipation`'s, the kick's state / buffer / pipeline / bind group, and the four
+  methods `_dragLin`, `setDrag`, `_packKicks`, `kick`, all insertions; plus ONE replacement,
+  in `step`, where base's `const doCFL = ...` gains `this._cflStale ||` and the line that
+  clears the mark. Unlike the blob forcing this adds no kernel to either page — `blobKick`
+  is emitted only for a solver built with `kick: true` — so `ADDED` is unchanged. Three of
+  its blocks share a base line with a blob-forcing block and are stripped after it, which is
+  why `MUSIC_*` is concatenated last: the sort is stable). The allowances are the `dispoffsets.js` idiom: they are put
   back and the base text is then still demanded byte for byte, so any OTHER change to
   either definition fails, and a companion leg fails it as STALE if a recorded block has
   stopped being there or moved off its recorded base line, or as VACUOUS if there was
@@ -752,6 +767,62 @@ leave untracked or commit — they are dev-only, nothing in the apps loads them.
   `sc[4]`/`sc[5]` put back to 1) is `checksolver2d`'s BLOB_SOLVER text pin, and the
   buffer/bind-group plumbing its leg 5 — both TEXT pins, not physics. No RNG: every field is
   analytic or a fixed walk. ~5 s. CI reports, never gates.
+- `checkkick.js [dir]` — the IMPULSIVE BLOB KICK and UNIFORM DRAG gate (MUSIC_PLAN M1): the
+  numbers behind `blobKickWGSL`, `Solver.kick` / `_packKicks` and `_dragLin` / `setDrag`,
+  none of which a byte-identity gate can speak to (`blobKick` is emitted only for a solver
+  built with `kick: true`, which no page is). Six legs, 201 rows. (1) the emission is gated
+  on the flag, moves no other kernel's text, is absent from the live 2D page, and covers
+  every retained non-zero mode; (2) `_packKicks`: the channel half, the weight (bit for bit
+  `setBlobs`'), positions packed modulo the box (each axis on its own length, in-box
+  positions bit for bit), first-`KICK_MAX`-kept with the overflow REPORTED, `amp == 0`
+  taking no slot, and sixteen kinds of refused input — non-finite, non-positive, checked
+  even when the amplitude is zero, and finite inputs whose fp32 weight or sigma is not —
+  each with the bad blob first, in the middle and last in the list, throwing its own index
+  with the table untouched; (3) the emitted kernel executed against a real-space DFT written
+  in the file (square and rectangular box, a full 2 × 32 table) and against
+  `fixtures/kick_offline.json`, the offline `make_kick`'s own fp64 output
+  (`../gen_kickfixture.py`); (4) what a tolerance cannot see — k = 0 and the out-of-band
+  modes untouched down to the sign of a zero, exact additivity, δψ = ±δφ for a
+  single-channel kick, δφ exactly half of `blobBuild`'s modes, the hermitian ky = 0 row, a
+  far-away position giving finite fields and the same kick as its in-box image; (5)
+  `kick()` on the stub device IN THE MUSIC CONFIGURATION (`kick: true` with `mu`, hyper 2,
+  OU forcing zeroed), through `spy()`, which wraps `queue.writeBuffer`, `queue.submit` AND
+  `createCommandEncoder` — every `clearBuffer` / `copyBufferToBuffer`, every pass begun and
+  whether it was ended, `finish` — so the row reads "write, encoder, beginComputePass, end,
+  finish, submit, nothing else"; a before/after snapshot of every buffer, pipeline and bind
+  group identity, `blobMode`, `nsteps`, the parameters and the CPU arrays; the dispatch
+  COUNT on 32² and 32×16, where NM/64 is 8.5 and 4.5 and a floor differs from the ceiling
+  (the main rows are at 64², where nPartM = 3 but NM/64 is an integer); and the stale-CFL
+  mark, as kick-then-step dispatch logs of a kicked solver beside a never-kicked twin — the
+  step after a kick runs the CFL reduction once at an `nsteps` that skips it and is
+  otherwise dispatch for dispatch a natural CFL step, the step after that does not, two
+  kicks force one recompute, an empty or refused kick marks nothing, and the never-kicked
+  solver's schedule is `nsteps % cflEvery` and nothing else; (6) the drag: `gridB.y` minus
+  μ/2 at every mode and nothing else moved, bit-identical columns and identical shader
+  modules at μ = 0, `refreshDissipation` and `setDrag` carrying it, the refusals (Pm ≠ 1,
+  `eqsrc`, bad μ, with rollback), the decay executed through the emitted `stage` kernel —
+  and all of it again, constructor / `refreshDissipation` / `setDrag` / rollback / decay, in
+  the music configuration, at hyper 4 and 3, and on a rectangular grid.
+  **Three things to know before editing it.** `blobKick` is emitted with the three-argument
+  `@workgroup_size(64, 1, 1)` because wgsl_reflect 1.5.0 reads the one-argument form digit
+  by digit (a 6 × 4 workgroup: every invocation id runs four times), which an accumulating
+  kernel cannot survive — leg 1 measures both forms. `stage` is a pinned kernel and keeps
+  its `(64)`, so `runSteps` respells that one attribute for execution and asserts it did so
+  exactly once. The fixture's σ stop at 0.5: `make_kick` is minimum-image, the kernel fully
+  periodic. And the stub's dispatch log is filled at ENCODE time: it cannot see a pass that
+  was never ended or submitted, a cleared buffer or a copy, which is what `spy()` is for.
+  **Mutation history.** Implementer round 1 (2026-11-21): 72 one-line mutations, 71 killed,
+  one equivalent mutant; its one real survivor (`kick()` never submitting) is why `submit`
+  is wrapped. The fresh adversarial reviewer then found fourteen more survivors, all holes
+  in what the gate looked at rather than wrong numbers — `clearBuffer(fields)` and a
+  `delta → fields` copy inside the kick, a pass never ended, `blobMode` switched on, floor
+  for ceil in the dispatch count, the first blob of a list never validated, a bad sigma
+  accepted at zero amplitude, and the drag skipped or rebuilt wrongly exactly where the
+  gate never built a solver (with `kick: true`, at hyper ≥ 3, on a non-square grid,
+  `setDrag` at hyper ≠ 1) — plus one hazard (a kick left a pre-kick dt standing for up to
+  `cflEvery − 1` steps) and one poison channel (a finite sigma with an infinite fp32
+  weight). Round 2 fixed both in the solver and closed every hole; all sixteen re-applied
+  survivor mutations are killed.
 - `checkidle.js [dir]` — the RENDER GATE (audit of 2026-08-12), on both booted pages. It
   drives `renderCards(paused)`, the app's own per-frame display step (split out of `loop()`
   so it can be called at all — the stub's `requestAnimationFrame` is a no-op), and counts
