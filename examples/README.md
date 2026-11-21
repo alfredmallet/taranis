@@ -198,6 +198,18 @@ Suggested order:
     the no-flow γ(S_v), their eq. 13c (holds to ≤1.3% at Pm = 1, wrong sign at Pm = 100), the R
     sweeps and the sech jet. Both scripts are resumable; the notebook only reads their caches.
 
+21. **music_turbulence.py** — not physics: a piece of music drives 2D RMHD and the result is
+    a movie muxed with the audio. An onset in a frequency band is one impulsive kick of
+    gaussian blobs (independent sets for z+ and z-, bass → wide blobs, treble → narrow), a
+    uniform drag sets how many beats the flow remembers, and kicks and frames are events in
+    `t` under the ordinary adaptive dt. The kick and the drag are state edits between steps,
+    so the solver is untouched and `forcing` stays off. `python music_turbulence.py` renders
+    a built-in click track; pass a PCM WAV for real music (`--threshold`, `--memory`,
+    `--amp`, `--n`; its header explains the knobs). About real time at 256² and 15× slower
+    than real time at 512² on the M1 at fp32. Needs `imageio` and `imageio-ffmpeg` on top of
+    the `examples` extra. The live WebGPU version is planned in
+    `../plans-webgpu/MUSIC_PLAN.md`.
+
 To run a 3D example under MPI instead: `pip install -e ".[mpi]"`, convert the notebook to a
 script and `mpirun -n <N> python script.py` with `nz % N == 0` (`comm_backend` then
 auto-resolves to `"mpi4jax"`). Launching under `mpirun` *without* the extra installed is a
