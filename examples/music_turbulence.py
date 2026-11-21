@@ -143,6 +143,73 @@ def detect_onsets(sr, x, nbands=3, fmin=40.0, fmax=10000.0, hop_s=0.010, win_s=0
             np.array(strengths)[order], edges)
 
 
+def detect_onsets_causal(sr, x, nbands=3, fmin=40.0, fmax=10000.0, fps=60.0, nfft=2048,
+                         threshold=0.15, min_gap_s=0.07, mean_s=0.20, ref_decay_s=30.0,
+                         norm_s=20.0, warmup_s=0.5):
+    """The onset detector a LIVE page can run (plans-webgpu/MUSIC_PLAN.md, M0.b): same map
+    as `detect_onsets`, nothing that looks at the future or at the whole track.
+
+    Modelled on what a browser hands over: once per display frame (`fps`) the spectrum of
+    the last `nfft` samples under a Blackman window -- a Web Audio `AnalyserNode` with
+    smoothingTimeConstant 0. Against the offline detector:
+      * the compression reference is a peak-hold of the spectral maximum decaying over
+        `ref_decay_s`, where offline uses the whole-track maximum;
+      * each band's flux is normalised by its 99th percentile over the trailing `norm_s`
+        seconds, where offline uses the whole track;
+      * the moving mean is trailing (`mean_s`), where offline centres it;
+      * a peak is declared ONE frame after it happens (s[i-1] > s[i-2], s[i-1] >= s[i]),
+        where offline looks `min_gap_s` both ways; `min_gap_s` is a refractory time here.
+    Written as a per-frame loop over explicit state so that it ports to JS line for line.
+
+    Returns (times, bands, strengths, edges, fire_times): `times` are the analysis-window
+    centres of the peak frames (comparable with `detect_onsets`), `fire_times` when the
+    page would KNOW -- half a window plus one frame later.
+    """
+    win = np.blackman(nfft)
+    freqs = np.fft.rfftfreq(nfft, 1.0 / sr)
+    edges = np.geomspace(fmin, min(fmax, 0.5 * sr), nbands + 1)
+    sels = [(freqs >= edges[b]) & (freqs < edges[b + 1]) for b in range(nbands)]
+    nframes = int(len(x) / sr * fps)
+    nmean = max(1, int(round(mean_s * fps)))
+    nnorm = max(1, int(round(norm_s * fps)))
+    decay = np.exp(-1.0 / (ref_decay_s * fps))
+
+    ref, prev = 0.0, None
+    hist = [[] for _ in range(nbands)]          # raw band flux, all frames so far
+    last_fire = [-np.inf] * nbands
+    times, bands, strengths, fires = [], [], [], []
+    for i in range(nframes):
+        end = int(round((i + 1) / fps * sr))    # the window ENDS now
+        if end < nfft:
+            continue
+        mag = np.abs(np.fft.rfft(win * x[end - nfft:end])) / nfft
+        ref = max(ref * decay, float(mag.max()), 1e-30)
+        comp = np.log1p(100.0 * mag / ref)
+        if prev is None:
+            prev = comp
+            continue
+        flux = np.maximum(comp - prev, 0.0)
+        prev = comp
+        t_now = end / sr
+        for b in range(nbands):
+            h = hist[b]
+            h.append(float(flux[sels[b]].sum()))
+            if len(h) < 3 or t_now < warmup_s:
+                continue
+            q = np.percentile(h[-nnorm:], 99.0) + 1e-30
+            s0, s1, s2 = h[-3] / q, h[-2] / q, h[-1] / q      # s1 is the candidate peak
+            mean = np.mean(h[-1 - nmean:-1]) / q              # trailing, ends at the candidate
+            t_peak = t_now - 1.0 / fps
+            if (s1 > s0 and s1 >= s2 and s1 > mean + threshold
+                    and t_peak - last_fire[b] >= min_gap_s):
+                last_fire[b] = t_peak
+                times.append(t_peak - 0.5 * nfft / sr); bands.append(b)
+                strengths.append(min(s1, 1.0)); fires.append(t_now)
+    order = np.argsort(times, kind="stable")
+    return (np.array(times)[order], np.array(bands, dtype=int)[order],
+            np.array(strengths)[order], edges, np.array(fires)[order])
+
+
 # ---------------------------------------------------------------------------------------
 # solver pieces
 # ---------------------------------------------------------------------------------------
@@ -276,7 +343,7 @@ def pad(blobs):
 # driver
 # ---------------------------------------------------------------------------------------
 def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=None, diss=None,
-        hyper=2, cfl=0.4, threshold=0.15, field="speed", sigma_min=None, seed=0,
+        hyper=2, cfl=0.4, threshold=0.15, causal=False, field="speed", sigma_min=None, seed=0,
         duration=None, audio_path=None, quiet=False):
     import imageio
     from matplotlib import colormaps
@@ -286,7 +353,10 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
     T = len(audio) / sr
     sigmas, nblobs = band_plan(n, nbands, sigma_min)
     nbands = len(sigmas)
-    t_on, b_on, s_on, edges = detect_onsets(sr, audio, nbands=nbands, threshold=threshold)
+    if causal:
+        t_on, b_on, s_on, edges, _ = detect_onsets_causal(sr, audio, nbands=nbands, threshold=threshold)
+    else:
+        t_on, b_on, s_on, edges = detect_onsets(sr, audio, nbands=nbands, threshold=threshold)
     if not quiet:
         for b in range(nbands):
             print(f"  band {b}: {edges[b]:6.0f}-{edges[b + 1]:6.0f} Hz -> sigma {sigmas[b]:.4f} "
@@ -398,6 +468,8 @@ def main():
     ap.add_argument("--threshold", type=float, default=0.15,
                     help="onset threshold above the local mean flux (band 99th percentile = 1); "
                          "raise to keep only the stronger hits")
+    ap.add_argument("--causal", action="store_true",
+                    help="use the live-capable onset detector (detect_onsets_causal)")
     ap.add_argument("--bpm", type=float, default=120.0, help="click track tempo")
     ap.add_argument("--duration", type=float, default=None, help="seconds (default: whole file; 20 for the click track)")
     ap.add_argument("--field", choices=FIELDS, default="speed")
@@ -415,7 +487,7 @@ def main():
     else:
         sr, audio = load_wav(a.wav)
         audio_path, duration = a.wav, a.duration
-    res = run(sr, audio, a.out, n=a.n, fps=a.fps, rate=a.rate, amp=a.amp, memory=a.memory or None, nbands=a.bands, sigma_min=a.sigma_min, diss=a.diss, cfl=a.cfl, threshold=a.threshold,
+    res = run(sr, audio, a.out, n=a.n, fps=a.fps, rate=a.rate, amp=a.amp, memory=a.memory or None, nbands=a.bands, sigma_min=a.sigma_min, diss=a.diss, cfl=a.cfl, threshold=a.threshold, causal=a.causal,
               field=a.field, seed=a.seed, duration=duration, audio_path=audio_path)
     t_on, b_on, _ = res["onsets"]
     print(f"wrote {a.out}  ({res['wall']:.0f} s wall, {res['nsteps']} steps, diss = {res['diss']:.2e}, "
