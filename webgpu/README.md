@@ -259,9 +259,9 @@ else running, plugged in.
   third page on the shared framework, loading `common.js`, `physics.js`, `solver2d.js`
   and then `music.js`. `music.js` is PURE — the band plan, the onset detector, the blobs,
   the click track and the audio clock, with no DOM, Web Audio or WebGPU in it — and the
-  page's inline script is the audio and DOM glue. **A development build**: linked from
-  nowhere, carrying no analytics beacon, and pruned from the deployed site by `pages.yml`
-  until it ships.
+  page's inline script is the audio and DOM glue. **Deployed since 2026-11-21** (`pages.yml` requires it in the staged
+  site and cache-busts `music.js` with the rest), but linked from nowhere yet and carrying
+  no analytics beacon.
 - `gen_musicfixture.py` — records `devtools/fixtures/music_ref.json`, the offline
   `band_plan`'s and `CausalOnsetDetector`'s own output for `devtools/checkmusic.js`.
   Pruned from the deployed site with the other `*.py`.
@@ -1685,7 +1685,7 @@ analytic form is the fully periodic one, which differ by e^(−(L/2)²/2σ²) of
 widest blob is 0.45. **Nothing here has run on a real GPU**: the stub records what was
 encoded and the interpreter executes the kernel text.
 
-## The music page (`music.html`; MUSIC_PLAN M2 — a development build, not linked)
+## The music page (`music.html`; MUSIC_PLAN — deployed, not yet linked from the other pages)
 
 Whatever is playing drives a 256² 2D RMHD run: an onset in a frequency band is one
 impulsive kick of gaussian blobs (previous section), and the audio clock sets the

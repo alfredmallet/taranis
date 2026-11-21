@@ -32,8 +32,8 @@ disagree, the file is right.
   speaker branch — cc92edd). Uncommitted: a **review-and-fix round** — nine reviewer
   findings, automatic sync from the audio output's latency (kicks held back on Bluetooth),
   a detector noise floor, the magma and brat colormaps. Gated by `devtools/checkkick.js`
-  and `devtools/checkmusic.js`. It runs in Chrome on the M1; the page is unlinked and
-  pruned from the deploy, and shipping it is Alfred's call.
+  and `devtools/checkmusic.js`. It runs in Chrome on the M1; **published 2026-11-21** (deployed
+  by `pages.yml`), still not linked from the other pages.
 - **FFTPERF_PLAN.md** — what the step's transforms actually cost, and what to do about it.
   Written 2026-08-21, **closed 2026-08-22**. Phase 0 built the `?bench` harness (whole-step,
   per-kernel, a copy / constant-twiddle / full ladder per FFT kernel, a per-lane `grads hash`)

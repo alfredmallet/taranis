@@ -980,9 +980,13 @@ async function legBoot(state) {
          return !/href\s*=\s*["']?music\.html/.test(t) && !/["'`][^"'`\n]*music\.html/.test(code);
        }));
   const yml = fs.readFileSync(path.join(dir, "..", ".github", "workflows", "pages.yml"), "utf8");
-  ok("  ... and pages.yml prunes music.html and music.js from the deployed site (a development build until it ships)",
-     /rm -f\s+_site\/webgpu\/music\.html\s+_site\/webgpu\/music\.js/.test(yml) &&
-     !/for f in[^\n]*\n?[^\n]*music\.(html|js)/.test(yml));
+  // published 2026-11-21 (Alfred): the page deploys -- not pruned, required in the staged
+  // site, and cache-busted with the other pages (music.js stamped like common.js)
+  ok("  ... and pages.yml DEPLOYS music.html and music.js: not pruned, required in the staged site, and cache-busted",
+     !/rm -f[^\n]*music\.(html|js)/.test(yml) &&
+     /for f in[^\n]*music\.html[^\n]*\n[^\n]*music\.js/.test(yml) &&
+     /src=\\"music\.js\\"\|src=\\"music\.js\?v=\$v\\"/.test(yml) &&
+     /sed -i[\s\S]*?_site\/webgpu\/music\.html\n/.test(yml));
   const q = JSON.parse(env.run(`function(){ const s = solver; return JSON.stringify({ p: s.p, gk: s.g.kick, pl: !!s.pl.blobKick,
     buf: !!s.buf.kicks, lin0: s.g.gridB[1], lin1: s.g.gridB[5], k1: s.g.gridA[6], blob: s.blobMode, nk: s.nkicks,
     hook: stepHook === musicStep, run: running, plan: music.plan, kmax: KICK_MAX, mark: stateMark(),

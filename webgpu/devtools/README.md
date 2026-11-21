@@ -840,8 +840,8 @@ leave untracked or commit — they are dev-only, nothing in the apps loads them.
   finding every kick in the bass band, every hat in the top one and every snare in the
   middle, with no stray; (6) `musicClock`: the count, the cap, the look-ahead rule, the
   kick-frame step, every rebase; (7) `music.html` booted — the solver it builds (256²,
-  hyper 2, `kick: true`, `epsP = epsM = 0`, μ and the offline dissipation rule in the
-  column), what each control does to the live solver, the manifest, the `pages.yml` prune,
+  hyper 4, `kick: true`, `epsP = epsM = 0`, μ and the offline dissipation rule in the
+  column), what each control does to the live solver, the manifest, that `pages.yml` deploys it,
   no link from any other page; (8) the page RUNNING: a fake `AudioContext` (`fakeAudio`)
   plays the page's own click track, its analyser computing the true spectrum of what is
   "playing" at `currentTime`, and frames are driven one at a time — one `kick()` per onset

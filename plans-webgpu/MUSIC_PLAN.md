@@ -1,10 +1,12 @@
 # MUSIC_PLAN — live music drives the 2D demo
 
 > **STATUS: drafted 2026-11-21; M0 measured; M1 committed (14ed94b), M2 (c960488), M3 + M4
-> (cc92edd). A review-and-fix round — the reviewer's nine findings, automatic sync from the
-> audio output's latency (Bluetooth), a detector noise floor, two colormaps — is implemented
-> and uncommitted. The page runs in Chrome on the M1; it is unlinked and pruned from the
-> deploy.** Phase M0 was three
+> (cc92edd), the review-and-fix round (f4c92f2: the reviewer's nine findings, automatic sync
+> from the audio output's latency, a detector noise floor, two colormaps), k⁸ dissipation
+> (19425b7). PUBLISHED 2026-11-21 at Alfred's instruction: merged to main, and `pages.yml`
+> now deploys `music.html` + `music.js` (required in the staged site, cache-busted with
+> the other pages). It is still not linked from any other page and has no `docs.html`
+> section — both open.** Phase M0 was three
 > measurements that decided the design (results below).
 > **M0.a answered 2026-11-21: tab audio capture works** for both the Spotify and the
 > Pandora web players (Alfred, Chrome on the M1) — tab capture is the primary route.
