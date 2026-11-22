@@ -207,8 +207,12 @@ Suggested order:
     a built-in click track; pass a PCM WAV for real music (`--threshold`, `--memory`, `--cmap`,
     `--amp`, `--n`; its header explains the knobs). About real time at 256² and 15× slower
     than real time at 512² on the M1 at fp32. Needs `imageio` and `imageio-ffmpeg` on top of
-    the `examples` extra. The live WebGPU version is planned in
-    `../plans-webgpu/MUSIC_PLAN.md`.
+    the `examples` extra. The live WebGPU version is `../webgpu/music.html`
+    (`../plans-webgpu/MUSIC_PLAN.md`). Two variety switches, both off by default
+    (`../plans-webgpu/MUSIC_EFFECTS_PLAN.md`): `--kick-types variety` gives each band its own
+    kind of kick (velocity dipoles, vortices, magnetic islands, sheets) and `--stereo` places
+    a band's blobs where it sits in the stereo image. `music_turbulence_check.py` is their
+    gate (`TARANIS_PRECISION=64`).
 
 To run a 3D example under MPI instead: `pip install -e ".[mpi]"`, convert the notebook to a
 script and `mpirun -n <N> python script.py` with `nz % N == 0` (`comm_backend` then

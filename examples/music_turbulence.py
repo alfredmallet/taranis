@@ -14,6 +14,15 @@
 #      is how many distinguishable widths fit in between (band_plan).
 # The z+ = phi + psi and z- = phi - psi channels get independent blobs.
 #
+# Variety (plans-webgpu/MUSIC_EFFECTS_PLAN.md), every switch OFF by default -- with none of
+# them given the script does exactly what the three lines above say, bit for bit:
+#   --kick-types variety        E1: each band gets a kick TYPE (KICK_TYPES; `variety` is
+#                               bass dipole, low-mid vortex, high-mid island, treble sheet;
+#                               or a list, one type per band, low to high)
+#   --stereo [--stereo-gain 2]  E2: a band's blobs land where the band sits in the stereo
+#                               image (x = left..right), the bass band excepted
+#   python examples/music_turbulence_check.py   is the gate for both (fp64).
+#
 # A kick is a state edit between steps, not a forcing term: `forcing` stays off and the
 # solver is untouched. The kick amplitude is a velocity increment (cm/s in CGS; here Alfven
 # units, the peak |grad z| of the blob), so it does not depend on dt.
@@ -59,19 +68,25 @@ NBLOB_MAX = 128         # blobs per kick per channel that the jitted kick is pad
 # ---------------------------------------------------------------------------------------
 # audio
 # ---------------------------------------------------------------------------------------
-def click_track(duration=20.0, bpm=120.0, sr=44100, seed=0):
+def click_track(duration=20.0, bpm=120.0, sr=44100, seed=0, stereo=False):
     # kick on every beat, snare on beats 2 and 4, hi-hat on the off-beat eighths; the last
     # quarter of the track drops the kick so "what happens when the beat stops" is in it.
+    # stereo=True returns (n, 2) samples [left, right] instead: the kick in the centre, the
+    # snare left (CLICK_PANS), the hats alternating right and left. An instrument at
+    # amplitude pan p has gains (1 - p, 1 + p), so the channel mean is the mono track.
     rng = np.random.default_rng(seed)
     t = np.arange(int(duration * sr)) / sr
     out = np.zeros_like(t)
+    lr = np.zeros((len(t), 2))
     beat = 60.0 / bpm
 
-    def add(t0, sig):
+    def add(t0, sig, pan=0.0):
         i0 = int(t0 * sr)
         n = min(len(sig), len(out) - i0)
         if n > 0:
             out[i0:i0 + n] += sig[:n]
+            lr[i0:i0 + n, 0] += (1.0 - pan) * sig[:n]
+            lr[i0:i0 + n, 1] += (1.0 + pan) * sig[:n]
 
     tt = np.arange(int(0.4 * sr)) / sr
     kick = np.sin(2 * np.pi * (45.0 * tt + 60.0 * 0.05 * (1 - np.exp(-tt / 0.05)))) * np.exp(-tt / 0.12)
@@ -87,9 +102,14 @@ def click_track(duration=20.0, bpm=120.0, sr=44100, seed=0):
         if i < 0.75 * nbeats:
             add(i * beat, kick)
         if i % 4 in (1, 3):
-            add(i * beat, snare)
-        add((i + 0.5) * beat, hat)
+            add(i * beat, snare, CLICK_PANS["snare"])
+        add((i + 0.5) * beat, hat, CLICK_PANS["hat"] * (1 if i % 2 == 0 else -1))
+    if stereo:
+        return sr, 0.8 * lr / np.max(np.abs(out))
     return sr, 0.8 * out / np.max(np.abs(out))
+
+
+CLICK_PANS = dict(kick=0.0, snare=-0.6, hat=0.8)     # amplitude pans of the stereo click track
 
 
 def _highpass(fc, sr):
@@ -102,12 +122,45 @@ def _bandpass(f0, f1, sr):
     return butter(2, [f0 / (0.5 * sr), f1 / (0.5 * sr)], "band")
 
 
-def load_wav(path):
+def load_wav(path, stereo=False):
+    # (sr, mono mix); with stereo=True (sr, mono mix, lr) where lr is the (n, 2) [left,
+    # right] samples on the mono mix's normalisation, or None for a one-channel file.
     sr, x = wavfile.read(path)
     x = x.astype(np.float64)
+    lr = x[:, :2] if x.ndim == 2 and x.shape[1] >= 2 else None
     if x.ndim == 2:
         x = x.mean(axis=1)
-    return sr, x / max(np.max(np.abs(x)), 1e-30)
+    norm = max(np.max(np.abs(x)), 1e-30)
+    if stereo:
+        return sr, x / norm, None if lr is None else lr / norm
+    return sr, x / norm
+
+
+def is_mono(lr, tol=1e-4):
+    # two channels that carry the same signal: every pan would be 0 and every blob would
+    # land in the centre column, so stereo placement is not used on such a file
+    return lr is None or lr.ndim != 2 or np.abs(lr[:, 0] - lr[:, 1]).max() <= tol * np.abs(lr).max()
+
+
+def onset_pans(sr, lr, t_on, b_on, edges, win_s=0.046):
+    """Stereo position of each onset: pan = (E_R - E_L)/(E_R + E_L) in [-1, 1], E the
+    energy (sum of |X|^2 over the onset's band) of each channel in ONE Hann-windowed
+    analysis frame of `win_s` centred on the onset time. -1 is hard left, +1 hard right.
+
+    The detectors are not involved: they run on the mono mix and hand over (time, band).
+    An instrument alone in its band at amplitude gains (1 - p, 1 + p) reads 2p/(1 + p^2).
+    """
+    nper = int(win_s * sr)
+    win = np.hanning(nper)
+    freqs = np.fft.rfftfreq(nper, 1.0 / sr)
+    pans = np.zeros(len(t_on))
+    for i, (t, b) in enumerate(zip(t_on, b_on)):
+        i0 = min(max(int(round(t * sr)) - nper // 2, 0), max(len(lr) - nper, 0))
+        seg = lr[i0:i0 + nper]
+        X = np.abs(np.fft.rfft(win[:len(seg), None] * seg, n=nper, axis=0)) ** 2
+        el, er = X[(freqs >= edges[b]) & (freqs < edges[b + 1])].sum(axis=0)
+        pans[i] = (er - el) / (er + el) if er + el > 0.0 else 0.0
+    return pans
 
 
 def detect_onsets(sr, x, nbands=3, fmin=40.0, fmax=10000.0, hop_s=0.010, win_s=0.046,
@@ -316,11 +369,36 @@ def make_kick(params, kgrid):
             return b[3] * b[2] * np.exp(0.5) * jnp.exp(-(ddx**2 + ddy**2) / (2.0 * b[2]**2))
         return jnp.sum(jax.vmap(one)(blobs), axis=0)
 
+    def potential_k(blobs):
+        # blobs (NBLOB_MAX, 6): x0, y0, sigma, peak |grad| (signed), ratio, theta -- an
+        # ANISOTROPIC gaussian A exp(-a^2/2 sigma^2 - b^2/2 (ratio sigma)^2), b the
+        # coordinate along the direction at angle theta from x and a the one across it.
+        # A = amp sigma sqrt(e) as for a blob of the narrow width, so `amp` is the peak
+        # gradient ACROSS the sheet. Evaluated analytically in k space (the unnormalised
+        # transform of the periodised gaussian), which is what the page's kick kernel
+        # does: exactly periodic at any width, where a rotated minimum-image gaussian
+        # would be cut at the box edge.
+        kx, ky = kgrid.kx, kgrid.ky
+        def one(b):
+            c, s = jnp.cos(b[5]), jnp.sin(b[5])
+            ka, kb = -s * kx + c * ky, c * kx + s * ky
+            sa, sb = b[2], b[2] * b[4]
+            w = b[3] * sa * np.exp(0.5) * 2.0 * np.pi * sa * sb * params.nx * params.ny / LBOX**2
+            return w * jnp.exp(-0.5 * ((sa * ka)**2 + (sb * kb)**2) - 1j * (kx * b[0] + ky * b[1]))
+        return jnp.sum(jax.vmap(one)(blobs), axis=0)
+
     @jax.jit
     def kick(fields, blobs_p, blobs_m):
-        zp, zm = potential(blobs_p), potential(blobs_m)
-        d = jnp.stack([0.5 * (zp + zm), 0.5 * (zp - zm)])[:, None]      # (phi, psi)
-        dk = fft(d, params) * kgrid.dealias
+        # 4 columns per blob: today's isotropic kick, built in real space. 6 columns: the
+        # anisotropic one, built in k space. The shape is static, so this is a trace-time
+        # branch and the 4-column graph is the one that existed before sheets did.
+        if blobs_p.shape[1] == 6:
+            zp, zm = potential_k(blobs_p), potential_k(blobs_m)
+            dk = jnp.stack([0.5 * (zp + zm), 0.5 * (zp - zm)])[:, None] * kgrid.dealias
+        else:
+            zp, zm = potential(blobs_p), potential(blobs_m)
+            d = jnp.stack([0.5 * (zp + zm), 0.5 * (zp - zm)])[:, None]      # (phi, psi)
+            dk = fft(d, params) * kgrid.dealias
         dk = dk.at[:, :, 0, 0].set(0.0)
         return fields + dk.astype(fields.dtype)
 
@@ -376,21 +454,108 @@ def band_plan(n, nbands=None, sigma_min=None):
     return sigmas, nblobs
 
 
-def blobs_for(rng, sigma, nblob, amp):
+def blobs_for(rng, sigma, nblob, amp, xc=None):
     # one kick's blobs for ONE channel: positions uniform, signs random. Called once per
-    # channel, which is what makes the z+ and z- sets independent.
+    # channel, which is what makes the z+ and z- sets independent. With `xc` (stereo
+    # placement) x is instead gaussian about xc, width STEREO_JITTER of the box; y stays
+    # uniform. xc=None draws exactly what it always drew.
     out = np.zeros((nblob, 4))
     out[:, 0:2] = rng.uniform(0.0, LBOX, size=(nblob, 2))
+    if xc is not None:
+        out[:, 0] = (xc + STEREO_JITTER * LBOX * rng.standard_normal(nblob)) % LBOX
     out[:, 2] = sigma
     out[:, 3] = amp * rng.choice([-1.0, 1.0], size=nblob)
     return out
 
 
+KICK_TYPES = ("elsasser", "vortex", "island", "dipole", "sheet", "sheet-island")
+DIPOLE_SEP = 1.5         # separation of a dipole's two blobs, in sigma
+SHEET_RATIO = 4.0        # a sheet's length over its width
+STEREO_SPAN = 0.4        # hard left / right put a band's centre at (0.5 -+ this) of the box
+STEREO_JITTER = 0.12     # gaussian scatter of the blobs about that centre, in box lengths
+
+
+def kick_types_for(spec, nbands):
+    """One kick type per band, bass first, from --kick-types: None (all `elsasser`, the
+    phase-1 kick), `variety` (bass dipole, treble sheet, vortex and island alternating in
+    between), one type for every band, or a comma list with one entry per band."""
+    if spec is None:
+        return ("elsasser",) * nbands
+    names = [s.strip() for s in spec.split(",")] if isinstance(spec, str) else list(spec)
+    if names == ["variety"]:
+        names = ["dipole"] + [("vortex", "island")[i % 2] for i in range(nbands - 2)] + ["sheet"]
+        names = names[:1] if nbands == 1 else names
+    elif len(names) == 1:
+        names = names * nbands
+    bad = [s for s in names if s not in KICK_TYPES]
+    if bad or len(names) != nbands:
+        raise ValueError(f"--kick-types: need `variety`, one type, or {nbands} of {KICK_TYPES} "
+                         f"(one per band, low to high); got {names}")
+    return tuple(names)
+
+
+def kick_blobs(rng, kind, sigma, nblob, amp, xc=None, ratio=SHEET_RATIO, sheet_energy=1.0):
+    """One kick's (z+ list, z- list). Every entry has peak |grad z| = `amp` in its channel,
+    and phi += (z+ + z-)/2, psi += (z+ - z-)/2, so:
+
+      elsasser  independent sets in the two channels                   (the phase-1 kick)
+      vortex    the same set in both: phi only, a velocity kick, psi untouched
+      island    the same set, sign flipped in z-: psi only, a magnetic kick, phi untouched
+      dipole    a vortex kick made of pairs: two opposite-signed blobs DIPOLE_SEP sigma
+                apart at a random orientation. Each advects the other, so the pair travels
+                perpendicular to the line joining them. `nblob` pairs; a pair carries
+                dipole_energy_factor() = 1.5 times one blob's energy.
+      sheet     independent sets of ANISOTROPIC gaussians, width sigma and length
+                ratio*sigma at a random orientation; 6 columns (see make_kick). `nblob`
+                per channel; a sheet carries (ratio + 1/ratio)/2 times a blob's energy,
+                times `sheet_energy` (the amplitude is scaled by its square root).
+      sheet-island  one set of sheets, sign flipped in z-: psi only, magnetic sheets. The
+                same energy per kick as `sheet`.
+    """
+    if kind == "elsasser":
+        return blobs_for(rng, sigma, nblob, amp, xc), blobs_for(rng, sigma, nblob, amp, xc)
+    if kind in ("sheet", "sheet-island"):
+        def one():
+            b = blobs_for(rng, sigma, nblob, amp * np.sqrt(sheet_energy), xc)
+            return np.column_stack([b, np.full(nblob, ratio), rng.uniform(0.0, np.pi, nblob)])
+        if kind == "sheet":
+            return one(), one()
+        b = one()
+        m = b.copy()
+        m[:, 3] *= -1.0
+        return b, m
+    b = blobs_for(rng, sigma, nblob, amp, xc)
+    if kind == "dipole":
+        th = rng.uniform(0.0, 2.0 * np.pi, nblob)
+        off = 0.5 * DIPOLE_SEP * sigma * np.column_stack([np.cos(th), np.sin(th)])
+        b = np.concatenate([b, b])
+        b[:nblob, 0:2] += off
+        b[nblob:, 0:2] -= off
+        b[nblob:, 3] *= -1.0
+        b[:, 0:2] %= LBOX
+    m = b.copy()
+    if kind == "island":
+        m[:, 3] *= -1.0
+    elif kind not in ("vortex", "dipole"):
+        raise ValueError(f"unknown kick type {kind!r}")
+    return b, m
+
+
+def dipole_energy_factor(sep=DIPOLE_SEP):
+    # energy of two opposite-signed gaussian blobs `sep` sigma apart over that of ONE blob:
+    # the cross term of their gradients is -(1 - q) e^{-q} of a blob's, q = sep^2/4
+    q = 0.25 * sep * sep
+    return 2.0 * (1.0 - (1.0 - q) * np.exp(-q))
+
+
 def pad(blobs):
-    out = np.zeros((NBLOB_MAX, 4))
+    if len(blobs) > NBLOB_MAX:
+        raise ValueError(f"{len(blobs)} blobs in one kick exceeds NBLOB_MAX = {NBLOB_MAX}")
+    out = np.zeros((NBLOB_MAX, blobs.shape[1]))
     out[:, 2] = 1.0                      # unused slots: sigma 1, amplitude 0
-    n = min(len(blobs), NBLOB_MAX)
-    out[:n] = blobs[:n]
+    if blobs.shape[1] == 6:
+        out[:, 4] = 1.0                  # ... and ratio 1
+    out[:len(blobs)] = blobs
     return out
 
 
@@ -399,24 +564,52 @@ def pad(blobs):
 # ---------------------------------------------------------------------------------------
 def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=None, diss=None,
         hyper=4, cfl=0.4, threshold=0.3, causal=False, field="speed", cmap=None, sigma_min=None, seed=0,
-        duration=None, audio_path=None, quiet=False):
+        duration=None, audio_path=None, quiet=False, kick_types=None, sheet_ratio=SHEET_RATIO,
+        stereo=None, stereo_gain=1.0, stereo_bands=None, sheet_energy=1.0):
+    # kick_types: see kick_types_for. stereo: the (n, 2) [left, right] samples behind the
+    # mono `audio` (same length), which switches stereo placement on; stereo_bands: the
+    # bands that take part (default: all but the lowest -- the bass is centred in nearly
+    # every mix and would land in one central column).
     import imageio
-    from matplotlib import colormaps
 
     if duration is not None:
         audio = audio[:int(duration * sr)]
+        stereo = None if stereo is None else stereo[:int(duration * sr)]
     T = len(audio) / sr
     sigmas, nblobs = band_plan(n, nbands, sigma_min)
     nbands = len(sigmas)
+    kinds = kick_types_for(kick_types, nbands)
     if causal:
         t_on, b_on, s_on, edges, _ = detect_onsets_causal(sr, audio, nbands=nbands, threshold=threshold)
     else:
         t_on, b_on, s_on, edges = detect_onsets(sr, audio, nbands=nbands, threshold=threshold)
+    pans, xcs = None, None
+    if stereo is not None and is_mono(stereo):
+        if not quiet:
+            print("  stereo placement: the two channels are identical -- uniform placement", flush=True)
+    elif stereo is not None:
+        if len(stereo) != len(audio):
+            raise ValueError("stereo must have the same number of samples as audio")
+        if stereo_bands is None:
+            stereo_bands = range(1, nbands)
+        if any(not 0 <= b < nbands for b in stereo_bands):
+            raise ValueError(f"stereo_bands must be band indices 0..{nbands - 1}, got {list(stereo_bands)}")
+        pans = onset_pans(sr, stereo, t_on, b_on, edges)
+        # x runs left to right in the movie (frame = img.T[::-1])
+        xcs = LBOX * (0.5 + STEREO_SPAN * np.clip(stereo_gain * pans, -1.0, 1.0))
+        xcs = [float(x) if b in stereo_bands else None for x, b in zip(xcs, b_on)]
     if not quiet:
         for b in range(nbands):
-            print(f"  band {b}: {edges[b]:6.0f}-{edges[b + 1]:6.0f} Hz -> sigma {sigmas[b]:.4f} "
-                  f"(k_peak {np.sqrt(1.5) / sigmas[b]:5.1f}), {nblobs[b]:3d} blobs/kick, "
-                  f"{np.sum(b_on == b) / T:4.1f} kicks/s", flush=True)
+            line = (f"  band {b}: {edges[b]:6.0f}-{edges[b + 1]:6.0f} Hz -> sigma {sigmas[b]:.4f} "
+                    f"(k_peak {np.sqrt(1.5) / sigmas[b]:5.1f}), {nblobs[b]:3d} blobs/kick, "
+                    f"{np.sum(b_on == b) / T:4.1f} kicks/s")
+            if kick_types is not None:
+                line += f", {kinds[b]}"
+            if pans is not None and np.any(b_on == b):
+                pb = pans[b_on == b]
+                line += (f", pan {pb.mean():+.2f} +- {pb.std():.2f}"
+                         + ("" if b in stereo_bands else " (not placed)"))
+            print(line, flush=True)
     nframes = int(T * fps)
     if diss is None:
         # hyperviscous rate nu k^(2 hyper) = 48 amp at the dealiasing cutoff n/3, whatever
@@ -435,7 +628,8 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
 
     # events in audio seconds: (time, kind, payload); kind 0 = kick, 1 = frame, so a kick
     # that coincides with a frame is in that frame
-    events = [(float(t), 0, (int(b), float(s))) for t, b, s in zip(t_on, b_on, s_on) if t < T]
+    events = [(float(t), 0, (int(b), float(s), None if xcs is None else xcs[i]))
+              for i, (t, b, s) in enumerate(zip(t_on, b_on, s_on)) if t < T]
     events += [(i / fps, 1, i) for i in range(nframes)]
     events.sort(key=lambda ev: (ev[0], ev[1]))
 
@@ -457,10 +651,10 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
             state = state._replace(fields=state.fields * float(np.exp(-(t_now - t_prev) / (2.0 * memory * rate))))
         t_prev = t_now
         if kind == 0:
-            band, strength = payload
+            band, strength, xc = payload
             e_before = float(observe(state.fields)[2])
-            bp = blobs_for(rng, sigmas[band], nblobs[band], amp * strength)
-            bm = blobs_for(rng, sigmas[band], nblobs[band], amp * strength)
+            bp, bm = kick_blobs(rng, kinds[band], sigmas[band], nblobs[band], amp * strength,
+                                xc, sheet_ratio, sheet_energy)
             state = state._replace(fields=kick(state.fields, pad(bp), pad(bm)))
             _, umax, e = observe(state.fields)
             umax, e = float(umax), float(e)
@@ -493,7 +687,7 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         os.remove(video)
 
     return dict(energy=np.array(energy), umax=np.array(umaxs), late=np.array(late), jumps=jumps,
-                onsets=(t_on, b_on, s_on), edges=edges, sigmas=sigmas, nblobs=nblobs, fps=fps, diss=diss, nsteps=nsteps, fields=np.asarray(state.fields),
+                onsets=(t_on, b_on, s_on), kick_types=kinds, pans=pans, edges=edges, sigmas=sigmas, nblobs=nblobs, fps=fps, diss=diss, nsteps=nsteps, fields=np.asarray(state.fields),
                 duration=T, wall=time.perf_counter() - t0)
 
 
@@ -503,6 +697,7 @@ BRAT_GREEN = (0x8A / 255.0, 0xCE / 255.0, 0.0)
 def get_cmap(name):
     """A matplotlib colormap by name, plus the music page's two: `brat` (#8ACE00 at zero,
     falling linearly to black) and `brat_r` (black at zero, rising to #8ACE00)."""
+    from matplotlib import colormaps
     from matplotlib.colors import LinearSegmentedColormap
     if name in ("brat", "brat_r"):
         ends = [BRAT_GREEN, (0.0, 0.0, 0.0)]
@@ -540,6 +735,21 @@ def main():
                          "raise to keep only the stronger hits")
     ap.add_argument("--causal", action="store_true",
                     help="use the live-capable onset detector (detect_onsets_causal)")
+    ap.add_argument("--kick-types", default=None,
+                    help="E1: `variety` (bass dipole, vortex/island in between, treble sheet), one "
+                         f"of {', '.join(KICK_TYPES)} for every band, or a comma list with one per "
+                         "band, low to high (default: elsasser everywhere)")
+    ap.add_argument("--sheet-ratio", type=float, default=SHEET_RATIO, help="length/width of a sheet")
+    ap.add_argument("--sheet-energy", type=float, default=1.0,
+                    help="multiplies the energy of every sheet (amplitude by its square root)")
+    ap.add_argument("--stereo", action="store_true",
+                    help="E2: place each band's blobs in x by the band's stereo pan at the onset")
+    ap.add_argument("--stereo-gain", type=float, default=1.0,
+                    help="multiplies the pan before placement (most mixes are narrow: try 2-3)")
+    ap.add_argument("--stereo-bands", default=None,
+                    help="comma list of the band indices placed by pan (default: all but band 0)")
+    ap.add_argument("--click-stereo", action="store_true",
+                    help="the click track in stereo: snare left, hats alternating right/left")
     ap.add_argument("--bpm", type=float, default=120.0, help="click track tempo")
     ap.add_argument("--duration", type=float, default=None, help="seconds (default: whole file; 20 for the click track)")
     ap.add_argument("--field", choices=FIELDS, default="speed")
@@ -554,16 +764,24 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
 
+    lr = None
     if a.wav is None:
-        sr, audio = click_track(duration=a.duration or 20.0, bpm=a.bpm)
+        sr, audio = click_track(duration=a.duration or 20.0, bpm=a.bpm, stereo=a.click_stereo)
         audio_path = os.path.splitext(a.out)[0] + "_click.wav"
-        wavfile.write(audio_path, sr, (32767 * audio).astype(np.int16))
+        wavfile.write(audio_path, sr, (32767 * np.clip(audio, -1.0, 1.0)).astype(np.int16))
+        if a.click_stereo:
+            lr, audio = audio, audio.mean(axis=1)
         duration = None
     else:
-        sr, audio = load_wav(a.wav)
+        sr, audio, lr = load_wav(a.wav, stereo=True)
         audio_path, duration = a.wav, a.duration
+    if a.stereo and lr is None:
+        print("  --stereo: one-channel input -- uniform placement")
+    stereo_bands = None if a.stereo_bands is None else [int(b) for b in a.stereo_bands.split(",")]
     res = run(sr, audio, a.out, n=a.n, fps=a.fps, rate=a.rate, amp=a.amp, memory=a.memory or None, nbands=a.bands, sigma_min=a.sigma_min, diss=a.diss, hyper=a.hyper, cfl=a.cfl, threshold=a.threshold, causal=a.causal,
-              field=a.field, cmap=a.cmap, seed=a.seed, duration=duration, audio_path=audio_path)
+              field=a.field, cmap=a.cmap, seed=a.seed, duration=duration, audio_path=audio_path,
+              kick_types=a.kick_types, sheet_ratio=a.sheet_ratio, stereo=lr if a.stereo else None,
+              stereo_gain=a.stereo_gain, stereo_bands=stereo_bands, sheet_energy=a.sheet_energy)
     t_on, b_on, _ = res["onsets"]
     print(f"wrote {a.out}  ({res['wall']:.0f} s wall, {res['nsteps']} steps, diss = {res['diss']:.2e}, "
           f"events late by {1e3 * res['late'].mean():.1f} ms mean / {1e3 * res['late'].max():.1f} ms max)")

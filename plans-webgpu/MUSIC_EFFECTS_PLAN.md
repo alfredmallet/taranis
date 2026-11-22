@@ -1,6 +1,7 @@
 # MUSIC_EFFECTS_PLAN — phase 2 of the music project: variety
 
-> **STATUS: drafted 2026-11-21, nothing built. Alfred accepted it the same day as the
+> **STATUS: step 1 (E1 + E2 offline) built 2026-11-21, movies rendered, awaiting Alfred's
+> verdict — see "Step 1 record" at the end. Nothing else built.** Drafted 2026-11-21. Alfred accepted it the same day as the
 > initial plan, with three decisions (end of file): the E1 type table as the starting
 > point, the bass exempt from stereo placement, and the mean field (E4) rather than the
 > pan.** Phase 1 (MUSIC_PLAN.md) is published:
@@ -183,3 +184,68 @@ switch, judged against the same passage without it.
 
 - Whether the effects get individual controls on the page or one "variety" preset switch
   (not needed before step 5).
+
+## Step 1 record (2026-11-21): E1 + E2 offline
+
+In `examples/music_turbulence.py`; gate `examples/music_turbulence_check.py`
+(`TARANIS_PRECISION=64`, all pass). Switches: `--kick-types` (`variety`, one
+name, or a list per band), `--sheet-ratio`, `--stereo`, `--stereo-gain`, `--stereo-bands`,
+and `--click-stereo` (a stereo click track: snare left, hats alternating — the test input
+with known pans).
+
+**Switches off = before**, checked once against the pre-change tree: three click-track
+configurations (offline detector, `--causal`, 64² with 3 bands and memory 0.4) at fp32 and
+fp64 — final fields, energy trace and step count bitwise, the mp4 files byte-identical —
+and `gen_kickfixture.py` / `gen_musicfixture.py` regenerate both fixtures unchanged.
+
+What was decided while building (each is a one-line change if Alfred wants otherwise):
+
+- **`sheet` is an Elsasser-type kick** (independent anisotropic sets in z+ and z-); the
+  plan's table did not say. Orientation uniform in [0, π), ratio 4.
+- **Sheets are built in k space** (the periodised gaussian's analytic transform — the
+  page kernel's form), isotropic lists stay in real space exactly as before. A 6-column
+  list at ratio 1 reproduces the 4-column one to 1e-15, so the port can use one form.
+- **Counts follow energy.** A sheet carries (r + 1/r)/2 = 2.1 blobs' energy, so a band's
+  count is divided by that (treble at 256²: 15 blobs → 7 sheets). A dipole is `nblob`
+  PAIRS and carries 1.5× a blob's energy per pair (closed form
+  2[1 − (1 − q)e^(−q)], q = d²/4σ²) — not compensated, so the bass kick is 1.5× stronger
+  under `variety`.
+- **A dipole travels PERPENDICULAR to the line joining its two blobs**, at 0.43 of the
+  naive estimate (the partner's speed at a blob's centre, 0.80·amp at 1.5σ): 0.34·amp
+  measured over three turnover times, steady to ±10%, energy kept. The initial rate
+  matches 2D Euler evaluated independently in numpy to 4 digits. So a bass dipole at
+  σ = 0.45, amp 1 crosses ~0.05 of the box in the 1 s memory — visible as a drift, not a
+  flight.
+- **Pan** uses band ENERGY (Σ|X|²) in one Hann frame centred on the onset, per channel,
+  computed after detection (the detectors are untouched). An instrument at amplitude
+  gains (1 − p, 1 + p) therefore reads 2p/(1 + p²). It is the pan of everything sounding
+  in the band at that instant, not of the onset alone.
+- **Measured pans** (offline detector, threshold 0.3, 4 bands): Goldberg var. 1, 45 s —
+  every band mean +0.06…+0.13, std 0.21–0.24; Beths 30–90 s — bass −0.29 ± 0.18,
+  low-mid +0.05 ± 0.24, high-mid +0.14 ± 0.22, treble +0.34 ± 0.14. So the bass of that
+  track is NOT centred, and gain 2 is what the movies use.
+- `examples/data/music/beths.wav` is MONO; the stereo movies use
+  `beths_stereo_30-90s.wav`, cut locally from the mp3. The page's capture graph was not
+  looked at (step 5).
+- Found and fixed on the way: since 4258643 the script raised `NameError` for every
+  colormap except `brat`/`brat_r` (`get_cmap` used an import local to `run`).
+
+Movies (256², fp32, in `examples/data/music/`, not in git): `e12_click_variety_stereo`,
+`e12_goldberg_variety_stereo` (gain 2), and on the Beths excerpt `e12_beths_phase1`
+(switches off), `e12_beths_variety_only`, `e12_beths_stereo_only` (gain 2),
+`e12_beths_variety_stereo` (gain 2).
+
+**Sheet round 2 (2026-11-21, Alfred: the sheets were not visible after the start).** Not
+dissipation: a treble sheet (σ = 0.091 at 256²) sits at k ≈ 11–14, where the k⁸ rate is
+~2e-5/s; the rate reaches 1 at k ≈ 53. At 7 sheets a treble kick added 3% to the energy
+(bass 18%). Changed at his instruction: the count is back to `nblob` (the energy
+compensation above is gone), `--sheet-energy` multiplies a sheet's energy (amplitude by
+its square root), and a second type `sheet-island` (one set, sign flipped in z-: psi only)
+exists beside the Elsasser `sheet`. With 15 sheets at `--sheet-energy 2` the treble kick
+adds 11–12% on the Beths excerpt, 20% on the click track. Movies, all with stereo gain 2:
+`e12b_{beths,click}_v1_sheet_elsasser`, `e12b_{beths,click}_v2_sheet_magnetic`. The
+`e12_*` movies above predate this (7 sheets, energy 1). Gate: 49 checks.
+
+**Alfred, 2026-11-21: the stereo placement "looks good"; of the two sheet variants,
+variant 1 (Elsasser sheets, 15 per kick, `--sheet-energy 2`) is the better.** The defaults
+are his to fix at step 4; `sheet-island` stays in the script as an available type.
