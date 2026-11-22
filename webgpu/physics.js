@@ -428,8 +428,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 // one-argument form digit by digit -- "64" becomes a 6 x 4 workgroup, i.e. every
 // global_invocation_id.x runs FOUR times. A kernel that WRITES its output cannot tell; this
 // one ACCUMULATES, so under the short form devtools/checkkick.js would see four kicks.
+//
+// `C.sheet` (MUSIC_EFFECTS_PLAN E1) emits the ANISOTROPIC twin instead: the same kernel
+// with TWO vec4 per slot, (x0, y0, sigma, w) then (ex, ey, 0, 0), and the gaussian
+// exp(-sigma^2 (k^2 + (e.k)^2)/2) -- width sigma across the unit direction e/|e|, length
+// sigma*sqrt(1 + |e|^2) along it; the caller's w carries the extra length. e = 0 is the
+// blob. Without `C.sheet` the text is the blob kernel's, byte for byte.
 const KICK_MAX = 32;
 function blobKickWGSL(C) {
+  const slot = C.sheet
+    ? `    let B: vec4<f32> = kicks[2u * (half * NKICK + b)];        // (x0, y0, sigma, w)
+    if (B.w == 0.0) { continue; }
+    let e: vec4<f32> = kicks[2u * (half * NKICK + b) + 1u];   // (ex, ey, 0, 0)
+    let ke: f32 = A.x * e.x + A.y * e.y;
+    let th: f32 = A.x * B.x + A.y * B.y;
+    acc = acc + (B.w * exp(-0.5 * B.z * B.z * (A.z + ke * ke))) * vec2<f32>(cos(th), -sin(th));`
+    : `    let B: vec4<f32> = kicks[half * NKICK + b];   // (x0, y0, sigma, w)
+    if (B.w == 0.0) { continue; }
+    let th: f32 = A.x * B.x + A.y * B.y;
+    acc = acc + (B.w * exp(-0.5 * B.z * B.z * A.z)) * vec2<f32>(cos(th), -sin(th));`;
   return C.pre + `
 @group(0) @binding(0) var<storage, read_write> fields: array<vec2<f32>>;
 @group(0) @binding(1) var<storage, read> gridA: array<vec4<f32>>;
@@ -439,10 +456,7 @@ const NKICK: u32 = ${C.nkick}u;
 fn chan(A: vec4<f32>, half: u32) -> vec2<f32> {
   var acc: vec2<f32> = vec2<f32>(0.0, 0.0);
   for (var b: u32 = 0u; b < NKICK; b = b + 1u) {
-    let B: vec4<f32> = kicks[half * NKICK + b];   // (x0, y0, sigma, w)
-    if (B.w == 0.0) { continue; }
-    let th: f32 = A.x * B.x + A.y * B.y;
-    acc = acc + (B.w * exp(-0.5 * B.z * B.z * A.z)) * vec2<f32>(cos(th), -sin(th));
+${slot}
   }
   return acc;
 }

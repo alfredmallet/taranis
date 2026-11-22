@@ -375,3 +375,42 @@ coefficients are evaluated per stage), so offline wall time did not drop; on the
 equivalent is a 2x2 complex rotation per mode in the linear kernel.
 Gate: `driven_field_gates` (78 checks in all). Movies: `e4_beths_walk_r2.mp4`,
 `e4_beths_walk_r0-3.mp4` (exact), `*_explicit.mp4` (the same with the explicit field).
+
+## Step 4 (Alfred, 2026-11-21) and step 5 record: the port to the page
+
+**Step 4, Alfred's decisions.** Everything stays and everything is settable on the page,
+with these defaults: kicks `variety` with sheet energy 2; stereo placement on, gain 2;
+pulse 0.08; mean field on as the bass-hit walk (direction and strength), upper ratio 1.5
+(0-2 and 0-1 "both have their qualities"); the section trigger is dropped from the page and
+stays in the offline script. The mean field goes into the page solver's exact linear step,
+on condition that the other pages' performance is not affected.
+
+**Step 5, built (uncommitted).**
+
+- `solver2d.js` / `physics.js`: `sheetKick` (the anisotropic twin of `blobKick`, under the
+  same `kick: true`) and a `b0: true` variant of the `stage` kernel with the field in the
+  exact linear step (a 2x2 rotation per mode; NM invocations). `setMeanField`. The 2D page
+  asks for neither flag: its emitted kernels are byte-identical (checksolver2d leg 2) and
+  its stage dispatch count is unchanged.
+- `music.js`: `musicKickTypesFor`, `musicKickBlobs` (the six types, `xc`), `musicPan`,
+  `musicPanX`, `musicPulseHit/Zoom`, `musicWalkInit/Hit/Relax/Field`, the stereo click
+  track. `musicKickList` without its new argument is the phase-1 list, draw for draw.
+- `music.html`: an `effects` control group; two channel analysers off a splitter; the pan
+  read when an onset is declared; the pulse as a CSS scale of the card's canvas; the field
+  set every frame from the energy readback.
+- Fixtures: `kick_offline.json` gained `sheet_cases`, `music_ref.json` gained `effects`;
+  everything they held before is unchanged (checked by comparing the JSON).
+- Gates: checkkick leg 7, checkmusic leg 13 (38 rows), allowances in checksolver2d. The
+  legacy music legs run with the effects switched off through the page's own controls.
+- Real browser (Chrome, M1, click track, defaults): 597 steps/s, 6.3 steps a frame, no
+  rebase, no frame at the step cap; types, placement, pulse and field all observed live
+  through `?musicdebug`. `rmhd2d.html`: 609 steps/s.
+
+**Differences from the offline script, deliberate.** The pan is read from the analysers'
+current Blackman window when the onset is declared, not from a Hann frame centred on it.
+The pulse is a CSS zoom about the centre (no periodic wrap needed at zoom >= 1) and is not
+in a recording. The walk's RNG is mulberry32 + Box-Muller, not numpy's. The ratio step is
+fixed at range/6 per full-strength hit (the rule used for the 0-2 and 0-1 renders).
+
+**Not done.** A stereo file or a tab capture in a real browser; any device but the M1; the
+user-facing docs page; step 6 (E5/E6) and step 7 (the adversarial review).

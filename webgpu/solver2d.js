@@ -196,6 +196,53 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   fields[idx] = E * fields[idx] + st.beta * dn;
 }`;
 
+  // ---- ... with a uniform in-plane mean field (MUSIC_EFFECTS_PLAN E4) ------
+  // Emitted IN PLACE of the kernel above, and ONLY for a solver built with `b0: true` --
+  // every other solver compiles the text above, byte for byte, and dispatches it as it
+  // always did. B0 = zhat x grad(psi0) is psi -> psi + psi0 in the brackets, which adds the
+  // k-local linear pair
+  //     d_t phi = i (k.B0) psi,    d_t psi = i (k.B0) phi
+  // (z+ = phi + psi streams along -B0, z- along +B0, at |B0|). With the diagonal
+  // dissipation l the linear operator is [[l, i kb], [i kb, l]], whose exponential is
+  //     exp(L tau) = e^(l tau) [[cos th, i sin th], [i sin th, cos th]],  th = kb tau
+  // so the integrating factor carries the field's waves EXACTLY at any dt: the field costs
+  // no timestep, and it is not in the CFL sum. One invocation per mode m owns both halves
+  // (the rotation mixes them), so the dispatch is over NM, not 2*NM. (B0x, B0y) is a
+  // uniform, written by setMeanField; at B0 = 0 the rotation is the identity and every
+  // value is the kernel above's. Needs Pm = 1 (one l for both halves; the constructor
+  // refuses otherwise). Reality on ky = 0: kb(-kx) = -kb(kx), cos even, sin odd.
+  if (g.b0) S.stage = pre + `
+struct Stage { alpha: f32, beta: f32, gamma: f32, pad: f32 };
+@group(0) @binding(0) var<storage, read_write> fields: array<vec2<f32>>;
+@group(0) @binding(1) var<storage, read_write> delta: array<vec2<f32>>;
+@group(0) @binding(2) var<storage, read> rhs: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read> gridB: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> sc: array<f32>;
+@group(0) @binding(5) var<uniform> st: Stage;
+@group(0) @binding(6) var<storage, read> gridA: array<vec4<f32>>;
+@group(0) @binding(7) var<uniform> b0: vec4<f32>;
+fn muli(v: vec2<f32>) -> vec2<f32> { return vec2<f32>(-v.y, v.x); }
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let m: u32 = gid.x;
+  if (m >= NM) { return; }
+  let dt: f32 = sc[0];
+  let E: f32 = exp((gridB[m].y * dt) * st.gamma);
+  let th: f32 = ((gridA[m].x * b0.x + gridA[m].y * b0.y) * dt) * st.gamma;
+  let c: f32 = cos(th);
+  let s: f32 = sin(th);
+  let d0: vec2<f32> = st.alpha * delta[m] + dt * rhs[m];
+  let d1: vec2<f32> = st.alpha * delta[NM + m] + dt * rhs[NM + m];
+  let n0: vec2<f32> = E * (c * d0 + s * muli(d1));
+  let n1: vec2<f32> = E * (c * d1 + s * muli(d0));
+  delta[m] = n0;
+  delta[NM + m] = n1;
+  let f0: vec2<f32> = fields[m];
+  let f1: vec2<f32> = fields[NM + m];
+  fields[m] = E * (c * f0 + s * muli(f1)) + st.beta * n0;
+  fields[NM + m] = E * (c * f1 + s * muli(f0)) + st.beta * n1;
+}`;
+
   // ---- CFL max reduction (generic) ----------------------------------------
   const nPartR = Math.ceil(nr / 1024);
   S.cflPartial = cflPartialWGSL(pre);
@@ -267,6 +314,9 @@ fn main(@builtin(workgroup_id) wgid: vec3<u32>, @builtin(local_invocation_id) li
   // `kick: true`, exactly as srcInit is only emitted for `eqsrc` -- so a page that never
   // asks (rmhd2d.html) emits the kernel list it always did, name for name
   if (g.kick) S.blobKick = blobKickWGSL(Object.assign({}, C, { nkick: KICK_MAX }));
+  // ... and its anisotropic twin (MUSIC_EFFECTS_PLAN E1, the `sheet` kick), under the same
+  // switch: a second kernel with its own table, so the blob kick above is untouched
+  if (g.kick) S.sheetKick = blobKickWGSL(Object.assign({}, C, { nkick: KICK_MAX, sheet: true }));
 
   // ---- initial condition: dealias the transformed IC ----------------------
   S.icFinish = icFinishWGSL(C);
@@ -315,6 +365,9 @@ class Solver {
       // MUSIC_PLAN M1, both off by default: `mu` is the uniform drag (energy e-folding
       // rate; see _dragLin) and `kick` asks for the impulsive blob kick's kernel and buffer
       mu: 0, kick: false,
+      // MUSIC_EFFECTS_PLAN E4, off by default: `b0` asks for the stage kernel that carries
+      // a uniform in-plane mean field in its exact linear step (setMeanField sets it)
+      b0: false,
       epsP: 0.15, epsM: 0.15, tau: 1.0, fshell: [1, 3], cfl: 0.4, smax: 1e4, seed: 7
     }, p || {});
     const q = this.p;
@@ -323,6 +376,10 @@ class Solver {
     this.g = Object.assign({ nx: q.nx, ny: q.ny, Lx: q.Lx, Ly: q.Ly, pm: q.pm,
                              eqsrc: q.eqsrc }, grid);
     this.g.kick = !!q.kick;
+    this.g.b0 = !!q.b0;
+    if (q.b0 && q.pm !== undefined && q.pm !== 1)
+      throw new Error("mean field: b0 needs Pm = 1 (one linear rate for both fields), got pm = " + q.pm);
+    this._b0 = new Float32Array(4);     // (B0x, B0y, 0, 0): the uniform's CPU copy
     this.nr = q.nx * q.ny;
     this.ns = grid.shell.length;
     this.nPartR = Math.ceil(this.nr / 1024);
@@ -345,6 +402,8 @@ class Solver {
     // of the kicks applied: a kick changes the state WITHOUT moving nsteps. `_cflStale` is
     // set by a kick and makes the NEXT step recompute dt whatever its cflEvery says (step)
     this._kicks = new Float32Array(2 * KICK_MAX * 4);
+    // the sheet kick's table: 8 floats per slot, (x0, y0, sigma, w) then (ex, ey, 0, 0)
+    this._sheets = new Float32Array(2 * KICK_MAX * 8);
     this.nkicks = 0;
     this._cflStale = false;
     this._buildBuffers();
@@ -396,6 +455,10 @@ class Solver {
     if (this.p.eqsrc) this.buf.eqk = d.createBuffer({ size: cx, usage: SQ });
     // the kick's blob table: 2 * KICK_MAX vec4 (x0, y0, sigma, w), z+ half then z-
     if (this.p.kick) this.buf.kicks = d.createBuffer({ size: 2 * KICK_MAX * 16, usage: SQ });
+    // ... the sheet kick's: 2 vec4 per slot (see blobKickWGSL)
+    if (this.p.kick) this.buf.sheets = d.createBuffer({ size: 2 * KICK_MAX * 32, usage: SQ });
+    // the mean field's uniform (B0x, B0y, 0, 0): zero until setMeanField
+    if (this.p.b0) this.buf.b0 = d.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     for (let s = 0; s < 3; s++) {
       d.queue.writeBuffer(this.buf.stage[s], 0,
         new Float32Array([LSRK33.alpha[s], LSRK33.beta[s], LSRK33.gamma[s], 0]));
@@ -569,6 +632,7 @@ class Solver {
     };
     if (S.srcInit) this.pl.srcInit = cp(S.srcInit, "srcInit");
     if (S.blobKick) this.pl.blobKick = cp(S.blobKick, "blobKick");
+    if (S.sheetKick) this.pl.sheetKick = cp(S.sheetKick, "sheetKick");
     const rmod = mod(S.render, "render");
     this.plRender = d.createRenderPipeline({
       layout: "auto",
@@ -600,7 +664,7 @@ class Solver {
       nlAssemble: bg(this.pl.nlAssemble, [B.nlk, B.gridA, B.gridB, B.rhs].concat(B.eqk || [])),
       forcingAdd: bg(this.pl.forcingAdd, [B.forcing, B.scalars, B.rhs]),
       stage: [0, 1, 2].map(s => bg(this.pl.stage,
-        [B.fields, B.delta, B.rhs, B.gridB, B.scalars, B.stage[s]])),
+        [B.fields, B.delta, B.rhs, B.gridB, B.scalars, B.stage[s]].concat(B.b0 ? [B.gridA, B.b0] : []))),
       cflPartial: bg(this.pl.cflPartial, [B.realGrads, B.cflPart]),
       cflFinal: bg(this.pl.cflFinal, [B.cflPart, B.scalars, B.cfg]),
       energyPartial: bg(this.pl.energyPartial, [B.fields, B.gridA, B.gridB, B.enPart]),
@@ -619,6 +683,8 @@ class Solver {
     if (this.pl.srcInit) this.bg.srcInit = bg(this.pl.srcInit, [B.fields, B.eqk]);
     if (this.pl.blobKick)
       this.bg.blobKick = bg(this.pl.blobKick, [B.fields, B.gridA, B.gridB, B.kicks]);
+    if (this.pl.sheetKick)
+      this.bg.sheetKick = bg(this.pl.sheetKick, [B.fields, B.gridA, B.gridB, B.sheets]);
   }
 
   destroy() {
@@ -805,7 +871,8 @@ class Solver {
       const p = enc.beginComputePass();
       this.encodeRHS(p, { cfl: doCFL && s === 0, forcing: true });
       p.setPipeline(this.pl.stage); p.setBindGroup(0, this.bg.stage[s]);
-      p.dispatchWorkgroups(Math.ceil(2 * this.g.nm / 64));
+      // the mean-field kernel owns both halves of a mode: NM invocations, not 2*NM
+      p.dispatchWorkgroups(Math.ceil((this.g.b0 ? 1 : 2) * this.g.nm / 64));
       p.end();
     }
   }
@@ -934,20 +1001,34 @@ class Solver {
   //     exceed it.
   // Returns { used: [n+, n-], dropped }. No device is touched (checkkick calls it on a bare
   // `{ p, _kicks }` receiver).
-  _packKicks(list) {
-    const q = this.p, a = this._kicks, n = KICK_MAX;
+  //
+  // `sheet` (MUSIC_EFFECTS_PLAN E1): pack the ANISOTROPIC table instead -- this._sheets, 8
+  // floats per slot. A blob may then carry `ratio` (>= 1, its length over its width sigma;
+  // absent = 1, an ordinary blob) and `theta` (the angle of its long axis from x; absent =
+  // 0): A exp(-a^2/2 sigma^2 - b^2/2 (ratio sigma)^2), b along the axis, with A as for a
+  // blob of the narrow width, so `amp` is the peak gradient ACROSS the sheet. The slot is
+  // (x0, y0, sigma, w * ratio) then (ex, ey, 0, 0), e = sqrt(ratio^2 - 1) (cos, sin) theta:
+  // the kernel's exponent is -sigma^2 (k^2 + (e.k)^2)/2. Same validation, same policies.
+  _packKicks(list, sheet) {
+    const q = this.p, a = sheet ? this._sheets : this._kicks, n = KICK_MAX, stride = sheet ? 8 : 4;
     const w0 = 2 * Math.PI * (q.nx * q.ny) / (q.Lx * q.Ly);
     const slots = (list || []).map((b, i) => {
       const x = +b.x, y = +b.y, sg = +b.sigma, amp = +b.amp;
       if (!isFinite(x) || !isFinite(y) || !isFinite(amp) || !isFinite(sg) || !(sg > 0))
         throw new Error("kick: blob " + i + " is not finite with sigma > 0 (x " + b.x + ", y " + b.y
                         + ", sigma " + b.sigma + ", amp " + b.amp + ")");
-      const w = icBlobPeak(amp, sg) * sg * sg * w0;
+      const ratio = b.ratio === undefined ? 1 : +b.ratio, th = b.theta === undefined ? 0 : +b.theta;
+      if (sheet && (!isFinite(ratio) || !(ratio >= 1) || !isFinite(th)))
+        throw new Error("kick: blob " + i + " needs a finite ratio >= 1 and a finite theta (ratio "
+                        + b.ratio + ", theta " + b.theta + ")");
+      const w = icBlobPeak(amp, sg) * sg * sg * w0 * (sheet ? ratio : 1);
       if (!isFinite(Math.fround(w)) || !isFinite(Math.fround(sg)))
         throw new Error("kick: blob " + i + " overflows fp32 (sigma " + b.sigma + ", amp " + b.amp
                         + " give the weight " + w + ")");
+      const e = Math.sqrt(ratio * ratio - 1);
       return { h: b.pol < 0 ? 1 : 0, x: x - q.Lx * Math.floor(x / q.Lx),
-               y: y - q.Ly * Math.floor(y / q.Ly), sg: sg, w: w, amp: amp };
+               y: y - q.Ly * Math.floor(y / q.Ly), sg: sg, w: w, amp: amp,
+               ex: e * Math.cos(th), ey: e * Math.sin(th) };
     });
     a.fill(0);
     const used = [0, 0];
@@ -955,8 +1036,9 @@ class Solver {
     for (const b of slots) {
       if (b.amp === 0) continue;
       if (used[b.h] >= n) { dropped++; continue; }
-      const o = 4 * (b.h * n + used[b.h]++);
+      const o = stride * (b.h * n + used[b.h]++);
       a[o] = b.x; a[o + 1] = b.y; a[o + 2] = b.sg; a[o + 3] = b.w;
+      if (sheet) { a[o + 4] = b.ex; a[o + 5] = b.ey; }
     }
     return { used: used, dropped: dropped };
   }
@@ -969,15 +1051,21 @@ class Solver {
   // PRE-kick dt until the next step, which is why this sets `_cflStale` (step recomputes
   // it then, whatever cflEvery is). An empty (or all-zero-amplitude) list dispatches
   // nothing and marks nothing. Needs a solver built with `kick: true`.
+  // A list in which any blob has a `ratio` other than 1 goes through the sheet kernel and
+  // its table instead (every blob of it: one with no ratio is a sheet of ratio 1); a list
+  // with none is the blob kick, dispatch for dispatch what it was before sheets existed.
   kick(list) {
     if (!this.pl.blobKick) throw new Error("kick: this solver was built without `kick: true`");
-    const r = this._packKicks(list);
+    const sheet = (list || []).some(b => b.ratio !== undefined && b.ratio !== 1);
+    const r = this._packKicks(list, sheet);
     if (r.used[0] + r.used[1] === 0) return r;
     const d = this.device;
-    d.queue.writeBuffer(this.buf.kicks, 0, this._kicks);
+    if (sheet) d.queue.writeBuffer(this.buf.sheets, 0, this._sheets);
+    else d.queue.writeBuffer(this.buf.kicks, 0, this._kicks);
     const enc = d.createCommandEncoder();
     const p = enc.beginComputePass();
-    p.setPipeline(this.pl.blobKick); p.setBindGroup(0, this.bg.blobKick);
+    if (sheet) { p.setPipeline(this.pl.sheetKick); p.setBindGroup(0, this.bg.sheetKick); }
+    else { p.setPipeline(this.pl.blobKick); p.setBindGroup(0, this.bg.blobKick); }
     p.dispatchWorkgroups(Math.ceil(this.g.nm / 64));
     p.setPipeline(this.pl.energyPartial); p.setBindGroup(0, this.bg.energyPartial);
     p.dispatchWorkgroups(this.nPartM);
@@ -988,6 +1076,20 @@ class Solver {
     this.nkicks++;
     this._cflStale = true;          // the next step recomputes dt from the kicked state
     return r;
+  }
+
+  // ---- uniform in-plane mean field (MUSIC_EFFECTS_PLAN E4) -------------------
+  // (B0x, B0y), in the units of grad(psi) -- a velocity. It takes effect at the next step
+  // and holds until changed; z+ streams along -B0 and z- along +B0 at |B0|, exactly, in the
+  // stage kernel's linear step (buildShaders), so it changes neither dt nor the energy.
+  // Needs a solver built with `b0: true`; a non-finite component throws, nothing written.
+  setMeanField(bx, by) {
+    if (!this.buf.b0) throw new Error("setMeanField: this solver was built without `b0: true`");
+    if (typeof bx !== "number" || typeof by !== "number" || !isFinite(bx) || !isFinite(by))
+      throw new Error("setMeanField: B0 must be two finite numbers, got (" + bx + ", " + by + ")");
+    if (this._b0[0] === Math.fround(bx) && this._b0[1] === Math.fround(by)) return;
+    this._b0[0] = bx; this._b0[1] = by;
+    this.device.queue.writeBuffer(this.buf.b0, 0, this._b0);
   }
 
   drawNoise() {

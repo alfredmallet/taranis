@@ -17,7 +17,8 @@
 <h1>plasma turbulence, driven by music</h1>
 <div class="sub">2D RMHD &middot; 256&sup2; &middot; every onset in a frequency band is an
   impulsive kick of gaussian blobs &middot; bass &rarr; wide blobs, treble &rarr; narrow &middot;
-  the audio clock sets the simulation time</div>
+  the audio clock sets the simulation time &middot; the bass pulses the picture and turns a
+  mean magnetic field</div>
 
 <!-- the sticky bar and the control panel are BUILT from a spec (common.js controlsBuild) -->
 <div id="topbar"></div>
@@ -76,6 +77,11 @@ const MUSIC_NFFT = 2048;           // the analyser's window: 46 ms at 44.1 kHz
 const MUSIC_MAX_STEPS = 64;        // per frame, the cap `stepsPerFrame` has always had
 const MUSIC_LAG_MAX = 0.25;        // seconds of audio: beyond it, rebase instead of catching up
 const MUSIC_SEED = 1;              // blob positions: the same session replays the same blobs
+// ---- the effects (plans-webgpu/MUSIC_EFFECTS_PLAN.md; every one has a control) ----
+const MUSIC_PULSE_TAU = 0.25;      // s of audio: how fast the camera pulse relaxes
+const MUSIC_PULSE_BAND = 0;        // the band whose onsets pulse the camera and turn the field: the bass
+const MUSIC_WALK_TAU = 0.1;        // s of audio: the mean field eases to its new direction and strength
+const MUSIC_WALK_STEPS = 6;        // a full-strength bass hit moves |B0|/rms by 1/6 of its range (rms)
 // ?musicdebug: keep a per-kick and per-frame record on window.musicDebug (see musicDebugInit).
 // ?musicdebug=energy additionally reads the energy back after EVERY kick: that is the only
 // way to get a kick's own energy jump, and it costs a GPU round trip per kick, so the
@@ -145,6 +151,49 @@ controlsBuild({
       { k: "hintdiv", id: "musicMode", t: "" },
       { k: "hintdiv", id: "musicStrip", t: "" }
     ] },
+    // MUSIC_EFFECTS_PLAN: every effect is settable, and "off" is the phase-1 page
+    { id: "grpFx", summary: "effects", keep: true, rows: [
+      [{ k: "lab", t: "kicks", for: "selKick" },
+       { k: "sel", id: "selKick", o: [["variety", "variety: bass dipoles, vortices / islands, treble sheets"],
+                                      ["elsasser", "elsasser blobs (every band)"], ["vortex", "vortices (every band)"],
+                                      ["island", "magnetic islands (every band)"], ["dipole", "dipoles (every band)"],
+                                      ["sheet", "sheets (every band)"], ["sheet-island", "magnetic sheets (every band)"]],
+         v: "variety",
+         ti: "what an onset adds. elsasser: independent blobs in z+ and z-. vortex: velocity only. "
+           + "island: magnetic field only. dipole: vortex pairs that travel. sheet: elongated "
+           + "blobs at random angles. variety gives each band its own." },
+       { k: "lab", t: "sheet energy" },
+       { k: "rng", id: "rSheetE", min: 0.5, max: 4, step: 0.25, v: 2,
+         ti: "multiplies the energy of every sheet (its amplitude by the square root)" },
+       { k: "val", id: "vSheetE" }],
+      [{ k: "cbl", id: "cbStereo", t: "stereo placement", v: true,
+         ti: "ON: each band's blobs gather at the x where that band sits in the stereo image at "
+           + "the onset (left of the picture = left channel). The bass is always spread over the "
+           + "box. A mono source is spread uniformly." },
+       { k: "lab", t: "pan gain" },
+       { k: "rng", id: "rPanGain", min: 0.5, max: 4, step: 0.25, v: 2,
+         ti: "multiplies the pan before placement: most mixes are narrow" },
+       { k: "val", id: "vPanGain" },
+       { k: "lab", t: "pulse" },
+       { k: "rng", id: "rPulse", min: 0, max: 0.3, step: 0.01, v: 0.08,
+         ti: "the picture zooms in by this fraction on a full-strength bass onset and relaxes "
+           + "back (display only; 0 = off)" },
+       { k: "val", id: "vPulse" }],
+      [{ k: "lab", t: "mean field (× rms)" },
+       { k: "rng", id: "rField", min: 0, max: 3, step: 0.1, v: 1.5,
+         ti: "a uniform in-plane magnetic field, along which z+ and z- stream in opposite "
+           + "directions. Its strength is this multiple of the rms fluctuation at the time "
+           + "(the most it reaches, if the strength walks); 0 = off." },
+       { k: "val", id: "vField" },
+       { k: "lab", t: "turn (deg)" },
+       { k: "rng", id: "rFieldDeg", min: 0, max: 90, step: 5, v: 30,
+         ti: "each bass onset turns the field by a random angle: this is its rms for a "
+           + "full-strength hit" },
+       { k: "val", id: "vFieldDeg" },
+       { k: "cbl", id: "cbFieldWalk", t: "strength walks", v: true,
+         ti: "ON: each bass onset also steps the field strength at random between 0 and the "
+           + "slider. OFF: it stays at the slider." }]
+    ] },
     // the two CFL knobs the shared loop reads (rCflEvery) and the solver takes (rCfl)
     { id: "grpSim", summary: "simulation", rows: [CTRL_CFL] },
     ctrlGrpDisp()
@@ -161,7 +210,12 @@ function musicUi() {
            // the fixed colour scale: on/off, and its multiple of amp (the slider is log2)
            fix: !!el("cbFixScale").checked,
            scaleM: Math.pow(2, Math.min(2, Math.max(-2, musicNum("rScale", 0.585)))),
-           dev: el("selDev").value };
+           dev: el("selDev").value,
+           // the effects
+           kick: el("selKick").value, sheetE: Math.max(0.01, musicNum("rSheetE", 2)),
+           stereo: !!el("cbStereo").checked, panGain: Math.max(0, musicNum("rPanGain", 2)),
+           pulse: Math.max(0, musicNum("rPulse", 0.08)), field: Math.max(0, musicNum("rField", 1.5)),
+           fieldDeg: Math.max(0, musicNum("rFieldDeg", 30)), fieldWalk: !!el("cbFieldWalk").checked };
 }
 // the drag's energy e-folding RATE, in simulation time: the flow forgets over `memory`
 // seconds of AUDIO, which is memory * rate simulation time units
@@ -183,7 +237,9 @@ function uiParams() {
     // alone the shell forcing would run underneath the kicks
     epsP: 0, epsM: 0, tau: 1, fshell: [1, 3], smax: 1e4,
     cfl: musicNum("rCfl", 0.4), seed: 7,
-    kick: true, mu: musicMu(u)
+    kick: true, mu: musicMu(u),
+    // the mean field's stage kernel, always: at B0 = 0 it gives the plain kernel's values
+    b0: true
   };
 }
 function cardAspect() { return { w: 512, h: 512 }; }
@@ -204,7 +260,11 @@ const music = {
   tPush: null,              // audio time of the last spectrum handed to the detector
   db: null, mag: null,      // the analyser's dB bins, and their magnitudes
   lit: [],                  // per band: performance.now() of its last onset (the strip)
-  behind: false, dropped: 0, lastFile: null
+  behind: false, dropped: 0, lastFile: null,
+  // the effects: their own RNG stream (the kicks keep theirs), the camera pulse's state,
+  // the mean field's walk (null while the field is off), the audio time they were last
+  // advanced, the two channel spectra, and the zoom last put on the cards
+  rngFx: musicRng(MUSIC_SEED + 4), pulse: {}, walk: null, fxT: 0, magL: null, magR: null, zoom: 1
 };
 for (let b = 0; b < music.plan.sigmas.length; b++) music.lit.push(-1e9);
 
@@ -219,6 +279,12 @@ function syncLabels() {
   el("vCfl").textContent = musicNum("rCfl", 0.4).toFixed(2);
   el("vCflEvery").textContent = el("rCflEvery").value;
   el("vTrim").textContent = (u.trim > 0 ? "+" : "") + u.trim.toFixed(0);
+  el("vSheetE").textContent = u.sheetE.toFixed(2);
+  el("vPanGain").textContent = u.panGain.toFixed(2);
+  el("vPulse").textContent = u.pulse > 0 ? u.pulse.toFixed(2) : "off";
+  el("vField").textContent = u.field > 0 ? u.field.toFixed(1) : "off";
+  el("vFieldDeg").textContent = u.fieldDeg.toFixed(0);
+  el("rPanGain").disabled = !u.stereo;
   el("rowFile").style.display = u.src === "file" ? "" : "none";
   el("rowDev").style.display = u.src === "input" ? "" : "none";
   musicModeLine();
@@ -234,6 +300,9 @@ function musicStrip() {
     parts.push((on ? "● " : "○ ") + f + " σ " + music.plan.sigmas[b].toFixed(3)
                + " ×" + music.plan.nblobs[b]);
   }
+  if (music.walk && solver)
+    parts.push("B0 " + Math.hypot(solver._b0[0], solver._b0[1]).toFixed(2) + " at "
+               + (((music.walk.th * 180 / Math.PI) % 360 + 360) % 360).toFixed(0) + "°");
   el("musicStrip").textContent = parts.join("   |   ")
     + (music.behind ? "   |   BEHIND: the simulation cannot keep up with the audio" : "")
     + (music.dropped ? "   |   " + music.dropped + " blobs dropped" : "");
@@ -322,10 +391,46 @@ function applyControls() {
   solver.uploadCfg();
   if (q.diss !== solver.p.diss || q.mu !== solver.p.mu) { solver.p.diss = q.diss; solver.setDrag(q.mu); }
 }
+// ---- the effects' per-session state ---------------------------------------------
+// back to nothing: no pulse, no walk (it is drawn afresh when the field is next wanted)
+function musicFxReset() {
+  music.pulse = {};
+  music.walk = null;
+  music.fxT = 0;
+  musicZoomApply(1);
+}
+// the camera pulse, on the cards: a CSS scale about the centre of the canvas (and of the
+// arrow overlay with it), clipped by the card. Display only -- no kernel, no readback, and
+// a saved PNG or a recording is the unzoomed canvas.
+function musicZoomApply(z) {
+  if (z === music.zoom) return;
+  music.zoom = z;
+  for (const c of cards.disp) {
+    if (!c.wrap || !c.cv) continue;
+    c.wrap.style.overflow = "hidden";
+    const t = z === 1 ? "" : "scale(" + z.toFixed(4) + ")";
+    c.cv.style.transform = t;
+    if (c.cvVec) c.cvVec.style.transform = t;
+  }
+}
+// the mean field this frame: ease the walk toward where the bass has sent it and hand the
+// solver r * sqrt(2E) (cos, sin). `e` is the newest energy readback (NaN: none yet, the
+// field in force stands). Field off: zero, and the walk is forgotten.
+function musicFieldApply(sv, u, tA, e) {
+  if (!(u.field > 0)) { music.walk = null; sv.setMeanField(0, 0); return; }
+  if (!music.walk) music.walk = musicWalkInit(music.rngFx, u.field, u.fieldWalk);
+  const w = music.walk;
+  // the slider moved, or the walk was switched off: the target follows at once
+  w.rTo = u.fieldWalk ? Math.min(w.rTo, u.field) : u.field;
+  musicWalkRelax(w, tA - music.fxT, MUSIC_WALK_TAU);
+  if (isFinite(e)) { const b = musicWalkField(w, e); sv.setMeanField(b[0], b[1]); }
+}
+
 // the initial condition is always rest: the music makes the flow
 function applyIC() {
   if (!solver) return;
   solver.setIC(true);
+  musicFxReset();
   music.clock.init = false;         // the simulation time jumped back to 0: re-anchor
   music.queue.length = 0;           // ... and nothing detected before it belongs to the new run
   spsSmooth = 0;
@@ -418,9 +523,13 @@ function musicStopStream(stream) {
 // keep the sharing bar or the microphone indicator on with no way to turn it off.
 async function musicAcquire(kind, ctx, u) {
   if (kind === "click") {
-    const click = musicClickTrack({ sr: ctx.sampleRate, bpm: u.bpm, beats: 16, seed: 1 });
-    const buffer = ctx.createBuffer(1, click.samples.length, ctx.sampleRate);
-    buffer.getChannelData(0).set(click.samples);
+    // in stereo where the context can split channels (snare left, hats alternating): the
+    // channel mean is the mono track, so the detector hears what it always heard
+    const st = !!ctx.createChannelSplitter;
+    const click = musicClickTrack({ sr: ctx.sampleRate, bpm: u.bpm, beats: 16, seed: 1, stereo: st });
+    const buffer = ctx.createBuffer(st ? 2 : 1, click.samples.length, ctx.sampleRate);
+    if (st) { buffer.getChannelData(0).set(click.left); buffer.getChannelData(1).set(click.right); }
+    else buffer.getChannelData(0).set(click.samples);
     const node = ctx.createBufferSource();
     node.buffer = buffer;
     node.loop = true;                              // the click track is a seamless loop
@@ -485,6 +594,20 @@ async function musicStart() {
     an.fftSize = MUSIC_NFFT;
     an.smoothingTimeConstant = 0;                  // the raw spectrum of the last window
     S.node.connect(an);                            // the analyser is a dead end: it feeds nothing
+    // stereo placement reads the two channels separately: source -> (mono up-mixed to two
+    // equal channels) -> splitter -> one analyser each. Dead ends, like `an`.
+    let anL = null, anR = null, split = null;
+    if (ctx.createChannelSplitter && ctx.createGain) {
+      const up = ctx.createGain();
+      up.channelCount = 2; up.channelCountMode = "explicit"; up.channelInterpretation = "speakers";
+      const sp = ctx.createChannelSplitter(2);
+      anL = ctx.createAnalyser(); anR = ctx.createAnalyser();
+      for (const a of [anL, anR]) { a.fftSize = MUSIC_NFFT; a.smoothingTimeConstant = 0; }
+      S.node.connect(up); up.connect(sp); sp.connect(anL, 0); sp.connect(anR, 1);
+      split = [up, sp, anL, anR];
+      music.magL = new Float64Array(an.frequencyBinCount);
+      music.magR = new Float64Array(an.frequencyBinCount);
+    }
     let delay = null;
     // the ONLY place anything is connected to the speakers. musicRouting never says `play` for
     // an input device; the second test is there so that no later edit of it can make a
@@ -506,7 +629,8 @@ async function musicStart() {
     music.behind = false;
     music.queue.length = 0;
     music.hidden = false;
-    const A = { ctx: ctx, an: an, node: S.node, delay: delay, t0: ctx.currentTime, kind: kind,
+    musicFxReset();
+    const A = { ctx: ctx, an: an, anL: anL, anR: anR, split: split, node: S.node, delay: delay, t0: ctx.currentTime, kind: kind,
                 click: S.click, stream: S.stream, route: route, suppressed: S.suppressed, surface: S.surface,
                 label: S.label, settings: S.settings || null, sync: null };
     if (S.stream) {
@@ -549,10 +673,12 @@ function musicStop() {
   music.behind = false;                          //   of a session that is over mean nothing
   music.queue.length = 0;
   music.hidden = false;
+  musicZoomApply(1);                             // the picture is not left zoomed in
   if (!A) { syncLabels(); return; }
   if (A.stream) musicStopStream(A.stream);
   else { A.node.onended = null; try { A.node.stop(); } catch (e) { /* already ended */ } }
-  try { A.node.disconnect(); A.an.disconnect(); if (A.delay) A.delay.disconnect(); } catch (e) { /* nothing connected */ }
+  try { A.node.disconnect(); A.an.disconnect(); if (A.delay) A.delay.disconnect();
+        for (const n of (A.split || [])) n.disconnect(); } catch (e) { /* nothing connected */ }
   syncLabels();
 }
 // the trim slider, live
@@ -592,8 +718,23 @@ async function musicStep(sv) {
     for (let k = 0; k < mag.length; k++) mag[k] = Math.pow(10, db[k] / 20);   // -Infinity dB -> 0
     // every onset WAITS for the hold-back before it kicks (0 where the sound is delayed
     // instead): due at the audio time it was declared plus H
-    for (const o of music.det.push(mag, tA)) music.queue.push({ due: tA + A.sync.H, o: o });
+    const ons = music.det.push(mag, tA);
+    // stereo placement: the band's pan NOW, when the onset is declared (the two channels'
+    // spectra are read only on a frame that has one)
+    const st = ons.length > 0 && u.stereo && !!A.anL;
+    if (st) for (const [an, out] of [[A.anL, music.magL], [A.anR, music.magR]]) {
+      an.getFloatFrequencyData(db);
+      for (let k = 0; k < out.length; k++) out[k] = Math.pow(10, db[k] / 20);
+    }
+    for (const o of ons) {
+      const bins = music.det.bins[o.band];
+      music.queue.push({ due: tA + A.sync.H, o: o, pan: st ? musicPan(music.magL, music.magR, bins[0], bins[1]) : null });
+    }
   }
+  // the mean field for this frame's steps, from the energy the last readback reported
+  musicFieldApply(sv, u, tA, fresh ? s[2] + s[3] : NaN);
+  music.fxT = tA;
+  const types = musicKickTypesFor(u.kick === "elsasser" ? null : u.kick, music.plan.sigmas.length);
   let nk = 0, eBefore = fresh ? s[2] + s[3] : NaN;
   // ... and the ones that are due kick now, in the order they were declared (the head of the
   // queue first: a later onset never overtakes an earlier one, even if H has just shrunk)
@@ -601,13 +742,24 @@ async function musicStep(sv) {
     const q = music.queue.shift(), o = q.o;
     // ONE kick per onset: KICK_MAX holds one band's blobs, and two onsets merged into
     // one list could need twice that and would lose the overflow
-    const r = sv.kick(musicKickList(music.rng, music.plan, o.band, u.amp, o.strength));
+    // the bass is exempt from placement: it sits in the centre of nearly every mix
+    const xc = q.pan !== null && q.pan !== undefined && u.stereo && o.band !== MUSIC_PULSE_BAND
+      ? musicPanX(q.pan, u.panGain) : null;
+    const r = sv.kick(musicKickList(music.rng, music.plan, o.band, u.amp, o.strength,
+                                    { types: types, xc: xc, sheetEnergy: u.sheetE }));
     nk++;
+    // a bass onset pulses the camera and turns the mean field, as it kicks
+    if (o.band === MUSIC_PULSE_BAND) {
+      if (u.pulse > 0) musicPulseHit(music.pulse, tA, o.strength, u.pulse, MUSIC_PULSE_TAU);
+      if (music.walk) musicWalkHit(music.walk, music.rngFx, o.strength, u.fieldDeg,
+                                   u.fieldWalk ? u.field / MUSIC_WALK_STEPS : 0, u.field);
+    }
     music.dropped += r.dropped;
     music.lit[o.band] = performance.now();
     if (MUSIC_DEBUG) {
       // the energy a kick adds enters no accumulator: difference two readbacks
-      const k = { tOnset: o.t, tFire: o.tFire, tDue: q.due, tApplied: A.ctx.currentTime - A.t0, band: o.band,
+      const k = { pan: q.pan === undefined ? null : q.pan, xc: xc, type: types[o.band],
+                  tOnset: o.t, tFire: o.tFire, tDue: q.due, tApplied: A.ctx.currentTime - A.t0, band: o.band,
                   strength: o.strength, eBefore: NaN, eAfter: NaN, simT: fresh ? s[1] : NaN,
                   used: r.used, dropped: r.dropped, sched: musicSched(A, o.t) };
       window.musicDebug.kicks.push(k);
@@ -627,6 +779,7 @@ async function musicStep(sv) {
                                   maxAhead: u.rate / MUSIC_FPS, kicked: nk > 0, resumed: resumed });
   else if (resumed) music.hidden = true;           // no readback to re-anchor on yet: next frame
   music.behind = c.behind;
+  musicZoomApply(u.pulse > 0 ? musicPulseZoom(music.pulse, tA, MUSIC_PULSE_TAU) : 1);
   musicStrip();
   if (MUSIC_DEBUG) musicDebugFrame(tA, s, fresh, c, nk);
   return c.n;
@@ -750,6 +903,9 @@ async function boot() {
   // another file chosen while one plays: stop it (the next Start plays the new one)
   el("fMusic").onchange = () => { if (music.audio && music.audio.kind === "file") musicStop(); };
   for (const id of ["rThr", "rMem", "rMAmp", "rRate", "rCfl", "rCflEvery"]) el(id).oninput = applyControls;
+  // the effects are read every frame: their controls only have labels to refresh
+  for (const id of ["rSheetE", "rPanGain", "rPulse", "rField", "rFieldDeg"]) el(id).oninput = syncLabels;
+  for (const id of ["selKick", "cbStereo", "cbFieldWalk"]) el(id).onchange = syncLabels;
   el("nBpm").onchange = () => { if (running && music.audio && music.audio.kind === "click") musicStop(); syncLabels(); };
   stepHook = musicStep;
   // what a saved params.json says drove the run (common.js _forcingRecord fills in the rest)
@@ -761,7 +917,9 @@ async function boot() {
              bpm: (A && A.click) ? A.click.bpm : null, threshold: u.thr,
              memory: u.memory, amp: u.amp, rate: u.rate, mu: solver ? solver.p.mu : null,
              bands: music.plan.sigmas.length, sigmas: music.plan.sigmas, nblobs: music.plan.nblobs,
-             seed: MUSIC_SEED };
+             seed: MUSIC_SEED,
+             effects: { kicks: u.kick, sheetEnergy: u.sheetE, stereo: u.stereo, panGain: u.panGain,
+                        pulse: u.pulse, meanField: u.field, fieldTurnDeg: u.fieldDeg, fieldWalk: u.fieldWalk } };
   };
   rebuild();
   // |u| is where a kick shows (7-13x the baseline frame change against 1.5x in vorticity)

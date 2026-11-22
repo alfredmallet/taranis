@@ -823,6 +823,28 @@ leave untracked or commit — they are dev-only, nothing in the apps loads them.
   `cflEvery − 1` steps) and one poison channel (a finite sigma with an infinite fp32
   weight). Round 2 fixed both in the solver and closed every hole; all sixteen re-applied
   survivor mutations are killed.
+- `checkkick.js` leg 7 and `checkmusic.js` leg 13 (MUSIC_EFFECTS_PLAN step 5, 2026-11-21) —
+  the EFFECTS. checkkick 7: `sheetKick` is emitted under the same `kick` flag, parses, and
+  equals the blob kernel bit for bit on a list with no ratio; `_packKicks(list, true)`'s
+  slot layout and refusals; the kernel against a real-space DFT of the periodised
+  anisotropic gaussian (tolerance 2× the blob one: a 32-point DFT aliases the narrow
+  direction's tail) and against the offline `potential_k` (`kick_offline.json`
+  `sheet_cases`); `kick()` routing by the list. Then the `b0` stage kernel: it replaces
+  `stage` and moves no other kernel's text; pure z∓ states stream along ±B0 as an exact
+  phase per mode with the energy unchanged; with a right-hand side, drag and
+  hyperviscosity every word matches an fp64 2×2 recurrence; at B0 = 0 it is the plain
+  kernel's values; the bind group, the NM/64 dispatch (2NM/64 without the flag),
+  `setMeanField`'s upload and refusals, the Pm ≠ 1 refusal. checkmusic 13: the ported rules
+  against `music_ref.json`'s `effects` key (kick types, dipole energy, the pulse frame for
+  frame, the pan formula), the blob lists' structure per type, stereo placement's
+  statistics, the walk's step size, reflection and relaxation, the stereo click track —
+  then `music.html` with its DEFAULTS on a fake context that can split channels (types per
+  band, placement at 0.1 L / 0.9 L for the alternating hats, the canvas scale, the field
+  bounded by 1.5·√(2E) and turning, the manifest, off-switches, Stop), and on one that
+  cannot (unplaced). `musicPage(search, sr, fx)` switches every effect OFF unless `fx` is
+  given, so legs 7–12 are the standing proof that effects-off is the phase-1 page.
+  **Not mutation-tested** — MUSIC_EFFECTS_PLAN keeps one adversarial review for the end of
+  the phase.
 - `checkmusic.js [dir]` — the MUSIC PAGE gate (MUSIC_PLAN M2): `music.js`'s pure logic
   against numbers recorded from the offline reference implementation, and `music.html`
   booted and DRIVEN under the stub. 226 rows in ten legs. (1) `music.js` evaluates in a

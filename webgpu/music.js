@@ -10,6 +10,10 @@
 //   musicRng           a seeded uniform generator (mulberry32)
 //   musicBlobsFor      one kick's blobs for ONE Elsasser channel
 //   musicKickList      ... for both: the list Solver.kick takes for ONE onset
+//   musicKickTypesFor / musicKickBlobs   the kick TYPE per band (MUSIC_EFFECTS_PLAN E1)
+//   musicPan / musicPanX   an onset's stereo position, and where that puts its blobs (E2)
+//   musicPulse*        the camera pulse: the zoom a bass onset lifts and time relaxes (E3)
+//   musicWalk*         the in-plane mean field's random walk on bass onsets (E4)
 //   musicClickTrack    the built-in test signal: kick / snare / hi-hat, seamless loop
 //   musicClock         the audio-clock controller: how many steps this frame
 //   musicTabConstraints / musicInputConstraints   what a live capture is asked for
@@ -24,6 +28,9 @@
 //   musicBandPlan  <->  band_plan
 //   MusicDetector  <->  CausalOnsetDetector      (a line-for-line port)
 //   musicBlobsFor  <->  blobs_for                (same rule, a different RNG)
+//   musicKickTypesFor, musicKickBlobs  <->  kick_types_for, kick_blobs   (likewise)
+//   musicPan  <->  onset_pans' formula    musicPulse*  <->  pulse_zoom
+//   musicWalk*  <->  the --field-walk / --ratio-walk rules in run()
 // devtools/checkmusic.js holds the first two to numbers recorded FROM the python
 // (devtools/fixtures/music_ref.json, written by gen_musicfixture.py), so a change on
 // either side has to be made on both and the fixture regenerated.
@@ -280,9 +287,170 @@ function musicBlobsFor(rng, sigma, nblob, amp, pol) {
 }
 // the list Solver.kick takes for ONE onset of band `band`: the z+ set, then an
 // INDEPENDENT z- set (a second run of draws, never a copy), amplitude amp * strength.
-function musicKickList(rng, plan, band, amp, strength) {
+// `o` (MUSIC_EFFECTS_PLAN; absent = the phase-1 kick above, draw for draw):
+//   types        one kick type per band (musicKickTypesFor)
+//   xc           the x the blobs gather about (stereo placement; null/undefined = uniform)
+//   ratio        a sheet's length over its width (default MUSIC_SHEET_RATIO)
+//   sheetEnergy  multiplies a sheet's energy (its amplitude by the square root)
+function musicKickList(rng, plan, band, amp, strength, o) {
   const s = plan.sigmas[band], n = plan.nblobs[band], a = amp * strength;
-  return musicBlobsFor(rng, s, n, a, 1).concat(musicBlobsFor(rng, s, n, a, -1));
+  if (o === undefined || o === null) return musicBlobsFor(rng, s, n, a, 1).concat(musicBlobsFor(rng, s, n, a, -1));
+  return musicKickBlobs(rng, o.types ? o.types[band] : "elsasser", s, n, a, o);
+}
+
+// ---------------------------------------------------------------------------
+// kick types (MUSIC_EFFECTS_PLAN E1; kick_types_for / kick_blobs in the offline script)
+// ---------------------------------------------------------------------------
+// Every entry has peak |grad z| = amp in its channel, and phi += (z+ + z-)/2,
+// psi += (z+ - z-)/2, so:
+//   elsasser      independent sets in the two channels                 (the phase-1 kick)
+//   vortex        the same set in both: phi only, a velocity kick
+//   island        the same set, sign flipped in z-: psi only, a magnetic kick
+//   dipole        a vortex kick made of PAIRS: two opposite-signed blobs MUSIC_DIPOLE_SEP
+//                 sigma apart at a random orientation; the pair travels perpendicular to
+//                 the line joining them. nblob pairs, so 2*nblob slots per channel
+//   sheet         independent sets of anisotropic gaussians, width sigma and length
+//                 ratio*sigma at a random orientation (Solver.kick's `ratio` / `theta`)
+//   sheet-island  one set of sheets, sign flipped in z-: magnetic sheets
+const MUSIC_KICK_TYPES = ["elsasser", "vortex", "island", "dipole", "sheet", "sheet-island"];
+const MUSIC_DIPOLE_SEP = 1.5;      // separation of a dipole's two blobs, in sigma
+const MUSIC_SHEET_RATIO = 4;       // a sheet's length over its width
+const MUSIC_STEREO_SPAN = 0.4;     // hard left / right put a band's centre at (0.5 -+ this) of the box
+const MUSIC_STEREO_JITTER = 0.12;  // gaussian scatter of the blobs about that centre, in box lengths
+// One kick type per band, bass first: null/undefined (all `elsasser`), "variety" (bass
+// dipole, treble sheet, vortex and island alternating in between), one type for every
+// band, or a comma list / array with one entry per band.
+function musicKickTypesFor(spec, nbands) {
+  if (spec === undefined || spec === null) return new Array(nbands).fill("elsasser");
+  let names = typeof spec === "string" ? spec.split(",").map(x => x.trim()) : Array.from(spec);
+  if (names.length === 1 && names[0] === "variety") {
+    names = ["dipole"];
+    for (let i = 0; i < nbands - 2; i++) names.push(i % 2 === 0 ? "vortex" : "island");
+    names.push("sheet");
+    if (nbands === 1) names = names.slice(0, 1);
+  } else if (names.length === 1) names = new Array(nbands).fill(names[0]);
+  if (names.length !== nbands || names.some(x => MUSIC_KICK_TYPES.indexOf(x) < 0))
+    throw new Error("musicKickTypesFor: need `variety`, one type, or " + nbands + " of " + MUSIC_KICK_TYPES.join(", ")
+                    + " (one per band, low to high); got " + names.join(","));
+  return names;
+}
+// a standard normal from two uniforms (Box-Muller; the cosine branch only)
+function musicNormal(rng) {
+  const u = 1 - rng(), v = rng();            // u in (0, 1]: the log is finite
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+const musicWrap = x => x - MUSIC_LBOX * Math.floor(x / MUSIC_LBOX);
+// one channel's set under stereo placement: musicBlobsFor's draws, then x REPLACED by a
+// gaussian about xc (width MUSIC_STEREO_JITTER of the box); y stays uniform
+function musicPlaced(rng, sigma, nblob, amp, pol, xc) {
+  const out = musicBlobsFor(rng, sigma, nblob, amp, pol);
+  if (xc !== undefined && xc !== null)
+    for (const b of out) b.x = musicWrap(xc + MUSIC_STEREO_JITTER * MUSIC_LBOX * musicNormal(rng));
+  return out;
+}
+// the energy of two opposite-signed gaussian blobs `sep` sigma apart over that of ONE:
+// the cross term of their gradients is -(1 - q) e^(-q) of a blob's, q = sep^2/4
+function musicDipoleEnergy(sep) {
+  const q = 0.25 * (sep === undefined ? MUSIC_DIPOLE_SEP : sep) * (sep === undefined ? MUSIC_DIPOLE_SEP : sep);
+  return 2 * (1 - (1 - q) * Math.exp(-q));
+}
+function musicKickBlobs(rng, kind, sigma, nblob, amp, o) {
+  o = o || {};
+  const xc = o.xc, flip = l => l.map(b => Object.assign({}, b, { amp: -b.amp, pol: -1 }));
+  const same = l => l.map(b => Object.assign({}, b, { pol: -1 }));
+  if (kind === "elsasser") return musicPlaced(rng, sigma, nblob, amp, 1, xc).concat(musicPlaced(rng, sigma, nblob, amp, -1, xc));
+  if (kind === "sheet" || kind === "sheet-island") {
+    const ratio = o.ratio === undefined ? MUSIC_SHEET_RATIO : o.ratio;
+    const a = amp * Math.sqrt(o.sheetEnergy === undefined ? 1 : o.sheetEnergy);
+    const one = pol => musicPlaced(rng, sigma, nblob, a, pol, xc)
+      .map(b => Object.assign(b, { ratio: ratio, theta: Math.PI * rng() }));
+    if (kind === "sheet") return one(1).concat(one(-1));
+    const p = one(1);
+    return p.concat(flip(p));
+  }
+  let b = musicPlaced(rng, sigma, nblob, amp, 1, xc);
+  if (kind === "dipole") {
+    const pair = [[], []];
+    for (const q of b) {
+      const th = 2 * Math.PI * rng(), ox = 0.5 * MUSIC_DIPOLE_SEP * sigma * Math.cos(th),
+            oy = 0.5 * MUSIC_DIPOLE_SEP * sigma * Math.sin(th);
+      pair[0].push(Object.assign({}, q, { x: musicWrap(q.x + ox), y: musicWrap(q.y + oy) }));
+      pair[1].push(Object.assign({}, q, { x: musicWrap(q.x - ox), y: musicWrap(q.y - oy), amp: -q.amp }));
+    }
+    b = pair[0].concat(pair[1]);
+  }
+  if (kind === "island") return b.concat(flip(b));
+  if (kind === "vortex" || kind === "dipole") return b.concat(same(b));
+  throw new Error("musicKickBlobs: unknown kick type " + kind);
+}
+
+// ---------------------------------------------------------------------------
+// stereo placement (MUSIC_EFFECTS_PLAN E2)
+// ---------------------------------------------------------------------------
+// An onset's stereo position: pan = (E_R - E_L)/(E_R + E_L) in [-1, 1], E the energy (sum
+// of |X|^2 over the band's bins [k0, k1)) of each channel's spectrum at the onset. -1 is
+// hard left. An instrument alone in its band at amplitude gains (1 - p, 1 + p) reads
+// 2p/(1 + p^2); silence in both reads 0. (The offline script takes a Hann frame centred
+// on the onset; the page takes the two analysers' current window, which holds it.)
+function musicPan(magL, magR, k0, k1) {
+  let el = 0, er = 0;
+  for (let k = k0; k < k1; k++) { el += magL[k] * magL[k]; er += magR[k] * magR[k]; }
+  return er + el > 0 ? (er - el) / (er + el) : 0;
+}
+// where that puts the band's blobs: x = L (0.5 + SPAN * clip(gain * pan)); x runs left to
+// right on the card
+function musicPanX(pan, gain) {
+  return MUSIC_LBOX * (0.5 + MUSIC_STEREO_SPAN * Math.min(1, Math.max(-1, (gain === undefined ? 1 : gain) * pan)));
+}
+
+// ---------------------------------------------------------------------------
+// the camera pulse (MUSIC_EFFECTS_PLAN E3; pulse_zoom in the offline script)
+// ---------------------------------------------------------------------------
+// Display only. An onset at time t of strength q lifts the zoom TO 1 + a*q (never lowers
+// it), and between onsets zoom - 1 decays as exp(-(t - t0)/tau). `st` = { excess, tLast }.
+function musicPulseHit(st, t, strength, a, tau) {
+  st.excess = Math.max((st.excess || 0) * Math.exp(-(t - (st.tLast || 0)) / tau), a * strength);
+  st.tLast = t;
+}
+function musicPulseZoom(st, t, tau) {
+  return 1 + (st.excess || 0) * Math.exp(-(t - (st.tLast || 0)) / tau);
+}
+
+// ---------------------------------------------------------------------------
+// the mean field's random walk (MUSIC_EFFECTS_PLAN E4, Alfred 2026-11-21)
+// ---------------------------------------------------------------------------
+// A uniform in-plane field B0 whose direction and strength take a random-walk step at
+// each bass onset. |B0| is `r` times the rms fluctuation sqrt(2E) at the time, so the
+// field keeps its hold as the energy builds; r walks in [0, rmax], reflected at both ends.
+//   st = { th, r, thTo, rTo }: the angle and ratio in force, and where they are heading
+//   musicWalkInit(rng, rmax, walkRatio)   a uniform angle; r uniform in [0, rmax] if it
+//                                         walks, rmax if it does not
+//   musicWalkHit(st, rng, strength, deg, ratioStep, rmax)
+//        the onset: thTo += deg (degrees, rms) * strength * N(0,1), and, if ratioStep > 0,
+//        rTo += ratioStep * strength * N(0,1), reflected into [0, rmax]
+//   musicWalkRelax(st, dt, tau)           th and r move toward their targets, e-folding tau
+//   musicWalkField(st, energy)            (B0x, B0y) = r sqrt(2E) (cos th, sin th)
+function musicWalkInit(rng, rmax, walkRatio) {
+  const th = 2 * Math.PI * rng(), r = walkRatio ? rmax * rng() : rmax;
+  return { th: th, r: r, thTo: th, rTo: r };
+}
+function musicReflect(x, rmax) {
+  if (!(rmax > 0)) return 0;
+  const y = x - 2 * rmax * Math.floor(x / (2 * rmax));
+  return y <= rmax ? y : 2 * rmax - y;
+}
+function musicWalkHit(st, rng, strength, deg, ratioStep, rmax) {
+  st.thTo += deg * Math.PI / 180 * strength * musicNormal(rng);
+  if (ratioStep > 0) st.rTo = musicReflect(st.rTo + ratioStep * strength * musicNormal(rng), rmax);
+}
+function musicWalkRelax(st, dt, tau) {
+  const w = dt > 0 ? 1 - Math.exp(-dt / tau) : 0;
+  st.th += w * (st.thTo - st.th);
+  st.r += w * (st.rTo - st.r);
+}
+function musicWalkField(st, energy) {
+  const b = st.r * Math.sqrt(2 * Math.max(0, energy));
+  return [b * Math.cos(st.th), b * Math.sin(st.th)];
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +467,10 @@ function musicKickList(rng, plan, band, amp, strength) {
 //   hat    high-passed noise (6 kHz), 20 ms
 // Returns { samples (Float32Array, peak 0.8), sr, bpm, beat, duration, events }, with
 // events = [{ t, kind }] sorted by time, t in seconds from the start of the loop.
+// `stereo: true` (MUSIC_EFFECTS_PLAN E2) adds `left` and `right`: the kick in the centre,
+// the snare left, the hats alternating right and left (MUSIC_CLICK_PANS). An instrument at
+// amplitude pan p has gains (1 - p, 1 + p), so the channel mean is `samples` itself.
+const MUSIC_CLICK_PANS = { kick: 0, snare: -0.6, hat: 0.8 };
 function musicBiquad(x, b0, b1, b2, a1, a2) {
   const y = new Float64Array(x.length);
   let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
@@ -338,22 +510,32 @@ function musicClickTrack(o) {
     hat[i] = 0.5 * hp[i] * Math.exp(-t / 0.02);
   }
   const out = new Float64Array(n), events = [];
-  const add = (t0, sig, kind) => {
+  const lr = o.stereo ? [new Float64Array(n), new Float64Array(n)] : null;
+  const add = (t0, sig, kind, pan) => {
     const i0 = Math.round(t0 * sr);
     for (let i = 0; i < sig.length; i++) out[(i0 + i) % n] += sig[i];   // the tail wraps: no seam
-    events.push({ t: i0 / sr, kind: kind });
+    if (lr) for (let i = 0; i < sig.length; i++) {
+      lr[0][(i0 + i) % n] += (1 - pan) * sig[i];
+      lr[1][(i0 + i) % n] += (1 + pan) * sig[i];
+    }
+    events.push(lr ? { t: i0 / sr, kind: kind, pan: pan } : { t: i0 / sr, kind: kind });
   };
   for (let i = 0; i < beats; i++) {
-    add(i * beat, kick, "kick");
-    if (i % 4 === 1 || i % 4 === 3) add(i * beat, snare, "snare");
-    add((i + 0.5) * beat, hat, "hat");
+    add(i * beat, kick, "kick", MUSIC_CLICK_PANS.kick);
+    if (i % 4 === 1 || i % 4 === 3) add(i * beat, snare, "snare", MUSIC_CLICK_PANS.snare);
+    add((i + 0.5) * beat, hat, "hat", MUSIC_CLICK_PANS.hat * (i % 2 === 0 ? 1 : -1));
   }
   let pk = 0;
   for (let i = 0; i < n; i++) pk = Math.max(pk, Math.abs(out[i]));
   const samples = new Float32Array(n);
   for (let i = 0; i < n; i++) samples[i] = 0.8 * out[i] / pk;
   events.sort((a, b) => a.t - b.t);
-  return { samples: samples, sr: sr, bpm: bpm, beat: beat, duration: n / sr, events: events };
+  const res = { samples: samples, sr: sr, bpm: bpm, beat: beat, duration: n / sr, events: events };
+  if (lr) {
+    res.left = new Float32Array(n); res.right = new Float32Array(n);
+    for (let i = 0; i < n; i++) { res.left[i] = 0.8 * lr[0][i] / pk; res.right[i] = 0.8 * lr[1][i] / pk; }
+  }
+  return res;
 }
 
 // ---------------------------------------------------------------------------

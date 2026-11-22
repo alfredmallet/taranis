@@ -185,11 +185,16 @@ function refKick(P, nkx, nky, cap, list) {
     const f = new Float64Array(P.nx * P.ny);
     for (const b of mine) {
       const Pk = potentialPeak(+b.amp, +b.sigma), inv = 0.5 / (b.sigma * b.sigma);
+      // a sheet (leg 7): the gaussian is `ratio` times longer along the direction at `theta`
+      const aniso = b.ratio !== undefined && b.ratio !== 1, ct = Math.cos(b.theta || 0), st = Math.sin(b.theta || 0);
       for (let i = 0; i < P.nx; i++) for (let j = 0; j < P.ny; j++) {
         let s = 0;
         for (let p = -IMG; p <= IMG; p++) for (let q = -IMG; q <= IMG; q++) {
           const ax = i * dx - b.x + p * P.Lx, ay = j * dy - b.y + q * P.Ly;
-          s += Math.exp(-inv * (ax * ax + ay * ay));
+          if (aniso) {
+            const al = ct * ax + st * ay, ac = -st * ax + ct * ay;      // along, across
+            s += Math.exp(-inv * (ac * ac + al * al / (b.ratio * b.ratio)));
+          } else s += Math.exp(-inv * (ax * ax + ay * ay));
         }
         f[i * P.ny + j] += Pk * s;
       }
@@ -254,7 +259,8 @@ async function legEmission(state) {
   ok("buildShaders emits `blobKick` for a grid built with kick: true", typeof G.src === "string",
      G.names.length + " kernels");
   ok("  ... and NOT without it (the gate is the flag, as srcInit's is eqsrc)",
-     G0.names.indexOf("blobKick") < 0 && G0.names.length === G.names.length - 1,
+     G0.names.indexOf("blobKick") < 0 && G0.names.indexOf("sheetKick") < 0 && G.names.indexOf("sheetKick") >= 0
+     && G0.names.length === G.names.length - 2,     // blobKick and its anisotropic twin (leg 7)
      G0.names.length + " kernels without, " + G.names.length + " with");
   // every OTHER kernel is the same text with the flag on or off
   const moved = G0.names.filter(n => G0.S[n] !== G.S[n]);
@@ -1206,6 +1212,202 @@ function legDrag(state) {
   } finally { q.writeBuffer = orig; }
 }
 
+// ===========================================================================
+// 7. MUSIC_EFFECTS_PLAN: the sheet kick, and the mean field in the stage kernel
+// ===========================================================================
+const PACKS = `function(P, arr, list){
+  const r = Solver.prototype._packKicks.call({ p: P, _sheets: arr }, list, true);
+  return JSON.stringify(r);
+}`;
+function packSheets(env, P, G, list) {
+  const a = new Float32Array(2 * G.kmax * 8).fill(SENT_PACK);
+  const r = JSON.parse(env.run(PACKS, P, a, list));
+  return { a: a, used: r.used, dropped: r.dropped };
+}
+const runSheet = (M, G, packed) => runKick(M, Object.assign({}, G, { src: G.S.sheetKick }), packed);
+// the b0 stage kernel, executed: its own emission (already `(64, 1, 1)`), NM invocations
+function runStepsB(M, G, src, gridB, fields, rhs, dt, nsteps, b0) {
+  const nm = G.nm, f = Float32Array.from(fields), delta = new Float32Array(4 * nm);
+  const sc = new Float32Array(12); sc[0] = dt;
+  const ex = new M.WgslExec(new M.WgslParser().parse(src));
+  for (let n = 0; n < nsteps; n++) {
+    delta.fill(0);
+    for (let s = 0; s < 3; s++)
+      ex.dispatchWorkgroups("main", [Math.ceil(nm / 64), 1, 1], { 0: { 0: f, 1: delta, 2: rhs, 3: gridB, 4: sc,
+        5: Float32Array.of(G.lsrk[0][s], G.lsrk[1][s], G.lsrk[2][s], 0), 6: G.gridA, 7: Float32Array.of(b0[0], b0[1], 0, 0) } });
+  }
+  return f;
+}
+// the same recurrence in fp64, written out as the 2x2 matrix it is (per mode)
+function refStepsB(G, gridB, fields, rhs, dt, nsteps, b0) {
+  const nm = G.nm, f = Float64Array.from(fields), d = new Float64Array(4 * nm);
+  for (let n = 0; n < nsteps; n++) {
+    d.fill(0);
+    for (let s = 0; s < 3; s++) for (let m = 0; m < nm; m++) {
+      const al = G.lsrk[0][s], be = G.lsrk[1][s], ga = G.lsrk[2][s];
+      const E = Math.exp(gridB[4 * m + 1] * dt * ga), th = (G.gridA[4 * m] * b0[0] + G.gridA[4 * m + 1] * b0[1]) * dt * ga;
+      const c = Math.cos(th), sn = Math.sin(th), i0 = 2 * m, i1 = 2 * (nm + m);
+      // M = E [[c, i sn], [i sn, c]] applied to a pair of complex numbers (a0, a1)
+      const app = (a0r, a0i, a1r, a1i) => [E * (c * a0r - sn * a1i), E * (c * a0i + sn * a1r),
+                                           E * (c * a1r - sn * a0i), E * (c * a1i + sn * a0r)];
+      const dn = app(al * d[i0] + dt * rhs[i0], al * d[i0 + 1] + dt * rhs[i0 + 1],
+                     al * d[i1] + dt * rhs[i1], al * d[i1 + 1] + dt * rhs[i1 + 1]);
+      const fn = app(f[i0], f[i0 + 1], f[i1], f[i1 + 1]);
+      d[i0] = dn[0]; d[i0 + 1] = dn[1]; d[i1] = dn[2]; d[i1 + 1] = dn[3];
+      f[i0] = fn[0] + be * dn[0]; f[i0 + 1] = fn[1] + be * dn[1];
+      f[i1] = fn[2] + be * dn[2]; f[i1 + 1] = fn[3] + be * dn[3];
+    }
+  }
+  return f;
+}
+function legEffects(state) {
+  const M = state.M, env = state.env, G = state.G, nm = G.nm;
+  if (!M) { ok("wgsl_reflect is installed", false, "npm i wgsl_reflect in devtools/"); return; }
+  // ---- (a) the sheet kick --------------------------------------------------
+  ok("buildShaders emits `sheetKick` under the same flag, and it parses",
+     typeof G.S.sheetKick === "string" && G.S.sheetKick !== G.src && !!new M.WgslParser().parse(G.S.sheetKick));
+  const sl = [{ x: 0.75, y: 1.5, sigma: 0.25, amp: 0.25, pol: 1, ratio: 4, theta: 0.6 },
+              { x: 2.5, y: 0.25, sigma: 0.3125, amp: -0.5, pol: -1 }];
+  const ps = packSheets(env, SQ, G, sl), a = ps.a, o1 = 8 * G.kmax;
+  const w0 = 2 * Math.PI * (SQ.nx * SQ.ny) / (SQ.Lx * SQ.Ly), e = Math.sqrt(15);
+  ok("_packKicks(list, true): 8 floats per slot -- (x0, y0, sigma, w * ratio), (ex, ey, 0, 0), e = sqrt(ratio^2 - 1) (cos, sin)",
+     ps.used[0] === 1 && ps.used[1] === 1 && a[0] === 0.75 && a[1] === 1.5 && a[2] === 0.25
+     && a[3] === Math.fround(potentialPeak(0.25, 0.25) * 0.25 * 0.25 * w0 * 4)
+     && a[4] === Math.fround(e * Math.cos(0.6)) && a[5] === Math.fround(e * Math.sin(0.6)) && a[6] === 0 && a[7] === 0,
+     "w " + a[3] + ", e (" + a[4] + ", " + a[5] + ")");
+  ok("  ... a blob with no ratio is a sheet of ratio 1: e = 0, the blob's own weight; z- at slot NKICK",
+     a[o1] === 2.5 && a[o1 + 3] === Math.fround(potentialPeak(-0.5, 0.3125) * 0.3125 * 0.3125 * w0) && a[o1 + 4] === 0 && a[o1 + 5] === 0
+     && a[8] === 0 && a[11] === 0, "slot 1 of z+ zeroed: " + (a[8] === 0));
+  let thrown = 0;
+  for (const bad of [{ ratio: 0.5 }, { ratio: NaN }, { ratio: Infinity }, { theta: NaN }, { ratio: -2 }]) {
+    try { packSheets(env, SQ, G, [Object.assign({ x: 1, y: 1, sigma: 0.3, amp: 1, pol: 1, ratio: 2, theta: 0 }, bad)]); }
+    catch (err) { if (/ratio >= 1/.test(err.message)) thrown++; }
+  }
+  ok("  ... ratio < 1, a non-finite ratio and a non-finite theta THROW", thrown === 5, thrown + " of 5");
+  // ratio 1 through the sheet kernel IS the blob kernel's kick, bit for bit
+  const bl = CASES[3].list;
+  ok("a list with no ratio through `sheetKick` is `blobKick`'s kick, bit for bit",
+     sameBits(runSheet(M, G, packSheets(env, SQ, G, bl).a), runKick(M, G, pack(env, SQ, G, bl).a)) === -1);
+  // against the real-space DFT of the periodised anisotropic gaussian
+  const sheets = [
+    ["one z+ sheet, ratio 4 at 0.6 rad", [sl[0]]],
+    ["a z- sheet along y (theta = pi/2), ratio 3", [{ x: 3.1, y: 0.4, sigma: 0.3125, amp: 0.5, pol: -1, ratio: 3, theta: Math.PI / 2 }]],
+    ["sheets and a blob, both channels", [sl[0], sl[1], { x: 5.2, y: 4.1, sigma: 0.25, amp: -0.75, pol: -1, ratio: 2.5, theta: 2.2 },
+                                           { x: 1.1, y: 5.5, sigma: 0.375, amp: 0.5, pol: 1, ratio: 2, theta: 1.4 }]]
+  ];
+  for (const [tag, list] of sheets) {
+    const r = compare(runSheet(M, G, packSheets(env, SQ, G, list).a), refKick(SQ, G.nkx, G.nky, G.kmax, list), nm);
+    // 2 * ABS_TOL: the DFT of a 32-point sample ALIASES the narrow direction's tail (at
+    // sigma 0.25, exp(-sigma^2 k^2/2) is 3e-7 of the peak at the first alias, k = 22), which
+    // the analytic kernel does not have. The offline fixture below is analytic too, and
+    // there the plain tolerance holds.
+    ok("sheetKick vs the real-space DFT: " + tag, r.abs < 2 * ABS_TOL && r.rel < REL_SUM && r.phi.peak > 0 && r.psi.peak > 0, r.note);
+  }
+  // theta and theta + pi are the same sheet; theta + pi/2 is not
+  const tw = l => runSheet(M, G, packSheets(env, SQ, G, l).a);
+  const t0 = tw([sl[0]]), t1 = tw([Object.assign({}, sl[0], { theta: 0.6 + Math.PI })]), t2 = tw([Object.assign({}, sl[0], { theta: 0.6 + Math.PI / 2 })]);
+  ok("  ... theta + pi is the same sheet, theta + pi/2 a different one",
+     compare(t1, Float64Array.from(t0), nm).abs < ABS_TOL && compare(t2, Float64Array.from(t0), nm).abs > 0.1);
+  const F = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "kick_offline.json"), "utf8"));
+  ok("the fixture carries the offline sheet cases", Array.isArray(F.sheet_cases) && F.sheet_cases.length >= 3);
+  for (const c of (F.sheet_cases || [])) {
+    const r = compare(runSheet(M, G, packSheets(env, SQ, G, c.list).a), Float64Array.from(c.fields), nm);
+    ok("offline make_kick (potential_k): " + c.tag, r.abs < ABS_TOL && r.rel < REL_SUM && r.phi.peak > 0 && r.psi.peak > 0, r.note);
+  }
+  // kick() picks the kernel by the list
+  const names = () => env.gpu.dispatches.map(d => d.pipe.__name).join(",");
+  env.run(`function(P){ globalThis.__es = new Solver(device, P); }`, Object.assign({}, W64, { b0: true }));
+  env.gpuReset();
+  env.run("function(l){ __es.kick(l); }", [sl[1]]);
+  const nBlob = names();
+  env.gpuReset();
+  env.run("function(l){ __es.kick(l); }", sl);
+  ok("kick(): a list with a ratio != 1 dispatches sheetKick (+ the energy refresh), one without dispatches blobKick",
+     nBlob === "blobKick,energyPartial,energyFinal" && names() === "sheetKick,energyPartial,energyFinal", nBlob + " | " + names());
+  const sb = env.run("function(){ const s = __es; return { n: s.buf.sheets.size, ok: s.bg.sheetKick.__buffers[3] === s.buf.sheets, st: s._cflStale, nk: s.nkicks }; }");
+  ok("  ... through a table of 2 * KICK_MAX * 2 vec4, bound fourth; counted and marked like any kick",
+     sb.n === 2 * G.kmax * 32 && sb.ok && sb.st === true && sb.nk === 2);
+
+  // ---- (b) the mean field --------------------------------------------------
+  const BS = env.run(`function(P){ const gr = makeGrid(P);
+    const S = buildShaders(Object.assign({ nx: P.nx, ny: P.ny, Lx: P.Lx, Ly: P.Ly, kick: true, b0: true }, gr));
+    return S; }`, SQ);
+  const moved = Object.keys(G.S).filter(n => G.S[n] !== BS[n]);
+  ok("b0: true replaces `stage` and moves NO other kernel's text", moved.join(",") === "stage" && Object.keys(BS).length === G.names.length, moved.join(","));
+  const ZP = Object.assign({}, SQ, { diss: 0, hyper: 1 });
+  const gz = Float32Array.from(env.run("function(P){ return Array.from(makeGrid(P).gridB); }", ZP));
+  const zero = new Float32Array(4 * nm), dt = 0.0625, NS = 4, T = dt * NS, B0 = [0.75, -0.5];
+  // a state that is pure z- (psi = -phi), then pure z+: free streaming is an exact phase
+  for (const [sign, name, way] of [[-1, "z-", "along +B0"], [1, "z+", "along -B0"]]) {
+    const f0 = walk(4 * nm, 311);
+    for (let i = 0; i < 2 * nm; i++) f0[2 * nm + i] = sign * f0[i];
+    const fT = runStepsB(M, G, BS.stage, gz, f0, zero, dt, NS, B0);
+    let worst = 0, wrong = 0;
+    for (let m = 0; m < nm; m++) {
+      // f(x - sign' B0 t): z- moves along +B0, i.e. picks up exp(-i k.B0 T); z+ the conjugate
+      const th = sign * (G.gridA[4 * m] * B0[0] + G.gridA[4 * m + 1] * B0[1]) * T, c = Math.cos(th), sn = Math.sin(th);
+      const wr = c * f0[2 * m] - sn * f0[2 * m + 1], wi = c * f0[2 * m + 1] + sn * f0[2 * m];
+      const xr = c * f0[2 * m] + sn * f0[2 * m + 1], xi = c * f0[2 * m + 1] - sn * f0[2 * m];
+      const a0 = Math.hypot(f0[2 * m], f0[2 * m + 1]);
+      worst = Math.max(worst, Math.hypot(fT[2 * m] - wr, fT[2 * m + 1] - wi) / a0);
+      wrong = Math.max(wrong, Math.hypot(fT[2 * m] - xr, fT[2 * m + 1] - xi) / a0);
+    }
+    ok("the b0 `stage` kernel, 4 steps at dt 1/16 with no RHS: a pure " + name + " state streams " + way + " EXACTLY (a phase per mode)",
+       worst < 2e-5 && wrong > 1, "worst relative miss " + e2(worst) + "; the other direction " + e2(wrong));
+    ok("  ... energy unchanged", Math.abs(energyOf(G, fT) / energyOf(G, f0) - 1) < 2e-6, e2(energyOf(G, fT) / energyOf(G, f0) - 1));
+  }
+  // a general state WITH a right-hand side and dissipation, against the fp64 recurrence
+  const DPp = Object.assign({}, SQ, { diss: 2e-5, hyper: 2, mu: 0.75, kick: true });
+  const gd = Float32Array.from(env.run("function(P){ const s = new Solver(device, P); const g = Array.from(s.g.gridB); s.destroy(); return g; }", DPp));
+  const f0 = walk(4 * nm, 99), rhs = walk(4 * nm, 5);
+  const fT = runStepsB(M, G, BS.stage, gd, f0, rhs, dt, NS, B0), fR = refStepsB(G, gd, f0, rhs, dt, NS, B0);
+  let rel = 0, sc = 0;
+  for (let i = 0; i < 4 * nm; i++) { sc = Math.max(sc, Math.abs(fR[i])); }
+  for (let i = 0; i < 4 * nm; i++) rel = Math.max(rel, Math.abs(fT[i] - fR[i]) / sc);
+  ok("  ... with a RHS, the drag and hyperviscosity: every word is the fp64 2x2 recurrence's", rel < 5e-6, "max |d| / max " + e2(rel));
+  // B0 = 0: the values of the plain stage kernel
+  const plain = runSteps(M, G, G.S.stage, gd, f0, dt, NS), viaB = runStepsB(M, G, BS.stage, gd, f0, zero, dt, NS, [0, 0]);
+  let dz = 0;
+  for (let i = 0; i < 4 * nm; i++) if (plain[i] !== viaB[i]) dz++;
+  ok("  ... and at B0 = 0 it gives the plain `stage` kernel's values, word for word", dz === 0, dz + " words differ");
+  // the solver side, on the stub device
+  const st = JSON.parse(env.run(`function(){ const s = __es; return JSON.stringify({ code: s.pl.stage.__code, n: s.bg.stage[0].__buffers.length,
+    last: s.bg.stage[0].__buffers[7] === s.buf.b0 && s.bg.stage[0].__buffers[6] === s.buf.gridA, size: s.buf.b0.size, nm: s.g.nm }); }`));
+  ok("a solver built with b0: true compiles that kernel and binds [.., gridA, b0] after the six",
+     st.code === env.run(`function(P){ const gr = makeGrid(P); return buildShaders(Object.assign({ nx: P.nx, ny: P.ny, Lx: P.Lx, Ly: P.Ly, kick: true, b0: true, pm: 1 }, gr)).stage; }`, W64)
+     && st.n === 8 && st.last && st.size === 16);
+  env.gpuReset();
+  env.run("function(){ __es.step(1); }");
+  const sd = env.gpu.dispatches.filter(d => d.pipe.__name === "stage").map(d => d.d[0]);
+  env.run(`function(P){ globalThis.__ps = new Solver(device, P); }`, W64);
+  env.gpuReset();
+  env.run("function(){ __ps.step(1); }");
+  const sd0 = env.gpu.dispatches.filter(d => d.pipe.__name === "stage").map(d => d.d[0]);
+  ok("  ... its three stages dispatch over ceil(NM / 64); a solver without b0 over ceil(2 NM / 64), as ever",
+     sd.join() === [0, 0, 0].map(() => Math.ceil(st.nm / 64)).join() && sd0.join() === [0, 0, 0].map(() => Math.ceil(2 * st.nm / 64)).join(),
+     sd.join() + " | " + sd0.join());
+  const dev = env.run("function(){ return device; }"), q = dev.queue, orig = q.writeBuffer, wb = [];
+  q.writeBuffer = function (b, off, data) { wb.push({ b: b, data: Array.from(data) }); return orig.call(q, b, off, data); };
+  try {
+    env.run("function(){ __es.setMeanField(0.5, -0.25); __es.setMeanField(0.5, -0.25); }");
+    const b0buf = env.run("function(){ return __es.buf.b0; }");
+    ok("setMeanField(0.5, -0.25) uploads (0.5, -0.25, 0, 0) to the uniform, once (the same value again writes nothing)",
+       wb.length === 1 && wb[0].b === b0buf && wb[0].data.join() === "0.5,-0.25,0,0", wb.length + " writes");
+    let refused = 0;
+    for (const args of ["NaN, 0", "0, Infinity", "'1', 0", ""]) {
+      try { env.run("function(){ __es.setMeanField(" + args + "); }"); } catch (err) { if (/two finite numbers/.test(err.message)) refused++; }
+    }
+    ok("  ... a non-finite or non-numeric component THROWS and writes nothing", refused === 4 && wb.length === 1, refused + " of 4");
+    let noB0 = "", noPm = "";
+    try { env.run("function(){ __ps.setMeanField(1, 0); }"); } catch (err) { noB0 = err.message; }
+    try { env.run("function(P){ new Solver(device, P); }", Object.assign({}, W64, { mu: 0, b0: true, pm: 2 })); } catch (err) { noPm = err.message; }
+    ok("  ... a solver built without b0 has no uniform and setMeanField throws; b0 with Pm != 1 is refused",
+       /without `b0: true`/.test(noB0) && /needs Pm = 1/.test(noPm) && env.run("function(){ return __ps.buf.b0 === undefined && __ps.pl.stage.__code !== __es.pl.stage.__code; }"),
+       noB0 + " | " + noPm);
+  } finally { q.writeBuffer = orig; }
+  env.run("function(){ __es.destroy(); __ps.destroy(); }");
+}
+
 // ---------------------------------------------------------------------------
 const LEGS = [
   ["1. the emission: gated on `kick`, parsed, sized, covering every retained mode", legEmission],
@@ -1213,7 +1415,8 @@ const LEGS = [
   ["3. the cross-check: production k space vs a real-space DFT and vs the offline make_kick", legCross],
   ["4. k = 0, the dealias cliff, additivity, the Elsasser map, reality", legExact],
   ["5. kick(): the dispatch, the upload, the refusals (stub device)", legWiring],
-  ["6. the drag: the linear column, the refusals, and the decay through `stage`", legDrag]
+  ["6. the drag: the linear column, the refusals, and the decay through `stage`", legDrag],
+  ["7. effects: the sheet kick, and the mean field in the stage kernel's exact linear step", legEffects]
 ];
 (async () => {
   const state = {};

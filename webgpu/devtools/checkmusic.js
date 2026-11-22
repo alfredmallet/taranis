@@ -127,7 +127,10 @@ function legPure(state) {
   const M = state.M = vm.runInContext(`({ musicBandPlan, MusicDetector, musicShouldPush, musicRng, musicBlobsFor,
     musicKickList, musicClickTrack, musicClock, musicNpSum, musicPercentile, MUSIC_LBOX, MUSIC_SIGMA_MAX,
     musicTabConstraints, musicInputConstraints, musicRouting, musicStartError, musicTabAudioLikely, MUSIC_SOURCES, MUSIC_TRIM_MAX, MUSIC_LDET, MUSIC_FLUX_FLOOR, MUSIC_PEAK_DECAY, musicSync, musicSyncText, MUSIC_CMAPS,
-    MUSIC_SIGMA_MIN_DX, MUSIC_SIGMA_STEP, MUSIC_NBLOB_BASS, MUSIC_NBLOB_MAX })`, ctx);
+    MUSIC_SIGMA_MIN_DX, MUSIC_SIGMA_STEP, MUSIC_NBLOB_BASS, MUSIC_NBLOB_MAX,
+    musicKickTypesFor, musicKickBlobs, musicNormal, musicDipoleEnergy, musicPan, musicPanX, musicPulseHit,
+    musicPulseZoom, musicWalkInit, musicReflect, musicWalkHit, musicWalkRelax, musicWalkField, MUSIC_KICK_TYPES,
+    MUSIC_DIPOLE_SEP, MUSIC_SHEET_RATIO, MUSIC_STEREO_SPAN, MUSIC_STEREO_JITTER, MUSIC_CLICK_PANS })`, ctx);
   const names = [];
   for (const l of src.split("\n")) {
     const m = /^(?:async\s+)?(?:function\*?|const|let|var|class)\s+([A-Za-z_$][\w$]*)/.exec(l);
@@ -867,10 +870,13 @@ function legSync(state) {
 // Every node records what it was connected TO (`outs`) and FROM (`ins`), so a leg can ask
 // the one question that matters about a graph: what reaches the speakers, and through
 // what. Streams (tab capture, an input device) carry the samples they would deliver.
-function fakeAudio(sr) {
+// `stereo` (leg 13): the context can also split channels -- createGain, createChannelSplitter,
+// buffers with a Float32Array per channel -- and an analyser fed by a splitter output reads
+// THAT channel, one fed by the source reads the channel mean (Web Audio's down-mix).
+function fakeAudio(sr, stereo) {
   const A = { t: 0, sr: sr || 44100, ctxs: [], decoded: null, analyserCalls: 0, outLat: 0.02 };
-  const node = (kind, extra) => Object.assign({ kind: kind, outs: [], ins: [], disc: 0,
-    connect(n) { this.outs.push(n); n.ins.push(this); },
+  const node = (kind, extra) => Object.assign({ kind: kind, outs: [], ins: [], disc: 0, chan: [],
+    connect(n, out) { this.outs.push(n); n.ins.push(this); this.chan.push([n, out]); },
     disconnect() { this.disc++; for (const n of this.outs) n.ins.splice(n.ins.indexOf(this), 1); this.outs.length = 0; } }, extra);
   A.Ctx = class {
     constructor() { this.sampleRate = A.sr; this.state = "suspended"; this.destination = node("destination", {});
@@ -879,8 +885,9 @@ function fakeAudio(sr) {
     get currentTime() { return A.t; }
     get outputLatency() { return A.outLat; }       // the leg's to change, mid-session too
     createBuffer(ch, len, rate) {
-      const d = new Float32Array(len);
-      return { numberOfChannels: ch, length: len, sampleRate: rate, duration: len / rate, getChannelData: () => d };
+      const d = new Float32Array(len), all = [d];
+      for (let c = 1; c < ch && stereo; c++) all.push(new Float32Array(len));
+      return { numberOfChannels: ch, length: len, sampleRate: rate, duration: len / rate, getChannelData: c => all[stereo ? c : 0] };
     }
     createBufferSource() {
       const s = node("buffer", { buffer: null, loop: false, started: null, stopped: 0, onended: null,
@@ -906,9 +913,15 @@ function fakeAudio(sr) {
       const an = node("analyser", { fftSize: 1024, smoothingTimeConstant: 0.8,
         getFloatFrequencyData(arr) {
           A.analyserCalls++;
-          const s = this.ins[0], N = this.fftSize;
+          let s = this.ins[0], N = this.fftSize, ch = -1;
+          if (s.kind === "splitter") { ch = s.chan.find(c => c[0] === this)[1]; s = s.ins[0].ins[0]; }   // splitter <- gain <- source
           const au = s.kind === "stream" ? s.stream.__audio : { d: s.buffer.getChannelData(0), started: s.started, loop: s.loop };
-          const d = au.d, n = d.length, end = Math.round((A.t - au.started) * A.sr);
+          let d = au.d;
+          const n = d.length, end = Math.round((A.t - au.started) * A.sr);
+          if (s.kind !== "stream" && s.buffer.numberOfChannels === 2 && stereo) {
+            const l = s.buffer.getChannelData(0), r = s.buffer.getChannelData(1);
+            d = ch === 0 ? l : ch === 1 ? r : Float32Array.from(l, (v, i) => 0.5 * (v + r[i]));
+          }
           const at = au.loop ? i => (i < 0 ? 0 : d[i % n]) : i => (i >= 0 && i < n ? d[i] : 0);
           const mag = spectrum(at, end, N, true);
           for (let k = 0; k < arr.length; k++) arr[k] = 20 * Math.log10(mag[k]);      // -Infinity for silence
@@ -920,6 +933,7 @@ function fakeAudio(sr) {
     }
     async decodeAudioData(ab) { A.decoded = ab; return A.fileBuffer(this); }
     async resume() { this.resumed++; if (A.resumeHold) await A.resumeHold; this.state = "running"; }
+    __node(kind) { return node(kind, {}); }
   };
   return A;
 }
@@ -973,10 +987,24 @@ const MODEL = `function(dt){
                               a[1] = s.__t; a[2] = 0.6 * s.__e; a[3] = 0.4 * s.__e; return a; };
   s.__nsteps0 = 0;
 }`;
-async function musicPage(search, sr) {
+// `fx` true keeps the page's DEFAULT effects (MUSIC_EFFECTS_PLAN: variety kicks, stereo
+// placement, the pulse, the mean field); otherwise every one is switched OFF through its
+// own control first, which makes legs 7-12 the standing proof that the page with the
+// effects off is the phase-1 page they were written against. Leg 13 is the effects' own.
+const FX_OFF = `function(){
+  el("selKick").value = "elsasser"; el("cbStereo").checked = false;
+  el("rPulse").value = "0"; el("rField").value = "0";
+  syncLabels();
+}`;
+async function musicPage(search, sr, fx) {
   const env = await boot(dir, "music.html", search ? { search: search } : undefined);
   await turn();
-  const A = fakeAudio(sr);
+  if (!fx) env.run(FX_OFF);
+  const A = fakeAudio(sr, fx === "stereo");
+  if (fx === "stereo") {
+    A.Ctx.prototype.createGain = function () { return Object.assign(this.__node("gain"), { channelCount: 1 }); };
+    A.Ctx.prototype.createChannelSplitter = function (n) { return Object.assign(this.__node("splitter"), { numberOfOutputs: n }); };
+  }
   env.run("function(C){ window.AudioContext = C; }", A.Ctx);
   const frame = async t => { if (t !== undefined) A.t = t; env.frame(); await turn(); };
   const takeLog = () => JSON.parse(env.run("function(){ const l = solver.__log; solver.__log = []; return JSON.stringify(l); }"));
@@ -2156,6 +2184,213 @@ async function legScale() {
 }
 
 // ---------------------------------------------------------------------------
+// ===========================================================================
+// 13. the effects (MUSIC_EFFECTS_PLAN): the rules, and the page with its defaults
+// ===========================================================================
+async function legEffects(state) {
+  const M = state.M, F = state.F, X = F.effects, L = M.MUSIC_LBOX;
+  ok("the fixture carries the offline effects rules", !!X && /kick_types_for/.test(X.source));
+  if (!X) return;
+  // ---- the rules against the python ------------------------------------------------
+  ok("the constants are the offline script's: the six kick types, dipole 1.5 sigma, sheet ratio 4, span 0.4, jitter 0.12, the click pans",
+     JSON.stringify(M.MUSIC_KICK_TYPES) === JSON.stringify(X.kick_types) && M.MUSIC_DIPOLE_SEP === X.dipole_sep
+     && M.MUSIC_SHEET_RATIO === X.sheet_ratio && M.MUSIC_STEREO_SPAN === X.stereo_span && M.MUSIC_STEREO_JITTER === X.stereo_jitter
+     && JSON.stringify(M.MUSIC_CLICK_PANS) === JSON.stringify(X.click_pans));
+  const tbad = X.types.filter(c => JSON.stringify(M.musicKickTypesFor(c.spec, c.nbands)) !== JSON.stringify(c.types));
+  ok("musicKickTypesFor is kick_types_for: variety, one type and none at 1-7 bands, and a list", tbad.length === 0 && X.types.length === 22,
+     tbad.length + " of " + X.types.length + " differ; variety at 4: " + M.musicKickTypesFor("variety", 4).join(" "));
+  ok("  ... an unknown name and a wrong count are refused", throws(() => M.musicKickTypesFor("blob", 4)) !== "" && throws(() => M.musicKickTypesFor("dipole,sheet", 4)) !== "");
+  ok("musicDipoleEnergy is dipole_energy_factor (1.5 at the default separation)",
+     X.dipole_energy.every(([sep, v]) => Math.abs(M.musicDipoleEnergy(sep) - v) < 1e-14) && Math.abs(M.musicDipoleEnergy() - X.dipole_energy[0][1]) < 1e-14);
+  let pz = 0;
+  for (const c of X.pulse) {
+    const st = {};
+    let j = 0;
+    for (let i = 0; i < c.nframes; i++) {
+      const t = i / c.fps;
+      while (j < c.t_on.length && c.t_on[j] <= t) { M.musicPulseHit(st, c.t_on[j], c.s_on[j], c.a, c.tau); j++; }
+      pz = Math.max(pz, Math.abs(M.musicPulseZoom(st, t, c.tau) - c.zoom[i]));
+    }
+  }
+  ok("musicPulseHit / musicPulseZoom reproduce pulse_zoom frame for frame (two settings, 150 frames each)", pz < 1e-13, "max difference " + pz.toExponential(1));
+  const mg = Float64Array.from({ length: 64 }, (_, k) => Math.exp(-(((k - 30) / 6) ** 2)));
+  let pd = 0;
+  for (const [p, want] of X.pans) {
+    const got = M.musicPan(mg.map(v => (1 - p) * v), mg.map(v => (1 + p) * v), 10, 50);
+    pd = Math.max(pd, Math.abs(got - want), Math.abs(got - 2 * p / (1 + p * p)));
+  }
+  ok("musicPan: gains (1 - p, 1 + p) read 2p/(1 + p^2), as onset_pans measures on a tone", pd < 1e-9, "max difference " + pd.toExponential(1));
+  ok("  ... silence reads 0, and only the band's bins count",
+     M.musicPan(new Float64Array(64), new Float64Array(64), 0, 64) === 0
+     && M.musicPan(mg, mg.map((v, k) => (k < 10 ? 5 : 1) * v), 10, 50) === 0);
+  ok("musicPanX: L (0.5 + 0.4 clip(gain pan)) -- centre, hard left, a narrow mix widened, clipped",
+     M.musicPanX(0) === 0.5 * L && Math.abs(M.musicPanX(-1) - 0.1 * L) < 1e-15 && Math.abs(M.musicPanX(0.25, 2) - 0.7 * L) < 1e-15
+     && Math.abs(M.musicPanX(0.8, 3) - 0.9 * L) < 1e-15);
+
+  // ---- the kick types ------------------------------------------------------------------
+  const plan = M.musicBandPlan(256, null, null, 32), sg = 0.2, key = b => b.x + "," + b.y + "," + b.amp;
+  const split = l => [l.filter(b => b.pol > 0), l.filter(b => b.pol < 0)];
+  ok("musicKickList with all-elsasser options and no xc IS the phase-1 list, draw for draw",
+     JSON.stringify(M.musicKickList(M.musicRng(3), plan, 2, 0.7, 0.5, { types: M.musicKickTypesFor(null, 4), xc: null, sheetEnergy: 2 }))
+     === JSON.stringify(M.musicKickList(M.musicRng(3), plan, 2, 0.7, 0.5)));
+  const [vp, vm_] = split(M.musicKickBlobs(M.musicRng(5), "vortex", sg, 7, 0.5)), [ip, im] = split(M.musicKickBlobs(M.musicRng(5), "island", sg, 7, 0.5));
+  ok("vortex: the z- set IS the z+ set (phi only); island: the same set with the sign flipped (psi only)",
+     vp.length === 7 && vm_.length === 7 && vp.every((b, i) => key(b) === key(vm_[i]))
+     && ip.every((b, i) => b.x === im[i].x && b.y === im[i].y && b.amp === -im[i].amp) && ip.every(b => Math.abs(b.amp) === 0.5));
+  const [dp, dm] = split(M.musicKickBlobs(M.musicRng(5), "dipole", sg, 7, 0.5));
+  const mi = d => d - L * Math.round(d / L);
+  let sepBad = 0;
+  for (let i = 0; i < 7; i++) {
+    const a = dp[i], b = dp[7 + i];
+    if (Math.abs(Math.hypot(mi(a.x - b.x), mi(a.y - b.y)) - 1.5 * sg) > 1e-12 || a.amp !== -b.amp) sepBad++;
+  }
+  ok("dipole: nblob PAIRS, 1.5 sigma apart (minimum image), opposite signs, inside the box, the same in both channels",
+     dp.length === 14 && dm.length === 14 && sepBad === 0 && dp.every((b, i) => key(b) === key(dm[i]))
+     && dp.every(b => b.x >= 0 && b.x < L && b.y >= 0 && b.y < L), sepBad + " bad pairs");
+  const sh = M.musicKickBlobs(M.musicRng(5), "sheet", sg, 9, 0.5, { sheetEnergy: 2 }), [sp, sm] = split(sh);
+  ok("sheet: nblob per channel, independent sets, ratio 4, theta in [0, pi), amplitude times sqrt(sheet energy)",
+     sp.length === 9 && sm.length === 9 && sp.every((b, i) => b.x !== sm[i].x && b.theta !== sm[i].theta)
+     && sh.every(b => b.ratio === 4 && b.theta >= 0 && b.theta < Math.PI && Math.abs(Math.abs(b.amp) - 0.5 * Math.SQRT2) < 1e-15));
+  const [mp, mm] = split(M.musicKickBlobs(M.musicRng(5), "sheet-island", sg, 9, 0.5, { ratio: 3 }));
+  ok("sheet-island: one set, sign flipped in z-, the ratio asked for",
+     mp.every((b, i) => b.x === mm[i].x && b.theta === mm[i].theta && b.amp === -mm[i].amp && b.ratio === 3 && mm[i].ratio === 3));
+  ok("  ... an unknown type throws", throws(() => M.musicKickBlobs(M.musicRng(5), "blob", sg, 3, 1)) !== "");
+  const pl = M.musicKickBlobs(M.musicRng(8), "elsasser", sg, 4000, 1, { xc: 0.3 * L });
+  const xs = pl.map(b => mi(b.x - 0.3 * L)), mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+  const sd = Math.sqrt(xs.reduce((a, b) => a + (b - mean) ** 2, 0) / xs.length), ym = pl.reduce((a, b) => a + b.y, 0) / pl.length / L;
+  ok("stereo placement (xc): x is gaussian about xc with width 0.12 L, y stays uniform, everything inside the box",
+     Math.abs(mean) < 0.01 * L && Math.abs(sd / L - 0.12) < 0.005 && Math.abs(ym - 0.5) < 0.02 && pl.every(b => b.x >= 0 && b.x < L),
+     "mean offset " + (mean / L).toFixed(4) + " L, width " + (sd / L).toFixed(4) + " L, mean y " + ym.toFixed(3) + " L");
+
+  // ---- the field walk --------------------------------------------------------------------
+  const rw = M.musicRng(11), w0 = M.musicWalkInit(rw, 2, true), w1 = M.musicWalkInit(rw, 2, false);
+  ok("musicWalkInit: a uniform angle; r uniform in [0, rmax] if it walks, rmax if not; the targets start there",
+     w0.th >= 0 && w0.th < 2 * Math.PI && w0.r >= 0 && w0.r <= 2 && w0.thTo === w0.th && w0.rTo === w0.r && w1.r === 2);
+  let s2 = 0, s2h = 0, rOut = 0, rMoved = 0;
+  const NW = 6000, wa = M.musicWalkInit(rw, 2, true), wb = M.musicWalkInit(rw, 2, true), wc = M.musicWalkInit(rw, 2, false);
+  let rSeen = [Infinity, -Infinity];
+  for (let i = 0; i < NW; i++) {
+    let t = wa.thTo; M.musicWalkHit(wa, rw, 1, 30, 0.4, 2); s2 += (wa.thTo - t) ** 2;
+    t = wb.thTo; M.musicWalkHit(wb, rw, 0.5, 30, 0.4, 2); s2h += (wb.thTo - t) ** 2;
+    if (!(wa.rTo >= 0 && wa.rTo <= 2)) rOut++;
+    rSeen = [Math.min(rSeen[0], wa.rTo), Math.max(rSeen[1], wa.rTo)];
+    M.musicWalkHit(wc, rw, 1, 30, 0, 2); if (wc.rTo !== 2) rMoved++;
+  }
+  const rms = Math.sqrt(s2 / NW) * 180 / Math.PI, rmsH = Math.sqrt(s2h / NW) * 180 / Math.PI;
+  ok("musicWalkHit: the turn is gaussian, 30 degrees rms at full strength and half that at strength 0.5",
+     Math.abs(rms / 30 - 1) < 0.04 && Math.abs(rmsH / 15 - 1) < 0.04, rms.toFixed(2) + " and " + rmsH.toFixed(2) + " degrees over " + NW + " hits");
+  ok("  ... the ratio walks reflected inside [0, rmax] and reaches both ends; with step 0 it never moves",
+     rOut === 0 && rSeen[0] < 0.05 && rSeen[1] > 1.95 && rMoved === 0, "range " + rSeen[0].toFixed(3) + " .. " + rSeen[1].toFixed(3));
+  ok("musicReflect: -0.2 -> 0.2, rmax + 0.3 -> rmax - 0.3, 2 rmax + 0.1 -> 0.1, rmax = 0 -> 0",
+     Math.abs(M.musicReflect(-0.2, 2) - 0.2) < 1e-15 && Math.abs(M.musicReflect(2.3, 2) - 1.7) < 1e-15
+     && Math.abs(M.musicReflect(4.1, 2) - 0.1) < 1e-14 && M.musicReflect(1, 0) === 0);
+  const wr = { th: 1, r: 0.5, thTo: 2, rTo: 1.5 };
+  M.musicWalkRelax(wr, 0.1, 0.1);
+  const e1 = 1 - Math.exp(-1);
+  M.musicWalkRelax(wr, 0, 0.1); M.musicWalkRelax(wr, -1, 0.1);
+  ok("musicWalkRelax: angle and ratio close a fraction 1 - exp(-dt/tau) of the way; dt <= 0 moves nothing",
+     Math.abs(wr.th - (1 + e1)) < 1e-15 && Math.abs(wr.r - (0.5 + e1)) < 1e-15);
+  const bf = M.musicWalkField({ th: 0.7, r: 1.5 }, 0.32);
+  ok("musicWalkField: |B0| = r sqrt(2E) at the walk's angle; zero energy gives zero",
+     Math.abs(Math.hypot(bf[0], bf[1]) - 1.5 * 0.8) < 1e-15 && Math.abs(Math.atan2(bf[1], bf[0]) - 0.7) < 1e-15
+     && M.musicWalkField({ th: 0.7, r: 1.5 }, 0).join() === "0,0");
+
+  // ---- the stereo click track --------------------------------------------------------------
+  const ck = M.musicClickTrack({ sr: 44100, bpm: 120, beats: 16, seed: 1, stereo: true }), c0 = M.musicClickTrack({ sr: 44100, bpm: 120, beats: 16, seed: 1 });
+  let cm = 0, cs = 0;
+  for (let i = 0; i < ck.samples.length; i++) { cm = Math.max(cm, Math.abs(0.5 * (ck.left[i] + ck.right[i]) - ck.samples[i])); if (ck.samples[i] !== c0.samples[i]) cs++; }
+  const hats = ck.events.filter(e => e.kind === "hat");
+  ok("the stereo click track: its channel mean is the mono track (which is unchanged), snare left, hats alternating right and left",
+     cm < 1e-7 && cs === 0 && c0.left === undefined && ck.events.filter(e => e.kind === "snare").every(e => e.pan === -0.6)
+     && hats.every((e, i) => e.pan === (i % 2 === 0 ? 0.8 : -0.8)) && ck.events.filter(e => e.kind === "kick").every(e => e.pan === 0),
+     "max |mean - mono| " + cm.toExponential(1));
+
+  // ---- the page, with its DEFAULTS, on a stereo context --------------------------------------
+  const P = await musicPage("?musicdebug", 44100, "stereo"), env = P.env, A = P.A;
+  const ui = JSON.parse(env.run("function(){ return JSON.stringify(musicUi()); }"));
+  ok("the page's defaults: variety kicks, sheet energy 2, stereo on at gain 2, pulse 0.08, mean field up to 1.5 rms turning 30 degrees, strength walking",
+     ui.kick === "variety" && ui.sheetE === 2 && ui.stereo === true && ui.panGain === 2 && ui.pulse === 0.08 && ui.field === 1.5
+     && ui.fieldDeg === 30 && ui.fieldWalk === true, JSON.stringify([ui.kick, ui.sheetE, ui.stereo, ui.panGain, ui.pulse, ui.field, ui.fieldDeg, ui.fieldWalk]));
+  ok("  ... its solver is built with the mean-field stage kernel (b0: true), field zero at boot",
+     env.run("function(){ return solver.p.b0 === true && !!solver.buf.b0 && solver._b0[0] === 0 && solver._b0[1] === 0; }"));
+  env.run(MODEL, 0.004);
+  A.t = 100;
+  await P.click("btnRun");
+  const ctx = A.ctxs[0], src = ctx.sources[0];
+  ok("Start on a context that can split channels: a 2-channel click buffer (left, right), and three analysers",
+     src.buffer.numberOfChannels === 2 && ctx.analysers.length === 3 && src.buffer.getChannelData(0)[2000] === ck.left[2000]
+     && src.buffer.getChannelData(1)[2000] === ck.right[2000]);
+  ok("  ... the two channel analysers hang off a splitter and reach no speaker; the speakers still get the source through the delay only",
+     toSpeakers(ctx.analysers[1]) === null && toSpeakers(ctx.analysers[2]) === null && toSpeakers(ctx.analysers[0]) === null
+     && ctx.analysers[1].ins[0].kind === "splitter" && JSON.stringify(toSpeakers(src)) === JSON.stringify(["delay", "destination"]),
+     JSON.stringify(toSpeakers(src)));
+  const zooms = [], b0s = [], es = [];
+  for (let i = 1; i <= 8 * 60; i++) {
+    await P.frame(100 + i / 60);
+    zooms.push(env.run("function(){ return cards.disp[0].cv.style.transform || ''; }"));
+    b0s.push(env.run("function(){ return [solver._b0[0], solver._b0[1], solver.__e]; }"));
+  }
+  const dbg = JSON.parse(env.run("function(){ return JSON.stringify(window.musicDebug.kicks); }")), log = P.takeLog().filter(e => e.op === "kick");
+  const want = M.musicKickTypesFor("variety", 4);
+  ok("eight seconds of the click track: every kick is its band's variety type (dipole, vortex, island, sheet)",
+     dbg.length > 40 && dbg.length === log.length && dbg.every(k => k.type === want[k.band]) && [0, 1, 2, 3].every(b => dbg.some(k => k.band === b)),
+     dbg.length + " kicks; bands " + [0, 1, 2, 3].map(b => dbg.filter(k => k.band === b).length).join(" "));
+  let shape = 0;
+  log.forEach((k, i) => {
+    const b = dbg[i].band, n = plan.nblobs[b], [zp, zm] = split(k.list), a = dbg[i].strength;
+    if (b === 0) { if (zp.length === 2 * n && zm.length === 2 * n && zp.every((q, j) => key(q) === key(zm[j]) && Math.abs(Math.abs(q.amp) - a) < 1e-12)) shape++; }
+    else if (b === 3) { if (zp.length === n && k.list.every(q => q.ratio === 4 && Math.abs(Math.abs(q.amp) - a * Math.SQRT2) < 1e-12)) shape++; }
+    else if (zp.length === n && zp.every((q, j) => q.x === zm[j].x && q.amp === (b === 1 ? 1 : -1) * zm[j].amp && q.ratio === undefined)) shape++;
+  });
+  ok("  ... with that type's list: bass 2 x 3 dipole blobs in both channels, vortex / island sets, treble sheets at sqrt(2) the amplitude; nothing dropped",
+     shape === log.length && log.every(k => k.r.dropped === 0), shape + " of " + log.length);
+  const bass = dbg.filter(k => k.band === 0), hat = dbg.filter(k => k.band === 3), snr = dbg.filter(k => k.band === 2 || k.band === 1);
+  const hatL = hat.filter(k => k.pan < -0.5), hatR = hat.filter(k => k.pan > 0.5);
+  ok("stereo: the bass is not placed (xc null); the hats read hard right and hard left in turn and land at 0.9 L and 0.1 L",
+     bass.length > 10 && bass.every(k => k.xc === null && Math.abs(k.pan) < 0.05) && hatL.length >= 5 && hatR.length >= 5
+     && hatL.every(k => Math.abs(k.xc - 0.1 * L) < 1e-9) && hatR.every(k => Math.abs(k.xc - 0.9 * L) < 1e-9),
+     hatR.length + " right, " + hatL.length + " left of " + hat.length + "; pans " + hat.slice(0, 4).map(k => k.pan.toFixed(2)).join(" "));
+  // the blobs of a placed kick really sit about xc
+  const placed = log.filter((k, i) => dbg[i].band === 3 && dbg[i].pan > 0.5).flatMap(k => k.list.map(q => mi(q.x - 0.9 * L)));
+  const pm = placed.reduce((a, b) => a + b, 0) / placed.length, psd = Math.sqrt(placed.reduce((a, b) => a + (b - pm) ** 2, 0) / placed.length);
+  ok("  ... and those kicks' sheets are scattered about it with width 0.12 L", Math.abs(pm) < 0.02 * L && Math.abs(psd / L - 0.12) < 0.015,
+     placed.length + " sheets: mean offset " + (pm / L).toFixed(4) + " L, width " + (psd / L).toFixed(4) + " L");
+  const zv = zooms.map(z => (z ? parseFloat(/scale\(([0-9.]+)\)/.exec(z)[1]) : 1));
+  const zmax = Math.max.apply(null, zv);
+  ok("the pulse: the card's canvas is scaled up to 1 + 0.08 x strength on a bass kick and relaxes between them, never below 1",
+     zmax > 1.03 && zmax <= 1.0801 && zv.every(z => z >= 1) && zv.filter((z, i) => i > 0 && z < zv[i - 1]).length > zv.length / 2
+     && env.run("function(){ return cards.disp[0].wrap.style.overflow; }") === "hidden", "max " + zmax.toFixed(4));
+  const bm = b0s.map(b => Math.hypot(b[0], b[1])), ang = b0s.map(b => Math.atan2(b[1], b[0]));
+  const over = b0s.filter((b, i) => bm[i] > 1.5 * Math.sqrt(2 * b[2]) * (1 + 1e-6)).length;
+  const turns = ang.filter((a, i) => i > 0 && bm[i] > 0 && Math.abs(a - ang[i - 1]) > 1e-4).length;
+  ok("the mean field: set every frame from the energy readback, never above 1.5 sqrt(2E), its direction turning with the bass",
+     bm[bm.length - 1] > 0 && over === 0 && turns > 30 && new Set(bm.map(v => v.toFixed(3))).size > 30,
+     "final |B0| " + bm[bm.length - 1].toFixed(3) + " (limit " + (1.5 * Math.sqrt(2 * b0s[b0s.length - 1][2])).toFixed(3) + "), " + turns + " frames with a turn");
+  ok("  ... and the manifest records the effects", (() => { const m = JSON.parse(env.run("function(){ return JSON.stringify(manifestForcing()); }")).effects;
+     return m && m.kicks === "variety" && m.meanField === 1.5 && m.stereo === true && m.pulse === 0.08; })());
+  // field off: zero at once; pulse off: no transform
+  await P.input("rField", 0); await P.input("rPulse", 0);
+  await P.frame(100 + 8 + 1 / 60);
+  ok("mean field 0 switches it off (B0 = 0 on the next frame) and pulse 0 removes the zoom",
+     env.run("function(){ return solver._b0[0] === 0 && solver._b0[1] === 0 && music.walk === null && (cards.disp[0].cv.style.transform || '') === ''; }"));
+  await P.input("rPulse", 0.08);
+  for (let i = 2; i <= 40; i++) await P.frame(100 + 8 + i / 60);
+  await P.click("btnRun");
+  ok("Stop leaves the picture unzoomed", env.run("function(){ return (cards.disp[0].cv.style.transform || '') === '' && music.zoom === 1; }"));
+  ok("  ... and the page raised no failure of its own", realFails(env).length === 0, realFails(env).slice(0, 3).join(" | "));
+
+  // a context that cannot split channels (and a mono source): placement falls back to uniform
+  const Q = await musicPage("?musicdebug", 44100, true);
+  Q.env.run(MODEL, 0.004);
+  Q.A.t = 50;
+  await Q.click("btnRun");
+  for (let i = 1; i <= 3 * 60; i++) await Q.frame(50 + i / 60);
+  const dq = JSON.parse(Q.env.run("function(){ return JSON.stringify(window.musicDebug.kicks); }"));
+  ok("without a channel splitter the click is mono, one analyser, and every kick is unplaced (pan null, xc null) -- the other effects still run",
+     Q.A.ctxs[0].analysers.length === 1 && Q.A.ctxs[0].sources[0].buffer.numberOfChannels === 1 && dq.length > 15
+     && dq.every(k => k.pan === null && k.xc === null && k.type === want[k.band]), dq.length + " kicks");
+}
+
 const LEGS = [
   ["1. music.js is pure and self-contained", legPure],
   ["2. musicBandPlan against the offline band_plan", legPlan],
@@ -2171,7 +2406,8 @@ const LEGS = [
   ["9. the other two pages: hook null, loop and state mark unchanged", legOthers],
   ["10. live sources and the delayed speaker branch (M3 / M4)", legLive],
   ["11. the review's findings and the output-latency sync, on the page", legFix],
-  ["12. the fixed colour scale", legScale]
+  ["12. the fixed colour scale", legScale],
+  ["13. the effects: the rules against the offline script, and the page with its defaults", legEffects]
 ];
 (async () => {
   const state = {};

@@ -50,6 +50,26 @@ CASES = [
 ]
 
 
+# MUSIC_EFFECTS_PLAN E1: the anisotropic `sheet` kick, which make_kick builds analytically
+# in k space (potential_k) -- the same closed form the page's sheetKick kernel evaluates, so
+# these are fully periodic at any width. `ratio` = length / width, `theta` = the angle of
+# the long axis from x. Recorded under their own key: `cases` above is unchanged.
+SHEET_CASES = [
+    ("one z+ sheet, ratio 4 at 0.6 rad",
+     [dict(x=0.75, y=1.5, sigma=0.25, amp=0.25, pol=1, ratio=4.0, theta=0.6)]),
+    ("a different sheet in each channel",
+     [dict(x=0.75, y=1.5, sigma=0.25, amp=0.25, pol=1, ratio=4.0, theta=0.6),
+      dict(x=2.5, y=0.25, sigma=0.3125, amp=-0.5, pol=-1, ratio=2.5, theta=2.2)]),
+    ("three per channel, both signs, one of ratio 1",
+     [dict(x=0.75, y=1.5, sigma=0.25, amp=0.25, pol=1, ratio=4.0, theta=0.6),
+      dict(x=4.25, y=5.0, sigma=0.375, amp=0.75, pol=1, ratio=1.0, theta=0.0),
+      dict(x=1.25, y=0.75, sigma=0.3125, amp=-0.625, pol=1, ratio=3.0, theta=1.9),
+      dict(x=5.5, y=3.25, sigma=0.25, amp=0.375, pol=-1, ratio=4.0, theta=3.0),
+      dict(x=3.0, y=4.5, sigma=0.375, amp=-0.5, pol=-1, ratio=2.0, theta=0.1),
+      dict(x=0.25, y=6.0, sigma=0.3125, amp=1.0, pol=-1, ratio=5.0, theta=1.2)]),
+]
+
+
 def main():
     params = jr.Parameters(nx=N, ny=N, Lx=mt.LBOX, Ly=mt.LBOX, cfl_safety=0.4, dims=2,
                            comm_backend="serial", eqpars={"diss": (0.0, 0.0), "hyper": 2})
@@ -67,6 +87,14 @@ def main():
         flat = np.stack([f.real, f.imag], axis=-1).reshape(-1)           # phi half, psi half
         assert flat.shape == (2 * N * nky * 2,)
         out["cases"].append(dict(tag=tag, list=blobs, fields=[float(v) for v in flat]))
+    out["sheet_cases"] = []
+    for tag, blobs in SHEET_CASES:
+        chan = lambda sgn: np.array([[b["x"], b["y"], b["sigma"], b["amp"], b["ratio"], b["theta"]]
+                                     for b in blobs if (b["pol"] < 0) == (sgn < 0)]).reshape(-1, 6)
+        zero = jnp.zeros((2, 1, N, nky), dtype=jnp.complex128)
+        f = np.asarray(kick(zero, mt.pad(chan(+1)), mt.pad(chan(-1))))
+        flat = np.stack([f.real, f.imag], axis=-1).reshape(-1)
+        out["sheet_cases"].append(dict(tag=tag, list=blobs, fields=[float(v) for v in flat]))
     dst = os.path.join(HERE, "devtools", "fixtures", "kick_offline.json")
     with open(dst, "w") as fh:
         json.dump(out, fh)

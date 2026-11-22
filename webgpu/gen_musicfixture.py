@@ -145,6 +145,35 @@ def main():
         cases.append(dict(tag=tag, opts=full, edges=[float(v) for v in edges],
                           onsets=[[float(tf[i]), int(b[i]), float(s[i]), float(t[i])] for i in range(len(t))]))
     out["cases"] = cases
+
+    # MUSIC_EFFECTS_PLAN: the rules music.js ports that have a deterministic python side.
+    # (The blob placements and the field walk draw from a different RNG on the page: those
+    # are held to the rule's properties in the gate, not to recorded draws.)
+    fx = dict(source="examples/music_turbulence.py kick_types_for, pulse_zoom, onset_pans, constants",
+              kick_types=list(mt.KICK_TYPES), dipole_sep=mt.DIPOLE_SEP, sheet_ratio=mt.SHEET_RATIO,
+              stereo_span=mt.STEREO_SPAN, stereo_jitter=mt.STEREO_JITTER,
+              dipole_energy=[[sep, float(mt.dipole_energy_factor(sep))] for sep in (1.5, 1.0, 2.5)],
+              click_pans=mt.CLICK_PANS)
+    fx["types"] = [dict(spec=spec, nbands=nb, types=list(mt.kick_types_for(spec, nb)))
+                   for spec in ("variety", "sheet", None) for nb in range(1, 8)]
+    fx["types"].append(dict(spec="dipole,island,sheet-island", nbands=3,
+                            types=list(mt.kick_types_for("dipole,island,sheet-island", 3))))
+    # the camera pulse: onsets (time, strength) in arrival order, sampled at 60 frames a second
+    t_on = [0.25, 0.5, 0.55, 1.0, 1.02, 1.6, 1.6]
+    s_on = [1.0, 0.4, 0.9, 0.2, 1.0, 0.7, 0.3]
+    tf = np.arange(150) / 60.0
+    fx["pulse"] = [dict(a=a, tau=tau, t_on=t_on, s_on=s_on, fps=60, nframes=len(tf),
+                        zoom=[float(v) for v in mt.pulse_zoom(tf, t_on, s_on, a, tau)])
+                   for a, tau in ((0.08, 0.25), (0.15, 0.1))]
+    # the pan: a band-limited tone at amplitude gains (1 - p, 1 + p), through onset_pans
+    sr, pans = 11025, []
+    tt = np.arange(int(0.2 * sr)) / sr
+    tone = np.sin(2 * np.pi * 1000.0 * tt) * np.exp(-((tt - 0.1) / 0.02) ** 2)
+    for p_amp in (-1.0, -0.6, 0.0, 0.3, 0.8, 1.0):
+        lr = np.stack([(1 - p_amp) * tone, (1 + p_amp) * tone], axis=1)
+        pans.append([p_amp, float(mt.onset_pans(sr, lr, np.array([0.1]), np.array([0]), [500.0, 2000.0])[0])])
+    fx["pans"] = pans
+    out["effects"] = fx
     dst = os.path.join(HERE, "devtools", "fixtures", "music_ref.json")
     with open(dst, "w") as fh:
         json.dump(out, fh)

@@ -1957,6 +1957,52 @@ it.
 file and in MUSIC_PLAN's M2 entry: nothing about a real `AnalyserNode`, audible audio, a
 real frame's lateness, or a GPU.
 
+### The effects (MUSIC_EFFECTS_PLAN, step 5; every one has a control in the `effects` group)
+
+Phase 2 of the music project: variety. Each effect was built and judged offline first
+(`examples/music_turbulence.py`, gate `examples/music_turbulence_check.py`); the page ports
+the rules (`music.js`) and holds them to numbers recorded from the python
+(`devtools/fixtures/music_ref.json`, key `effects`). With every effect off — kicks
+`elsasser`, stereo unticked, pulse 0, mean field 0 — the page is the phase-1 page, and
+`checkmusic.js` runs its legs 7–12 in exactly that state.
+
+| control | default | what it does |
+|---|---|---|
+| kicks | `variety` | the kick TYPE per band (`musicKickTypesFor`): bass `dipole` (vortex pairs 1.5σ apart, which travel), `vortex` and `island` alternating in between (φ only / ψ only), treble `sheet`. Or one type for every band. |
+| sheet energy | 2 | multiplies a sheet's energy (amplitude × √) |
+| stereo placement, pan gain | on, 2 | a band's blobs gather at x = L(0.5 + 0.4·clip(gain·pan)), jitter 0.12 L; pan = (E_R − E_L)/(E_R + E_L) over the band's bins of the two channel analysers, read when the onset is declared. The bass is exempt. A mono source reads pan 0 through an up-mix node; a context without `createChannelSplitter` has no placement at all. |
+| pulse | 0.08 | a bass onset lifts the zoom TO 1 + pulse·strength, relaxing over 0.25 s. **Display only, and CSS**: a `transform: scale()` on the card's canvas (and arrow overlay), clipped by the card. A saved PNG or a recording is the unzoomed canvas. |
+| mean field (× rms), turn, strength walks | 1.5, 30°, on | a uniform in-plane field B0. Each bass onset turns it by a random angle (rms `turn` × strength) and, if the strength walks, steps \|B0\|/rms by rms max/6 × strength, reflected into [0, max]. \|B0\| = ratio × √(2E), E from the frame's stats readback, eased over 0.1 s. |
+
+**Solver side** (`solver2d.js`, both off unless asked; the 2D page asks for neither):
+
+- `kick: true` now also emits `sheetKick`, the blob kernel's anisotropic twin
+  (`blobKickWGSL` with `C.sheet`): two vec4 per slot, (x0, y0, σ, w) and (e_x, e_y, 0, 0),
+  gaussian exp(−σ²(k² + (e·k)²)/2). `Solver.kick(list)` routes a list in which any blob has
+  `ratio ≠ 1` through it (`_packKicks(list, true)`); any other list is the blob kick,
+  dispatch for dispatch as before.
+- `b0: true` emits a different `stage` kernel that carries the mean field in the EXACT
+  linear step: with the diagonal rate l the linear operator is [[l, i k·B0], [i k·B0, l]],
+  whose exponential is e^(lτ)[[cos θ, i sin θ], [i sin θ, cos θ]], θ = k·B0 τ. So the
+  field's waves cost no timestep (it is not in the CFL sum) and no energy.
+  `setMeanField(bx, by)` writes the uniform. One invocation per mode owns both halves, so
+  the dispatch is NM/64, not 2NM/64. Needs Pm = 1. At B0 = 0 it gives the plain kernel's
+  values word for word.
+- **Other pages are untouched by construction**: without the flags `buildShaders` emits the
+  text it always did (`checksolver2d.js` leg 2, byte-identical against 268100f for both
+  pages) and `encodeStep` dispatches `stage` over the count it always did
+  (`checkkick.js` leg 7). The class's new lines are recorded as allowances in
+  `checksolver2d.js` (`EFFECTS_SHADERS`, `EFFECTS_SOLVER`).
+
+Gates: `checkkick.js` leg 7 (the sheet kernel against a real-space DFT and against the
+offline `make_kick`'s `potential_k`, `fixtures/kick_offline.json` key `sheet_cases`; the
+mean-field kernel's free streaming, its fp64 recurrence, B0 = 0, the wiring) and
+`checkmusic.js` leg 13 (the rules, then the page with its defaults on a fake stereo
+context). **In a real browser** (Chrome, M1, 2026-11-21, click track, defaults): 597
+steps/s, 6.3 steps a frame (max 15, never at the cap of 64), no rebase, the simulation
+1.5 ms ahead of the audio on average; `rmhd2d.html` at 609 steps/s. Not tried: a stereo
+FILE or a tab capture in a browser, and any device but the M1.
+
 ## Alfvén-wave collision: directions, placement, χ
 
 The propagation direction is read off the *implemented* propagator, not assumed. The 3D
