@@ -23,6 +23,10 @@ disagree, the file is right.
 
 ## Live
 
+- **MUSIC_EFFECTS_PLAN.md** — phase 2 of the music project, drafted 2026-11-21, nothing
+  built: kick types per band (vortex, island, dipole, sheet), stereo placement, a display
+  zoom pulse, an in-plane mean field redrawn on a slow section trigger; optional
+  zoom-out re-gridding and sustained-sound kicks. Offline script first, then the page.
 - **MUSIC_PLAN.md** — live music drives the 2D demo: per-band onsets become impulsive
   gaussian-blob kicks, with the audio clock as the master of simulation time. Drafted
   2026-11-21. The offline reference is `examples/music_turbulence.py` (JAX). Committed:
