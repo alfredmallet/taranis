@@ -204,7 +204,7 @@ Suggested order:
     uniform drag sets how many beats the flow remembers, and kicks and frames are events in
     `t` under the ordinary adaptive dt. The kick and the drag are state edits between steps,
     so the solver is untouched and `forcing` stays off. `python music_turbulence.py` renders
-    a built-in click track; pass a PCM WAV for real music (`--threshold`, `--memory`,
+    a built-in click track; pass a PCM WAV for real music (`--threshold`, `--memory`, `--cmap`,
     `--amp`, `--n`; its header explains the knobs). About real time at 256² and 15× slower
     than real time at 512² on the M1 at fp32. Needs `imageio` and `imageio-ffmpeg` on top of
     the `examples` extra. The live WebGPU version is planned in

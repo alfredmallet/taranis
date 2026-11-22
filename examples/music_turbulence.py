@@ -398,7 +398,7 @@ def pad(blobs):
 # driver
 # ---------------------------------------------------------------------------------------
 def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=None, diss=None,
-        hyper=4, cfl=0.4, threshold=0.15, causal=False, field="speed", sigma_min=None, seed=0,
+        hyper=4, cfl=0.4, threshold=0.3, causal=False, field="speed", cmap=None, sigma_min=None, seed=0,
         duration=None, audio_path=None, quiet=False):
     import imageio
     from matplotlib import colormaps
@@ -440,8 +440,8 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
     events.sort(key=lambda ev: (ev[0], ev[1]))
 
     rng = np.random.default_rng(seed)
-    cmap, cmap_mag = colormaps["RdBu_r"], colormaps["magma"]
     signed = field not in ("speed", "bperp")
+    cm = get_cmap(cmap or ("RdBu_r" if signed else "magma"))
     video = out if audio_path is None else out + ".silent.mp4"
     writer = imageio.get_writer(video, fps=fps, codec="libx264", quality=8,
                                 macro_block_size=None, pixelformat="yuv420p")
@@ -478,8 +478,7 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         cur = max(np.percentile(np.abs(img), 99.5), 1e-12)
         vmax = cur if vmax is None else max(vmax + (cur - vmax) / (4.0 * fps), 0.5 * cur)
         u = img.T[::-1] / vmax
-        rgb = (cmap_mag(np.clip(u, 0.0, 1.0)) if signed is False else
-               cmap(0.5 + 0.5 * np.clip(u, -1.0, 1.0)))[..., :3]
+        rgb = cm(0.5 + 0.5 * np.clip(u, -1.0, 1.0) if signed else np.clip(u, 0.0, 1.0))[..., :3]
         writer.append_data((255 * rgb).astype(np.uint8))
         if not quiet and payload % (5 * fps) == 0:
             print(f"  t = {t_ev:6.1f} s   E = {e:8.4f}   umax = {umax:6.2f}   "
@@ -496,6 +495,19 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
     return dict(energy=np.array(energy), umax=np.array(umaxs), late=np.array(late), jumps=jumps,
                 onsets=(t_on, b_on, s_on), edges=edges, sigmas=sigmas, nblobs=nblobs, fps=fps, diss=diss, nsteps=nsteps, fields=np.asarray(state.fields),
                 duration=T, wall=time.perf_counter() - t0)
+
+
+BRAT_GREEN = (0x8A / 255.0, 0xCE / 255.0, 0.0)
+
+
+def get_cmap(name):
+    """A matplotlib colormap by name, plus the music page's two: `brat` (#8ACE00 at zero,
+    falling linearly to black) and `brat_r` (black at zero, rising to #8ACE00)."""
+    from matplotlib.colors import LinearSegmentedColormap
+    if name in ("brat", "brat_r"):
+        ends = [BRAT_GREEN, (0.0, 0.0, 0.0)]
+        return LinearSegmentedColormap.from_list(name, ends if name == "brat" else ends[::-1])
+    return colormaps[name]
 
 
 def beat_contrast(res, band=0):
@@ -523,7 +535,7 @@ def main():
                     help="number of log-spaced bands, 40 Hz-10 kHz (default: from the grid, see band_plan)")
     ap.add_argument("--sigma-min", type=float, default=None,
                     help="narrowest blob width (default: 3.7 grid spacings)")
-    ap.add_argument("--threshold", type=float, default=0.15,
+    ap.add_argument("--threshold", type=float, default=0.3,
                     help="onset threshold above the local mean flux (band 99th percentile = 1); "
                          "raise to keep only the stronger hits")
     ap.add_argument("--causal", action="store_true",
@@ -531,6 +543,9 @@ def main():
     ap.add_argument("--bpm", type=float, default=120.0, help="click track tempo")
     ap.add_argument("--duration", type=float, default=None, help="seconds (default: whole file; 20 for the click track)")
     ap.add_argument("--field", choices=FIELDS, default="speed")
+    ap.add_argument("--cmap", default=None,
+                    help="colormap: brat, brat_r or any matplotlib name (default: magma for "
+                         "speed/bperp, RdBu_r for the signed fields)")
     ap.add_argument("--diss", type=float, default=None,
                     help="hyperviscosity nu = eta (default: rate 48 amp at the cutoff n/3, see run())")
     ap.add_argument("--hyper", type=int, default=4,
@@ -548,7 +563,7 @@ def main():
         sr, audio = load_wav(a.wav)
         audio_path, duration = a.wav, a.duration
     res = run(sr, audio, a.out, n=a.n, fps=a.fps, rate=a.rate, amp=a.amp, memory=a.memory or None, nbands=a.bands, sigma_min=a.sigma_min, diss=a.diss, hyper=a.hyper, cfl=a.cfl, threshold=a.threshold, causal=a.causal,
-              field=a.field, seed=a.seed, duration=duration, audio_path=audio_path)
+              field=a.field, cmap=a.cmap, seed=a.seed, duration=duration, audio_path=audio_path)
     t_on, b_on, _ = res["onsets"]
     print(f"wrote {a.out}  ({res['wall']:.0f} s wall, {res['nsteps']} steps, diss = {res['diss']:.2e}, "
           f"events late by {1e3 * res['late'].mean():.1f} ms mean / {1e3 * res['late'].max():.1f} ms max)")
