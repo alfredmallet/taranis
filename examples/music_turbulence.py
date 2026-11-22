@@ -29,6 +29,10 @@
 #                               change (SectionDetector, or --section-every N bass onsets)
 #   --field-walk [--ratio-walk] instead: the direction (and |B0| / rms fluctuation) take a
 #                               random-walk step at each bass onset
+#   --zoom-out [20]             E5: the camera pulls back by a factor 2 every that many
+#                               seconds; at each factor 2 the state is replaced by its own
+#                               2x2 tiling (same velocities, half the size), so old
+#                               structure shrinks toward the dissipation scale
 #   python examples/music_turbulence_check.py   is the gate for all of them (fp64).
 #
 # A kick is a state edit between steps, not a forcing term: `forcing` stays off and the
@@ -539,6 +543,33 @@ def mean_field(b0, theta0, t_turn, dtheta, turn_s=2.0):
     return b0_of_t, float(b0)
 
 
+def regrid(fields, dealias=None):
+    """The zoom-out re-grid (E5): `fields` (2, 1, n, n//2 + 1), the rfft2 of (phi, psi) on
+    an n x n grid of a periodic box L, replaced by the transform of
+
+        g(x) = f(2 x - x_c) / 2,      x_c = (n - 1)/2 grid spacings in x and in y
+
+    -- the box's own 2x2 tiling seen from twice as far, about the display's centre pixel
+    (zoom_image's centre, so a picture at zoom 1/2 before is the picture at zoom 1 after).
+    Mode k goes to 2k with the phase exp(-i k.x_c). The 1/2 keeps the VELOCITIES grad f
+    what they were: the same flow at half the size, so the energy of every mode that
+    survives is unchanged. Modes that land outside the retained range are dropped: those
+    with |2 k_x| or 2 k_y at or past n/2, and then `dealias` (the solver's mask) if given.
+    Returns a numpy array of the same shape and dtype."""
+    f = np.asarray(fields)
+    n = f.shape[2]
+    out = np.zeros_like(f)
+    ix = np.fft.fftfreq(n, 1.0 / n).astype(int)          # the integer k_x of each row
+    keep_i = np.nonzero(2 * np.abs(ix) < n // 2)[0]
+    j = np.arange((n // 2 - 1) // 2 + 1)                    # 2 j <= n/2 - 1
+    xc = 0.5 * (n - 1) * (2.0 * np.pi / n)                # in units where k is the integer
+    ph = np.exp(-1j * xc * (ix[keep_i][:, None] + j[None, :]))
+    out[:, :, ((2 * ix[keep_i]) % n)[:, None], (2 * j)[None, :]] = 0.5 * ph * f[:, :, keep_i][..., j]
+    if dealias is not None:
+        out = out * np.asarray(dealias)
+    return out.astype(f.dtype)
+
+
 def make_kick(params, kgrid):
     x = jnp.linspace(0.0, LBOX, params.nx, endpoint=False).reshape(-1, 1)
     y = jnp.linspace(0.0, LBOX, params.ny, endpoint=False).reshape(1, -1)
@@ -750,7 +781,10 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         duration=None, audio_path=None, quiet=False, kick_types=None, sheet_ratio=SHEET_RATIO,
         stereo=None, stereo_gain=1.0, stereo_bands=None, sheet_energy=1.0,
         pulse=0.0, pulse_tau=0.25, pulse_band=0, mean_field_b0=0.0, section_every=None,
-        section_kw=None, turn_s=2.0, field_walk=None, ratio_walk=0.0, walk_tau=0.1):
+        section_kw=None, turn_s=2.0, field_walk=None, ratio_walk=0.0, walk_tau=0.1, zoom_out=0.0):
+    # zoom_out: seconds of audio per factor 2 of the zoom-out (0 = off). The picture shows
+    # a window of the tiling that grows as 2^(t/zoom_out); every zoom_out seconds the state
+    # is re-gridded (regrid) and the window is the box again.
     # field_walk: None, or the rms turn in DEGREES of the mean field's direction at each
     # full-strength onset of pulse_band (a random walk; the step scales with the onset's
     # strength). mean_field_b0 is then |B0| in units of the rms fluctuation sqrt(2 E) at the
@@ -852,6 +886,9 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
     events = [(float(t), 0, (int(b), float(s), None if xcs is None else xcs[i]))
               for i, (t, b, s) in enumerate(zip(t_on, b_on, s_on)) if t < T]
     events += [(i / fps, 1, i) for i in range(nframes)]
+    if zoom_out:
+        # kind -1: at a shared time the re-grid comes first, so that frame shows the new box
+        events += [(k * zoom_out, -1, k) for k in range(1, int(T / zoom_out) + 1) if k * zoom_out < T]
     events.sort(key=lambda ev: (ev[0], ev[1]))
 
     # the camera pulse (display only): zoom per frame from the onsets of one band
@@ -866,7 +903,7 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
     writer = imageio.get_writer(video, fps=fps, codec="libx264", quality=8,
                                 macro_block_size=None, pixelformat="yuv420p")
     vmax, energy, umaxs, late, jumps = None, [], [], [], [[] for _ in range(nbands)]
-    umax, t_prev, nsteps, e, t_walk = 0.0, 0.0, 0, 0.0, 0.0
+    umax, t_prev, nsteps, e, t_walk, regrids = 0.0, 0.0, 0, 0.0, 0.0, []
     t0 = time.perf_counter()
     for t_ev, kind, payload in events:
         if walk is None:
@@ -887,6 +924,13 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         if memory is not None and t_now > t_prev:
             state = state._replace(fields=state.fields * float(np.exp(-(t_now - t_prev) / (2.0 * memory * rate))))
         t_prev = t_now
+        if kind == -1:
+            e_before = float(observe(state.fields)[2])
+            state = state._replace(fields=jnp.asarray(regrid(state.fields, step.kg.dealias)))
+            _, umax, e = observe(state.fields)
+            umax, e = float(umax), float(e)
+            regrids.append((t_ev, e / e_before if e_before > 0 else 1.0))
+            continue
         if kind == 0:
             band, strength, xc = payload
             if walk is not None and band == pulse_band:
@@ -917,8 +961,11 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         cur = max(np.percentile(np.abs(img), 99.5), 1e-12)
         vmax = cur if vmax is None else max(vmax + (cur - vmax) / (4.0 * fps), 0.5 * cur)
         u = img.T[::-1] / vmax
-        if zooms is not None:
-            u = zoom_image(u, zooms[payload])
+        zz = 1.0 if zooms is None else zooms[payload]
+        if zoom_out:
+            zz *= 2.0 ** (-((t_ev % zoom_out) / zoom_out))
+        if zz != 1.0:
+            u = zoom_image(u, zz)
         rgb = cm(0.5 + 0.5 * np.clip(u, -1.0, 1.0) if signed else np.clip(u, 0.0, 1.0))[..., :3]
         writer.append_data((255 * rgb).astype(np.uint8))
         if not quiet and payload % (5 * fps) == 0:
@@ -934,7 +981,7 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         os.remove(video)
 
     return dict(energy=np.array(energy), umax=np.array(umaxs), late=np.array(late), jumps=jumps,
-                onsets=(t_on, b_on, s_on), kick_types=kinds, pans=pans, zooms=zooms, sections=sections, walk=None if walk is None else np.array(walk["trace"]), edges=edges, sigmas=sigmas, nblobs=nblobs, fps=fps, diss=diss, nsteps=nsteps, fields=np.asarray(state.fields),
+                onsets=(t_on, b_on, s_on), kick_types=kinds, pans=pans, zooms=zooms, sections=sections, regrids=regrids, walk=None if walk is None else np.array(walk["trace"]), edges=edges, sigmas=sigmas, nblobs=nblobs, fps=fps, diss=diss, nsteps=nsteps, fields=np.asarray(state.fields),
                 duration=T, wall=time.perf_counter() - t0)
 
 
@@ -955,13 +1002,19 @@ def pulse_zoom(t_frames, t_on, s_on, a=0.08, tau=0.25):
     return out
 
 
-def zoom_image(img, s):
+def zoom_image(img, s, blur=True):
     """`img` (square, PERIODIC) magnified by s about its centre, same shape: output pixel i
     shows the input at c + (i - c)/s, c = (n - 1)/2, bilinear, wrapping. The box is
-    periodic, so s < 1 would show the tiling; s == 1 returns img itself."""
+    periodic, so s < 1 shows the tiling (after a blur matched to the coarser sampling, unless
+    blur=False); s == 1 returns img itself."""
     if s == 1.0:
         return img
     from scipy.ndimage import map_coordinates
+    if s < 1.0 and blur:
+        # zooming OUT samples more than one input pixel per output pixel: blur first, by
+        # the gaussian whose width is that of the box an output pixel now covers
+        from scipy.ndimage import gaussian_filter
+        img = gaussian_filter(img, 0.5 * np.sqrt(max(1.0 / (s * s) - 1.0, 0.0)), mode="wrap")
     n0, n1 = img.shape
     i0 = 0.5 * (n0 - 1) + (np.arange(n0) - 0.5 * (n0 - 1)) / s
     i1 = 0.5 * (n1 - 1) + (np.arange(n1) - 0.5 * (n1 - 1)) / s
@@ -1045,6 +1098,9 @@ def main():
     ap.add_argument("--ratio-walk", type=float, default=0.0,
                     help="with --field-walk: also random-walk |B0|/rms by this rms step per "
                          "full-strength onset, within 0 to --mean-field")
+    ap.add_argument("--zoom-out", type=float, nargs="?", const=20.0, default=0.0,
+                    help="E5: pull the camera back by a factor 2 every this many seconds (20 if "
+                         "no value); at each factor 2 the state becomes its own 2x2 tiling")
     ap.add_argument("--click-stereo", action="store_true",
                     help="the click track in stereo: snare left, hats alternating right/left")
     ap.add_argument("--bpm", type=float, default=120.0, help="click track tempo")
@@ -1082,10 +1138,13 @@ def main():
               pulse=a.pulse, pulse_tau=a.pulse_tau, pulse_band=a.pulse_band,
               mean_field_b0=a.mean_field, section_every=a.section_every,
               section_kw=None if a.section_threshold is None else dict(threshold=a.section_threshold),
-              field_walk=a.field_walk, ratio_walk=a.ratio_walk)
+              field_walk=a.field_walk, ratio_walk=a.ratio_walk, zoom_out=a.zoom_out)
     t_on, b_on, _ = res["onsets"]
     print(f"wrote {a.out}  ({res['wall']:.0f} s wall, {res['nsteps']} steps, diss = {res['diss']:.2e}, "
           f"events late by {1e3 * res['late'].mean():.1f} ms mean / {1e3 * res['late'].max():.1f} ms max)")
+    if res["regrids"]:
+        print("  re-grids at " + " ".join(f"{t:.0f}" for t, _ in res["regrids"]) + " s; energy kept: "
+              + " ".join(f"{r:.3f}" for _, r in res["regrids"]))
     for b in range(len(res["sigmas"])):
         c, m = beat_contrast(res, b)
         print(f"  band {b} ({res['edges'][b]:.0f}-{res['edges'][b + 1]:.0f} Hz): "

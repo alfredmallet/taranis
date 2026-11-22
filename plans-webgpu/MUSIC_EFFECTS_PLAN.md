@@ -414,3 +414,27 @@ fixed at range/6 per full-strength hit (the rule used for the 0-2 and 0-1 render
 
 **Not done.** A stereo file or a tab capture in a real browser; any device but the M1; the
 user-facing docs page; step 6 (E5/E6) and step 7 (the adversarial review).
+
+## Step 6 record (2026-11-22): E5 zoom-out re-gridding, offline
+
+Alfred: E6 (sustained sound) is not being built; E5 is worth seeing, offline first.
+
+- `--zoom-out [T]` (20): the picture shows a window of the tiling that grows as 2^(t/T)
+  about the display centre (`zoom_image` at s < 1, with a gaussian blur matched to the
+  coarser sampling); every T seconds `regrid` replaces the state by
+  g(x) = f(2x - x_c)/2 -- mode k to 2k with the phase of the display's centre pixel -- and
+  the window is the box again. The 1/2 keeps the VELOCITIES, so the picture of |u| does not
+  jump and every surviving mode keeps its energy. Modes that land past n/2 or outside the
+  dealiasing cut are dropped. It multiplies with the pulse's zoom.
+- Gate `regrid_gates` (85 checks in all): g against f sampled at 2x - x_c to 8e-15, energy
+  to 2e-16, the picture across a re-grid, what is dropped, a short run.
+- Measured, 256^2, first 60 s of the local excerpt with the page's default effects: each
+  re-grid keeps 97-99% of the energy (T = 10: 0.978 0.983 0.979 0.987 0.972; T = 20: 0.982
+  0.987), so the dropped upper half of the spectrum is a small loss. Steps unchanged
+  (22,200-22,300 for 60 s). Bass beat contrast +0.14, as without it.
+- Known seam: just before a re-grid the picture is the blurred half-zoom, just after it is
+  the sharp new state.
+- Movies: `e5_beths_zoomout20.mp4`, `e5_beths_zoomout10.mp4`. Uncommitted.
+- For the page, if wanted: a k-space remap kernel (k to 2k, phase, mask) and a render that
+  can show the tiling at zoom < 1 -- the CSS scale used for the pulse cannot, since it has
+  only the one box to draw.

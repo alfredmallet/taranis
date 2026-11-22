@@ -8,6 +8,7 @@
 # here (it needs the earlier tree): it was checked once, bitwise, when they were added.
 import os
 import sys
+import tempfile
 
 import numpy as np
 
@@ -347,7 +348,7 @@ def pulse_gates():
     # bilinear error bound for this f: (k0^2 + k1^2)/8 = 6.0e-3. 0.5 looks past the edge of
     # the box on every side, so it passes only if the sampling wraps.
     for s_ in (1.08, 1.5, 0.5):
-        zi = mt.zoom_image(f(X0, X1), s_)
+        zi = mt.zoom_image(f(X0, X1), s_, blur=False)     # the sampling rule alone
         ex = f(c + (X0 - c) / s_, c + (X1 - c) / s_)
         err = np.abs(zi - ex).max()
         check(f"zoom {s_}: pixel i shows the periodic field at c + (i - c)/s (bilinear error only)",
@@ -496,6 +497,62 @@ def driven_field_gates():
     check("bvec missing in driven mode, or given without it, is an error", bad == 2)
 
 
+def regrid_gates():
+    print("zoom-out re-grid (E5)")
+    n = 128
+    step = mt.Stepper(n, 1.0 / 120.0, 0.0, 4)
+    kick, observe = mt.make_kick(step.p, step.kg)
+    rng = np.random.default_rng(3)
+    s = jr.initialize(lambda x, y: jnp.zeros((2, 1, n, n)), step.p)
+    # wide blobs only: every mode with any amplitude survives the doubling (sigma 0.4 puts
+    # e^-35 of the peak at k = n/6 = 21, and the minimum-image cut at the box edge is e^-31)
+    s = s._replace(fields=kick(s.fields, mt.pad(mt.blobs_for(rng, 0.4, 3, 1.0)), mt.pad(mt.blobs_for(rng, 0.4, 3, 1.0))))
+    f = np.asarray(s.fields)
+    g = mt.regrid(f, step.kg.dealias)
+    kx, ky = np.asarray(step.kg.kx), np.asarray(step.kg.ky)
+    xc = 0.5 * (n - 1) * mt.LBOX / n
+    real = lambda a: np.fft.irfft2(a[:, 0], s=(n, n))
+    shifted = real(f * np.exp(-1j * xc * (kx + ky)))                  # f(x - x_c) on the grid
+    idx = (2 * np.arange(n)) % n
+    err = np.abs(real(g) - 0.5 * shifted[:, idx][:, :, idx]).max() / np.abs(real(g)).max()
+    check("regrid: g(x) = f(2x - x_c)/2 at every grid point, phi and psi (a band-limited state)",
+          err < 1e-9, f"rel {err:.1e}")
+    e0, e1 = float(observe(jnp.asarray(f))[2]), float(observe(jnp.asarray(g))[2])
+    u0, u1 = float(observe(jnp.asarray(f))[1]), float(observe(jnp.asarray(g))[1])
+    check("   ... the energy and the peak speed are unchanged (same velocities, half the size)",
+          abs(e1 / e0 - 1.0) < 1e-9 and abs(u1 / u0 - 1.0) < 2e-2,   # the peak is read off the grid
+          f"E ratio - 1 = {e1 / e0 - 1.0:+.1e}, umax ratio {u1 / u0:.6f}")
+    # the picture: zoom 1/2 of the old speed image is the new speed image at zoom 1
+    # (on phi, which is smooth: |u| has cusps at its zeros, where bilinear sampling at the
+    # half pixels is off by several per cent of the peak whatever the state)
+    img0 = np.asarray(observe(jnp.asarray(f))[0]["phi"]).T[::-1]
+    img1 = np.asarray(observe(jnp.asarray(g))[0]["phi"]).T[::-1]
+    d = np.abs(0.5 * mt.zoom_image(img0, 0.5, blur=False) - img1).max() / np.abs(img1).max()
+    check("   ... and the old picture at zoom 1/2 (unblurred) is the new picture: no jump at a re-grid",
+          d < 1e-2, f"max difference {d:.1e} of the peak (bilinear sampling at half pixels)")
+    img0 = np.abs(img0)
+    # what is dropped: a mode past the half-range goes, one inside it stays
+    h = np.zeros_like(f)
+    h[0, 0, 5, 3] = 1.0; h[0, 0, n - 7, 2] = 2.0; h[0, 0, n // 4 + 4, 3] = 1.0; h[0, 0, 3, n // 4 + 1] = 1.0
+    gh = mt.regrid(h)
+    check("a mode (kx, ky) lands on (2 kx, 2 ky), negative kx too; one that would pass n/2 is dropped",
+          abs(abs(gh[0, 0, 10, 6]) - 0.5) < 1e-15 and abs(abs(gh[0, 0, n - 14, 4]) - 1.0) < 1e-15
+          and np.count_nonzero(gh) == 2)
+    gm = mt.regrid(h, step.kg.dealias)
+    check("   ... with the solver's mask, nothing is left outside the dealiasing cut",
+          not np.any(gm * (1.0 - np.asarray(step.kg.dealias))))
+    # the run: two re-grids in 5 s of the click track
+    sr, x = mt.click_track(duration=5.0)
+    res = mt.run(sr, x, os.path.join(tempfile.mkdtemp(), "z.mp4"), n=64, zoom_out=2.0, quiet=True)
+    rg = res["regrids"]
+    check("run(zoom_out=2): re-grids at 2 and 4 s, each keeping most of the energy, the run finite",
+          [t for t, _ in rg] == [2.0, 4.0] and all(0.3 < r <= 1.0 + 1e-6 for _, r in rg) and np.all(np.isfinite(res["energy"])),
+          "energy kept " + " ".join(f"{r:.3f}" for _, r in rg))
+    check("zoom_image at s < 1 shows the tiling: a constant image stays constant, the mean is kept",
+          np.allclose(mt.zoom_image(np.full((16, 16), 3.0), 0.6), 3.0)
+          and abs(mt.zoom_image(img0, 0.5).mean() / img0.mean() - 1.0) < 2e-2)
+
+
 def section_gates():
     print("section trigger")
     sr = 22050
@@ -556,6 +613,7 @@ if __name__ == "__main__":
     pulse_gates()
     mean_field_gates()
     driven_field_gates()
+    regrid_gates()
     section_gates()
     print(f"\n{'ALL PASSED' if not FAILED else f'{len(FAILED)} FAILED: ' + '; '.join(FAILED)}")
     sys.exit(1 if FAILED else 0)
