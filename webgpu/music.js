@@ -397,6 +397,19 @@ function musicPan(magL, magR, k0, k1) {
   for (let k = k0; k < k1; k++) { el += magL[k] * magL[k]; er += magR[k] * magR[k]; }
   return er + el > 0 ? (er - el) / (er + el) : 0;
 }
+// Do the two channels carry different signals at all? A mono source up-mixed to two equal
+// channels reads pan 0 in every band, which musicPanX would turn into "everything in the
+// centre column"; the page places nothing until this has been true once in a session (the
+// offline script's is_mono, causally). True when some bin differs by more than `tol` of
+// the larger spectrum's peak.
+function musicChannelsDiffer(magL, magR, tol) {
+  let pk = 0, d = 0;
+  for (let k = 0; k < magL.length; k++) {
+    pk = Math.max(pk, magL[k], magR[k]);
+    d = Math.max(d, Math.abs(magL[k] - magR[k]));
+  }
+  return d > (tol === undefined ? 1e-3 : tol) * pk;
+}
 // where that puts the band's blobs: x = L (0.5 + SPAN * clip(gain * pan)); x runs left to
 // right on the card
 function musicPanX(pan, gain) {

@@ -1393,6 +1393,10 @@ function legEffects(state) {
     const b0buf = env.run("function(){ return __es.buf.b0; }");
     ok("setMeanField(0.5, -0.25) uploads (0.5, -0.25, 0, 0) to the uniform, once (the same value again writes nothing)",
        wb.length === 1 && wb[0].b === b0buf && wb[0].data.join() === "0.5,-0.25,0,0", wb.length + " writes");
+    env.run("function(){ __es.setMeanField(0.5, 0.1); __es.setMeanField(-0.5, 0.1); }");
+    ok("  ... a change in ONE component alone is uploaded (y only, then x only)",
+       wb.length === 3 && wb[1].data.join() === "0.5," + Math.fround(0.1) + ",0,0" && wb[2].data.join() === "-0.5," + Math.fround(0.1) + ",0,0", wb.length + " writes");
+    wb.length = 1;
     let refused = 0;
     for (const args of ["NaN, 0", "0, Infinity", "'1', 0", ""]) {
       try { env.run("function(){ __es.setMeanField(" + args + "); }"); } catch (err) { if (/two finite numbers/.test(err.message)) refused++; }

@@ -169,7 +169,8 @@ controlsBuild({
       [{ k: "cbl", id: "cbStereo", t: "stereo placement", v: true,
          ti: "ON: each band's blobs gather at the x where that band sits in the stereo image at "
            + "the onset (left of the picture = left channel). The bass is always spread over the "
-           + "box. A mono source is spread uniformly." },
+           + "box, and so is everything until the source has shown two different channels "
+           + "(a mono source never does)." },
        { k: "lab", t: "pan gain" },
        { k: "rng", id: "rPanGain", min: 0.5, max: 4, step: 0.25, v: 2,
          ti: "multiplies the pan before placement: most mixes are narrow" },
@@ -264,7 +265,10 @@ const music = {
   // the effects: their own RNG stream (the kicks keep theirs), the camera pulse's state,
   // the mean field's walk (null while the field is off), the audio time they were last
   // advanced, the two channel spectra, and the zoom last put on the cards
-  rngFx: musicRng(MUSIC_SEED + 4), pulse: {}, walk: null, fxT: 0, magL: null, magR: null, zoom: 1
+  rngFx: musicRng(MUSIC_SEED + 4), pulse: {}, walk: null, fxT: 0, magL: null, magR: null, zoom: 1,
+  // has this session's source shown two DIFFERENT channels yet? Until it has, nothing is
+  // placed: a mono source reads pan 0 everywhere and would pile into the centre column
+  stereoSeen: false
 };
 for (let b = 0; b < music.plan.sigmas.length; b++) music.lit.push(-1e9);
 
@@ -523,9 +527,10 @@ function musicStopStream(stream) {
 // keep the sharing bar or the microphone indicator on with no way to turn it off.
 async function musicAcquire(kind, ctx, u) {
   if (kind === "click") {
-    // in stereo where the context can split channels (snare left, hats alternating): the
-    // channel mean is the mono track, so the detector hears what it always heard
-    const st = !!ctx.createChannelSplitter;
+    // in stereo where the context can split channels AND stereo placement is ticked (snare
+    // left, hats alternating): the channel mean is the mono track, so the detector hears
+    // what it always heard. With the box unticked the click is the phase-1 mono one.
+    const st = !!ctx.createChannelSplitter && u.stereo;
     const click = musicClickTrack({ sr: ctx.sampleRate, bpm: u.bpm, beats: 16, seed: 1, stereo: st });
     const buffer = ctx.createBuffer(st ? 2 : 1, click.samples.length, ctx.sampleRate);
     if (st) { buffer.getChannelData(0).set(click.left); buffer.getChannelData(1).set(click.right); }
@@ -630,6 +635,7 @@ async function musicStart() {
     music.queue.length = 0;
     music.hidden = false;
     musicFxReset();
+    music.stereoSeen = false;
     const A = { ctx: ctx, an: an, anL: anL, anR: anR, split: split, node: S.node, delay: delay, t0: ctx.currentTime, kind: kind,
                 click: S.click, stream: S.stream, route: route, suppressed: S.suppressed, surface: S.surface,
                 label: S.label, settings: S.settings || null, sync: null };
@@ -726,9 +732,11 @@ async function musicStep(sv) {
       an.getFloatFrequencyData(db);
       for (let k = 0; k < out.length; k++) out[k] = Math.pow(10, db[k] / 20);
     }
+    if (st && !music.stereoSeen) music.stereoSeen = musicChannelsDiffer(music.magL, music.magR);
     for (const o of ons) {
       const bins = music.det.bins[o.band];
-      music.queue.push({ due: tA + A.sync.H, o: o, pan: st ? musicPan(music.magL, music.magR, bins[0], bins[1]) : null });
+      music.queue.push({ due: tA + A.sync.H, o: o,
+                         pan: st && music.stereoSeen ? musicPan(music.magL, music.magR, bins[0], bins[1]) : null });
     }
   }
   // the mean field for this frame's steps, from the energy the last readback reported
@@ -807,7 +815,8 @@ function musicSched(A, t) {
   let best = null;
   for (const e of c.events) for (const off of [-c.duration, 0, c.duration]) {
     const d = tl - (e.t + off);
-    if (best === null || Math.abs(d) < Math.abs(best.dt)) best = { t: t - d, kind: e.kind, dt: d };
+    if (best === null || Math.abs(d) < Math.abs(best.dt))
+      best = { t: t - d, kind: e.kind, dt: d, pan: e.pan === undefined ? null : e.pan };
   }
   return best;
 }

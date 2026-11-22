@@ -1963,14 +1963,19 @@ Phase 2 of the music project: variety. Each effect was built and judged offline 
 (`examples/music_turbulence.py`, gate `examples/music_turbulence_check.py`); the page ports
 the rules (`music.js`) and holds them to numbers recorded from the python
 (`devtools/fixtures/music_ref.json`, key `effects`). With every effect off — kicks
-`elsasser`, stereo unticked, pulse 0, mean field 0 — the page is the phase-1 page, and
-`checkmusic.js` runs its legs 7–12 in exactly that state.
+`elsasser`, stereo unticked, pulse 0, mean field 0 — the page kicks, steps and sounds as
+the phase-1 page did, and `checkmusic.js` runs its legs 7–12 in exactly that state. Two
+things are still not the phase-1 page's, by design: the solver is always built with the
+mean-field `stage` kernel (at B0 = 0 it gives the plain kernel's values), and where the
+context can split channels the two channel analysers are always built (dead ends: they
+feed nothing). Those legs run on a fake context WITHOUT `createChannelSplitter`, which no
+real browser is; leg 13 is where the splitter branch is exercised.
 
 | control | default | what it does |
 |---|---|---|
 | kicks | `variety` | the kick TYPE per band (`musicKickTypesFor`): bass `dipole` (vortex pairs 1.5σ apart, which travel), `vortex` and `island` alternating in between (φ only / ψ only), treble `sheet`. Or one type for every band. |
 | sheet energy | 2 | multiplies a sheet's energy (amplitude × √) |
-| stereo placement, pan gain | on, 2 | a band's blobs gather at x = L(0.5 + 0.4·clip(gain·pan)), jitter 0.12 L; pan = (E_R − E_L)/(E_R + E_L) over the band's bins of the two channel analysers, read when the onset is declared. The bass is exempt. A mono source reads pan 0 through an up-mix node; a context without `createChannelSplitter` has no placement at all. |
+| stereo placement, pan gain | on, 2 | a band's blobs gather at x = L(0.5 + 0.4·clip(gain·pan)), jitter 0.12 L; pan = (E_R − E_L)/(E_R + E_L) over the band's bins of the two channel analysers, read when the onset is declared. The bass is exempt. Nothing is placed until the session's two channels have differed once (`musicChannelsDiffer`): a mono source, up-mixed to two equal channels, would otherwise read pan 0 in every band and pile into the centre column (found by the review). A context without `createChannelSplitter` has no placement at all. The click track is stereo only when the box is ticked at Start. |
 | pulse | 0.08 | a bass onset lifts the zoom TO 1 + pulse·strength, relaxing over 0.25 s. **Display only, and CSS**: a `transform: scale()` on the card's canvas (and arrow overlay), clipped by the card. A saved PNG or a recording is the unzoomed canvas. |
 | mean field (× rms), turn, strength walks | 1.5, 30°, on | a uniform in-plane field B0. Each bass onset turns it by a random angle (rms `turn` × strength) and, if the strength walks, steps \|B0\|/rms by rms max/6 × strength, reflected into [0, max]. \|B0\| = ratio × √(2E), E from the frame's stats readback, eased over 0.1 s. |
 

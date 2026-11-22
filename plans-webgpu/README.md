@@ -25,11 +25,12 @@ disagree, the file is right.
 
 - **MUSIC_EFFECTS_PLAN.md** — phase 2 of the music project, drafted 2026-11-21: kick types
   per band (vortex, island, dipole, sheet), stereo placement, a display zoom pulse, an
-  in-plane mean field. Steps 1–5 done the same day: all four built offline, judged by
-  Alfred, and ported to `music.html` with controls (step 1 committed a143b2e; steps 2–5
-  uncommitted). The mean field ended up as a random walk on bass onsets, carried in the
-  solver's exact linear step. Left: the optional zoom-out re-gridding and sustained-sound
-  kicks, and the one adversarial review.
+  in-plane mean field. All four were built offline, judged by Alfred, and ported to
+  `music.html` with controls (2026-11-21, branch `music-effects`). The mean field ended up
+  as a random walk on bass onsets, carried in the solver's exact linear step. The zoom-out
+  re-gridding is built offline only (Alfred: the repetition is jarring on the page);
+  sustained-sound kicks are not being built. The one adversarial review ran 2026-11-22 and
+  its findings are fixed. Left: merge and publish at Alfred's word.
 - **MUSIC_PLAN.md** — live music drives the 2D demo: per-band onsets become impulsive
   gaussian-blob kicks, with the audio clock as the master of simulation time. Drafted
   2026-11-21. The offline reference is `examples/music_turbulence.py` (JAX). Committed:

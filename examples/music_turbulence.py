@@ -853,6 +853,8 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
 
     b0, sections = None, None
     walk = None
+    if ratio_walk and (field_walk is None or not mean_field_b0):
+        raise ValueError("ratio_walk needs field_walk and a mean field: it walks |B0| / rms")
     if mean_field_b0 and field_walk is not None:
         rng_b = np.random.default_rng([seed, 5])
         th = rng_b.uniform(0.0, 2.0 * np.pi)
@@ -963,7 +965,7 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         u = img.T[::-1] / vmax
         zz = 1.0 if zooms is None else zooms[payload]
         if zoom_out:
-            zz *= 2.0 ** (-((t_ev % zoom_out) / zoom_out))
+            zz *= zoom_out_scale(t_ev, zoom_out, len(regrids))
         if zz != 1.0:
             u = zoom_image(u, zz)
         rgb = cm(0.5 + 0.5 * np.clip(u, -1.0, 1.0) if signed else np.clip(u, 0.0, 1.0))[..., :3]
@@ -983,6 +985,14 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
     return dict(energy=np.array(energy), umax=np.array(umaxs), late=np.array(late), jumps=jumps,
                 onsets=(t_on, b_on, s_on), kick_types=kinds, pans=pans, zooms=zooms, sections=sections, regrids=regrids, walk=None if walk is None else np.array(walk["trace"]), edges=edges, sigmas=sigmas, nblobs=nblobs, fps=fps, diss=diss, nsteps=nsteps, fields=np.asarray(state.fields),
                 duration=T, wall=time.perf_counter() - t0)
+
+
+def zoom_out_scale(t, period, ndone):
+    """The zoom-out's display scale at audio time t: 2^-(t - ndone*period)/period, in
+    [1/2, 1], `ndone` the number of re-grids already applied. Counted from the re-grids
+    rather than from t % period, which for a period that is not a whole number of frames
+    can sit a rounding error below `period` on the very frame a re-grid has just run."""
+    return 2.0 ** (-min(max((t - ndone * period) / period, 0.0), 1.0))
 
 
 def pulse_zoom(t_frames, t_on, s_on, a=0.08, tau=0.25):
@@ -1143,7 +1153,7 @@ def main():
     print(f"wrote {a.out}  ({res['wall']:.0f} s wall, {res['nsteps']} steps, diss = {res['diss']:.2e}, "
           f"events late by {1e3 * res['late'].mean():.1f} ms mean / {1e3 * res['late'].max():.1f} ms max)")
     if res["regrids"]:
-        print("  re-grids at " + " ".join(f"{t:.0f}" for t, _ in res["regrids"]) + " s; energy kept: "
+        print("  re-grids at " + " ".join(f"{t:g}" for t, _ in res["regrids"]) + " s; energy kept: "
               + " ".join(f"{r:.3f}" for _, r in res["regrids"]))
     for b in range(len(res["sigmas"])):
         c, m = beat_contrast(res, b)

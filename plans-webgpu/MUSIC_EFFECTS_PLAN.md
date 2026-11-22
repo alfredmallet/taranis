@@ -1,7 +1,11 @@
 # MUSIC_EFFECTS_PLAN — phase 2 of the music project: variety
 
-> **STATUS: step 1 (E1 + E2 offline) built 2026-11-21, movies rendered, awaiting Alfred's
-> verdict — see "Step 1 record" at the end. Nothing else built.** Drafted 2026-11-21. Alfred accepted it the same day as the
+> **STATUS (2026-11-22): steps 1–7 done. E1–E4 are built offline and on the page with
+> controls; E5 (zoom-out) is built offline only and stays off the page; E6 is not being
+> built; the one adversarial review has run and its findings are fixed. Left: merge and
+> publish at Alfred's word. The dated records at the end of this file are the account of
+> what was built and decided — where they differ from the plan text below, they win.**
+> Drafted 2026-11-21. Alfred accepted it the same day as the
 > initial plan, with three decisions (end of file): the E1 type table as the starting
 > point, the bass exempt from stereo placement, and the mean field (E4) rather than the
 > pan.** Phase 1 (MUSIC_PLAN.md) is published:
@@ -438,3 +442,48 @@ Alfred: E6 (sustained sound) is not being built; E5 is worth seeing, offline fir
 - For the page, if wanted: a k-space remap kernel (k to 2k, phase, mask) and a render that
   can show the tiling at zoom < 1 -- the CSS scale used for the pulse cannot, since it has
   only the one box to draw.
+
+## Step 7 record (2026-11-22): the adversarial review
+
+One fresh reviewer, the whole branch against `main`, in its own worktree: independent
+re-derivation of the maths, a read of the page glue, and 44 mutations of its own.
+
+**Confirmed.** Switches off, the offline script is bitwise `main`'s (fields, energy, mp4
+bytes; four configurations, fp32 and fp64). `rmhd2d.html` emits 32 kernels byte-identical
+to `main`'s; on `music.html` only `stage` differs and `sheetKick` is new. Both fixtures
+regenerate byte-identically. Mean-field signs and the 2x2 IF-LSRK33 step, `regrid`
+(against the reviewer's own trigonometric sum, hermitian on ky = 0), the sheet kernel's
+exponent and weight, dipole energy, pan, reflection, the pulse law, the allowance blocks.
+No BLOCKER.
+
+**One real bug, fixed.** A mono source on a context that can split channels read pan 0 in
+every band and sent every non-bass kick to the centre column (the tooltip promised
+uniform). The page now places nothing until the two channels have differed once in the
+session (`musicChannelsDiffer`, `music.stereoSeen`).
+
+**Gate holes, closed.** 21 of the 44 mutations survived: the page's mean-field and pulse
+rows asserted bounds, not behaviour; left/right was self-consistent under a channel swap;
+the offline `run(field_walk=)` path had no gate; no row moved an effects control off its
+default. Rows added in `checkmusic.js` leg 13 (orientation against the click's scheduled
+pan, the pulse frame for frame from the bass kicks, the walk's targets stepping only on
+bass frames, |B0| = r sqrt(2(E_u + E_b)) per frame, Reset and Start clearing the state, the
+arrow overlay, a run with five controls off their defaults, a mono input on a splitting
+context), in `checkkick.js` (one-component `setMeanField`), and in the python gate (the
+walk through `run()`, the driven operator with dissipation, the smoothstep's quarter
+point, random orientations, the re-grid's edge, `zoom_out_scale`, the zoom trace against
+`pulse_zoom`). Re-applied afterwards: 13 page mutations and 6 offline ones, all killed.
+Python gate: 94 checks.
+
+**Smaller fixes.** `--zoom-out` with a period that is not a whole number of frames could
+draw one frame at the wrong zoom after a re-grid (now counted from the re-grids done);
+`--ratio-walk` without `--field-walk` is refused; the page's click track is mono when
+stereo placement is unticked at Start; stale status lines in four documents.
+
+**Left as is.** Effects off, the page still builds the `b0` stage kernel and (where it can)
+the two channel analysers; documented in webgpu/README.md. Not gated: the frame-to-zoom
+index in the offline movie writer, `advance()`'s fixed-dt guard counting B0 in the explicit
+modes, a walk hit applied at declaration rather than after the Bluetooth hold-back (the
+gate's sessions have no hold-back). Latent: a dipole list longer than KICK_MAX would lose
+partners (largest today is 30 of 32); after a re-grid vorticity and current double, so
+`--field vorticity` jumps there. Not covered by the review: a real browser or GPU, and
+whether Safari and Firefox pull an unconnected gain -> splitter -> analyser chain.

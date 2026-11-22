@@ -208,10 +208,13 @@ Suggested order:
     `--amp`, `--n`; its header explains the knobs). About real time at 256² and 15× slower
     than real time at 512² on the M1 at fp32. Needs `imageio` and `imageio-ffmpeg` on top of
     the `examples` extra. The live WebGPU version is `../webgpu/music.html`
-    (`../plans-webgpu/MUSIC_PLAN.md`). Two variety switches, both off by default
+    (`../plans-webgpu/MUSIC_PLAN.md`). Variety switches, all off by default
     (`../plans-webgpu/MUSIC_EFFECTS_PLAN.md`): `--kick-types variety` gives each band its own
-    kind of kick (velocity dipoles, vortices, magnetic islands, sheets) and `--stereo` places
-    a band's blobs where it sits in the stereo image. `music_turbulence_check.py` is their
+    kind of kick (velocity dipoles, vortices, magnetic islands, sheets), `--stereo` places
+    a band's blobs where it sits in the stereo image, `--pulse` zooms the picture on each
+    bass onset, `--mean-field` with `--field-walk` adds an in-plane magnetic field that
+    turns on each bass onset, and `--zoom-out` pulls the camera back through the periodic
+    tiling. `music_turbulence_check.py` is their
     gate (`TARANIS_PRECISION=64`).
 
 To run a 3D example under MPI instead: `pip install -e ".[mpi]"`, convert the notebook to a

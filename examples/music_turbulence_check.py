@@ -1,5 +1,6 @@
 # Gate for the variety effects of examples/music_turbulence.py (kick types E1, stereo
-# placement E2; plans-webgpu/MUSIC_EFFECTS_PLAN.md). Not a pytest module: run it as
+# placement E2, the camera pulse E3, the mean field and its bass-hit walk E4, the zoom-out
+# re-grid E5, the section trigger; plans-webgpu/MUSIC_EFFECTS_PLAN.md). Not a pytest module: run it as
 #
 #   TARANIS_PRECISION=64 python examples/music_turbulence_check.py
 #
@@ -136,6 +137,16 @@ def kick_gates():
     check("sheet-island: 15-sheet kick leaves phi exactly zero", not np.any(f[0]) and np.any(f[1]))
     bp, bm = mt.kick_blobs(rng, "dipole", 0.45, 3, 1.0)
     check("dipole: nblob pairs, z- list equal to z+", len(bp) == 6 and np.array_equal(bp, bm))
+    bs, _ = mt.kick_blobs(rng, "sheet", 0.1, 400, 1.0)
+    bd, _ = mt.kick_blobs(rng, "dipole", 0.1, 400, 1.0)
+    d = (bd[:400, 0:2] - bd[400:, 0:2] + 0.5 * L) % L - 0.5 * L
+    dang = np.arctan2(d[:, 1], d[:, 0])
+    # uniform on [0, pi) has mean pi/2 and std pi/sqrt(12) = 0.907; on [-pi, pi), std 1.814
+    check("the orientations are random: sheets uniform over [0, pi), dipole axes over the full circle",
+          bs[:, 5].min() >= 0.0 and bs[:, 5].max() < np.pi and abs(bs[:, 5].mean() - 0.5 * np.pi) < 0.15
+          and abs(bs[:, 5].std() - 0.907) < 0.08 and abs(dang.std() - 1.814) < 0.15
+          and np.allclose(np.hypot(d[:, 0], d[:, 1]), 1.5 * 0.1),
+          f"sheet theta std {bs[:, 5].std():.3f}, dipole axis std {dang.std():.3f}")
     check("kick_types_for: None, variety at 4/5/6 bands, a single name, a list",
           mt.kick_types_for(None, 4) == ("elsasser",) * 4
           and mt.kick_types_for("variety", 4) == ("dipole", "vortex", "island", "sheet")
@@ -370,6 +381,9 @@ def pulse_gates():
               np.array_equal(r0["fields"], r1["fields"]) and np.array_equal(r0["energy"], r1["energy"])
               and not same and r0["zooms"] is None)
         zz = r1["zooms"]
+        check("   ... the zoom trace IS pulse_zoom of the bass band's onsets, and of no other band's",
+              np.array_equal(zz, mt.pulse_zoom(np.arange(len(zz)) / 30.0, t_on[bass], s_on[bass], 0.08, 0.25))
+              and not np.array_equal(zz, mt.pulse_zoom(np.arange(len(zz)) / 30.0, t_on[~bass], s_on[~bass], 0.08, 0.25)))
         k = np.ceil(t_on[bass] * 30 - 1e-9).astype(int)
         check("   ... and the zoom peaks on the frames after the bass onsets, within 1..1 + a",
               zz.min() >= 1.0 and zz.max() <= 1.08 + 1e-12 and zz[0] == 1.0 and bass.sum() >= 5
@@ -387,6 +401,8 @@ def mean_field_gates():
           bmax == 0.5 and all(abs(mag(t) - 0.5) < 1e-15 for t in (0.0, 1.7, 9.0))
           and abs(ang(0.5) - 0.6) < 1e-14 and abs(ang(2.0) - (0.6 + 0.25 * np.pi)) < 1e-14
           and abs(ang(4.0) - (0.6 + 0.5 * np.pi)) < 1e-14 and abs(ang(8.0) - (0.6 + 0.5 * np.pi - 1.0)) < 1e-14)
+    check("   ... the turn is a smoothstep: a quarter of the way in time is 5/32 of the angle",
+          abs(ang(1.5) - (0.6 + 0.15625 * 0.5 * np.pi)) < 1e-14)
 
     th = 0.6
     B = 0.5 * np.array([np.cos(th), np.sin(th)])
@@ -488,6 +504,52 @@ def driven_field_gates():
     err = np.abs(np.asarray(s.fields) - f0 * np.exp(-1j * (kx * disp[0] + ky * disp[1]))).max() / np.abs(f0).max()
     check("two advances with different fields: the blob is displaced by the sum of B0 dt, to round-off",
           err < 1e-11, f"rel {err:.1e}")
+    # with dissipation: the exact operator keeps the solver's own diagonal beside the field
+    nu = 2e-9
+    stepd = mt.Stepper(n, 1.0 / 20.0, nu, 4, b0="driven")
+    kd, _ = mt.make_kick(stepd.p, stepd.kg)
+    s = jr.initialize(lambda x, y: jnp.zeros((2, 1, n, n)), stepd.p)
+    s = s._replace(fields=kd(s.fields, mt.pad(none), mt.pad(blob)))
+    f0 = np.asarray(s.fields)
+    s, _ = stepd.advance(s, 1.0, 1.0, B)
+    t = float(s.t)
+    want = f0 * np.exp(-1j * t * (kx * B[0] + ky * B[1])) * np.exp(-nu * (kx**2 + ky**2) ** 4 * t)
+    err = np.abs(np.asarray(s.fields) - want).max() / np.abs(f0).max()
+    lost = 1.0 - np.abs(want).max() / np.abs(f0).max()
+    check("driven with hyperviscosity: the blob is translated AND each mode decays by exp(-nu k^8 t)",
+          err < 1e-11 and np.abs(np.asarray(s.fields) - f0 * np.exp(-1j * t * (kx * B[0] + ky * B[1]))).max() / np.abs(f0).max() > 1e-4,
+          f"rel {err:.1e}; without the decay it would be off by more than 1e-4")
+
+    # the walk itself, through run(): 8 s of the click track, whose last quarter has no kick drum
+    sr, x = mt.click_track(duration=8.0)
+    with tempfile.TemporaryDirectory() as tmp:
+        kw = dict(n=64, nbands=4, sigma_min=3.7 * L / 256, quiet=True, field_walk=30.0, mean_field_b0=1.5)
+        res = mt.run(sr, x, os.path.join(tmp, "w.mp4"), ratio_walk=2.0, **kw)
+        fix = mt.run(sr, x, os.path.join(tmp, "f.mp4"), **kw)
+    tr, en = res["walk"], res["energy"]
+    t_on, b_on, _ = res["onsets"]
+    fps = res["fps"]
+    # frames with no onset since the frame before: the field was set from that frame's energy
+    quiet = np.array([i for i in range(1, len(tr)) if not np.any((t_on > (i - 1) / fps) & (t_on <= i / fps))])
+    rel = np.abs(tr[quiet, 2] - tr[quiet, 1] * np.sqrt(2.0 * en[quiet - 1])) / np.maximum(tr[quiet, 2], 1e-30)
+    check("run(field_walk=): |B0| = r sqrt(2 E) of the energy last observed, frame by frame",
+          len(quiet) > 100 and rel.max() < 1e-12 and tr[:, 2].max() > 0.1, f"{len(quiet)} frames, rel {rel.max():.1e}")
+    check("   ... the ratio walks, reflected, inside [0, 1.5] even at a step of 2 per hit; without ratio_walk it stays at 1.5",
+          tr[:, 1].min() >= 0.0 and tr[:, 1].max() <= 1.5 and np.ptp(tr[:, 1]) > 0.5 and np.all(fix["walk"][:, 1] == 1.5),
+          f"range {tr[:, 1].min():.3f} .. {tr[:, 1].max():.3f}")
+    last_bass = t_on[b_on == 0].max()
+    i0 = int(np.ceil((last_bass + 1.5) * fps))
+    later = np.sum((t_on > last_bass + 1.5) & (b_on != 0))
+    check("   ... the direction turns at the BASS onsets only: once they stop it settles, while the other bands play on",
+          last_bass < 6.5 and later >= 3 and np.ptp(tr[i0:, 0]) < 1e-6 and np.ptp(tr[:i0, 0]) > 0.2,
+          f"last bass onset {last_bass:.2f} s, {later} later onsets in other bands, turn before {np.ptp(tr[:i0, 0]):.2f} rad, after {np.ptp(tr[i0:, 0]):.1e}")
+    try:
+        mt.run(sr, x, "x.mp4", n=64, quiet=True, ratio_walk=0.3, mean_field_b0=1.0)
+        refused = False
+    except ValueError:
+        refused = True
+    check("ratio_walk without field_walk is refused", refused)
+
     bad = 0
     for st, args in ((step, ()), (mt.Stepper(32, 1.0 / 120.0, 0.0, 4), (B,))):
         try:
@@ -534,6 +596,8 @@ def regrid_gates():
     # what is dropped: a mode past the half-range goes, one inside it stays
     h = np.zeros_like(f)
     h[0, 0, 5, 3] = 1.0; h[0, 0, n - 7, 2] = 2.0; h[0, 0, n // 4 + 4, 3] = 1.0; h[0, 0, 3, n // 4 + 1] = 1.0
+    # ... and the edge itself: 2 k = n/2 is the Nyquist line, in x (both signs) and in y
+    h[0, 0, n // 4, 1] = 1.0; h[0, 0, n - n // 4, 1] = 1.0; h[0, 0, 1, n // 4] = 1.0
     gh = mt.regrid(h)
     check("a mode (kx, ky) lands on (2 kx, 2 ky), negative kx too; one that would pass n/2 is dropped",
           abs(abs(gh[0, 0, 10, 6]) - 0.5) < 1e-15 and abs(abs(gh[0, 0, n - 14, 4]) - 1.0) < 1e-15
@@ -548,6 +612,11 @@ def regrid_gates():
     check("run(zoom_out=2): re-grids at 2 and 4 s, each keeping most of the energy, the run finite",
           [t for t, _ in rg] == [2.0, 4.0] and all(0.3 < r <= 1.0 + 1e-6 for _, r in rg) and np.all(np.isfinite(res["energy"])),
           "energy kept " + " ".join(f"{r:.3f}" for _, r in rg))
+    zs = mt.zoom_out_scale
+    check("zoom_out_scale: 1 at a re-grid, falling to 1/2 at the next (the picture pulls BACK), counted from the re-grids done",
+          zs(0.0, 10.0, 0) == 1.0 and abs(zs(5.0, 10.0, 0) - 2.0 ** -0.5) < 1e-15 and abs(zs(9.999, 10.0, 0) - 0.5) < 1e-3
+          and zs(10.0, 10.0, 1) == 1.0 and abs(zs(15.0, 10.0, 1) - 2.0 ** -0.5) < 1e-15
+          and zs(5.5, 1.1, 5) == 1.0 and zs(9.9, 1.1, 9) == 1.0)       # where 5.5 % 1.1 is 1.1 - 4e-16
     check("zoom_image at s < 1 shows the tiling: a constant image stays constant, the mean is kept",
           np.allclose(mt.zoom_image(np.full((16, 16), 3.0), 0.6), 3.0)
           and abs(mt.zoom_image(img0, 0.5).mean() / img0.mean() - 1.0) < 2e-2)
