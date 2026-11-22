@@ -825,8 +825,8 @@ function legSync(state) {
   if (!fs.existsSync(cf)) { ok("fixtures/music_cmap.json is present", false, "run ../gen_musiccmap.py"); return; }
   const C = JSON.parse(fs.readFileSync(cf, "utf8")), maps = M.MUSIC_CMAPS;
   const poly = (co, t) => [0, 1, 2].map(c => { let v = co[6][c]; for (let k = 5; k >= 0; k--) v = v * t + co[k][c]; return Math.max(0, Math.min(1, v)); });
-  ok("MUSIC_CMAPS is magma then brat, each 7 rows of 3 coefficients (the demo's degree-6 form)",
-     maps.length === 2 && maps[0].name === "magma" && maps[1].name === "brat" && maps.every(m => m.coef.length === 7 && Array.from(m.coef).every(r => r.length === 3)));
+  ok("MUSIC_CMAPS is magma, brat, brat_r, each 7 rows of 3 coefficients (the demo's degree-6 form)",
+     maps.length === 3 && maps[0].name === "magma" && maps[1].name === "brat" && maps[2].name === "brat_r" && maps.every(m => m.coef.length === 7 && Array.from(m.coef).every(r => r.length === 3)));
   ok("magma's coefficients are the ones gen_musiccmap.py fitted to matplotlib's table", JSON.stringify(maps[0].coef) === JSON.stringify(C.magma_coef), C.source);
   let err = 0;
   C.magma_table.forEach((row, i) => { const v = poly(maps[0].coef, i / 255); for (let c = 0; c < 3; c++) err = Math.max(err, Math.abs(v[c] - row[c])); });
@@ -838,6 +838,16 @@ function legSync(state) {
   ok("brat is black at 0 and #8ACE00 at 1: (138, 206, 0) / 255",
      b0.every(v => v === 0) && b1.map(v => Math.round(255 * v)).join() === "138,206,0" && C.brat_hex === "#8ACE00" &&
      JSON.stringify(maps[1].coef) === JSON.stringify(C.brat_coef));
+  // brat_r is brat run backwards: the cover's green at 0 (still flow), black at 1
+  let rev = 0, rmono = true;
+  for (let i = 0; i <= 200; i++) {
+    const a = poly(maps[2].coef, i / 200), b = poly(maps[1].coef, 1 - i / 200);
+    rev = Math.max(rev, Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]), Math.abs(a[2] - b[2]));
+    if (i > 0 && !(a[1] < poly(maps[2].coef, (i - 1) / 200)[1])) rmono = false;
+  }
+  ok("brat_r is brat reversed: #8ACE00 at 0, black at 1, brat_r(t) = brat(1 - t) to 1e-6, green strictly falling",
+     poly(maps[2].coef, 0).map(v => Math.round(255 * v)).join() === "138,206,0" && poly(maps[2].coef, 1).every(v => Math.abs(v) < 1e-12) &&
+     rev < 1e-6 && rmono && JSON.stringify(maps[2].coef) === JSON.stringify(C.brat_r_coef), "max |brat_r(t) - brat(1-t)| = " + rev.toExponential(1));
   let mono = true, lin = 0;
   const luma = v => 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
   for (let i = 1; i <= 200; i++) {
@@ -1768,8 +1778,8 @@ async function legFix(state) {
   const cm = JSON.parse(env.run(`function(){ const c = cards.disp[0]; return JSON.stringify({ names: cmapNames(), shared: CMAP_NAMES,
     opts: Array.from(c.selCmap.options).map(o => cmapNames()[+o.value]), sel: c.selCmap.value, cmap: c.cmap(), field: c.selField.value,
     rgb4: cmapRGB(4, 0.37), rgb5: cmapRGB(5, 1), rgb0: cmapRGB(0, 0.37), code: solver.pl.colorize.__code, dflt: MUSIC_CMAP_DEFAULT }); }`));
-  ok("the music page's colormap menu is the shared four plus magma and brat, and the speed display starts on magma",
-     cm.names.join() === "afmhot,viridis,RdBu,grayscale,magma,brat" && cm.shared.length === 4 && cm.opts.join() === cm.names.join() &&
+  ok("the music page's colormap menu is the shared four plus magma, brat and brat_r, and the speed display starts on magma",
+     cm.names.join() === "afmhot,viridis,RdBu,grayscale,magma,brat,brat_r" && cm.shared.length === 4 && cm.opts.join() === cm.names.join() &&
      cm.sel === "4" && cm.cmap === 4 && cm.dflt === 4 && cm.field === "4", cm.opts.join(" "));
   const polyOf = (co, t) => [0, 1, 2].map(c => { let v = co[6][c]; for (let k = 5; k >= 0; k--) v = v * t + co[k][c]; return Math.max(0, Math.min(1, v)); });
   ok("the CPU twin (cmapRGB: the colour bar, the saved PNG's bar) evaluates the SAME table: magma at 0.37, brat's green at 1, afmhot unmoved",
@@ -1780,6 +1790,7 @@ async function legFix(state) {
                         return m ? Array.from(m[1].matchAll(/vec3<f32>\(([-\d.e]+), ([-\d.e]+), ([-\d.e]+)\)/g)).map(v => [+v[1], +v[2], +v[3]]) : null; };
   ok("the EMITTED colorize kernel has branches 4 (magma) and 5 (brat) whose vec3 literals are MUSIC_CMAPS' coefficients, number for number",
      JSON.stringify(lits(4)) === JSON.stringify(M.MUSIC_CMAPS[0].coef) && JSON.stringify(lits(5)) === JSON.stringify(M.MUSIC_CMAPS[1].coef) &&
+     JSON.stringify(lits(6)) === JSON.stringify(M.MUSIC_CMAPS[2].coef) &&
      lits(1).length === 7 && lits(2).length === 7 && /if \(which == 3u\) \{ return vec3<f32>\(t, t, t\); \}/.test(cm.code));
   for (const page of ["rmhd2d.html", "rmhd3d.html"]) {
     const o = await boot(dir, page); await turn();
@@ -1794,7 +1805,7 @@ async function legFix(state) {
      /already exists/.test(throws(() => env.run("function(){ cmapExtend([{ name: 'viridis', coef: MUSIC_CMAPS[0].coef }]); }"))) &&
      /7 rows of 3/.test(throws(() => env.run("function(){ cmapExtend([{ name: 'x', coef: [[0, 0, 0]] }]); }"))) &&
      /7 rows of 3/.test(throws(() => env.run("function(){ cmapExtend([{ name: 'y', coef: MUSIC_CMAPS[0].coef.map(r => [r[0], NaN, r[2]]) }]); }"))) &&
-     env.run("function(){ return cmapNames().length; }") === 6);
+     env.run("function(){ return cmapNames().length; }") === 7);
 
   // ---- the run button says what it does ----------------------------------------------------
   ok("the run button reads Start, not Run (and Stop, not Pause: it is a full stop)", P.st().btn === "Start");

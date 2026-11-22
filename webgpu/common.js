@@ -155,7 +155,7 @@ const CMAP_COEF = {
     [-45.023288, -18.545760, -84.065776]
   ]
 };
-// EXTRA colormaps a page registers for itself (music.html: magma, brat), in the same
+// EXTRA colormaps a page registers for itself (music.html: magma, brat, brat_r), in the same
 // degree-6 form. Empty on every other page, and then nothing below differs from before it
 // existed: `cmapNames()` is CMAP_NAMES, cmapRGB never reaches the extra branch, and
 // physics.js's cmapWGSL() returns CMAP_WGSL itself, character for character. An extra map's

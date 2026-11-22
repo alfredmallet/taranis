@@ -38,11 +38,15 @@ brat[1] = np.round(np.array([0x8A, 0xCE, 0x00]) / 255.0, 6)
 fmt = lambda a: "[\n" + ",\n".join("      [" + ", ".join("%.6f" % v for v in row) + "]" for row in a) + "\n    ]"
 print("magma: max |fit - table| over 256 points and 3 channels = %.4f" % err)
 print("  { name: \"magma\", coef: " + fmt(coef) + " },")
-print("  { name: \"brat\", coef: " + fmt(brat) + " }")
+brat_r = np.zeros((7, 3))                      # brat reversed: (1 - t) * green
+brat_r[0], brat_r[1] = brat[1], -brat[1]
+print("  { name: \"brat\", coef: " + fmt(brat) + " },")
+print("  { name: \"brat_r\", coef: " + fmt(brat_r) + " }")
 dst = os.path.join(HERE, "devtools", "fixtures", "music_cmap.json")
 with open(dst, "w") as fh:
     json.dump(dict(source="matplotlib %s colormaps['magma'], 256 points" % matplotlib.__version__,
                    magma_table=[[round(float(v), 6) for v in row] for row in rgb],
                    magma_coef=[[float(v) for v in row] for row in coef], magma_fit_max_error=err,
-                   brat_coef=[[float(v) for v in row] for row in brat], brat_hex="#8ACE00"), fh)
+                   brat_coef=[[float(v) for v in row] for row in brat], brat_hex="#8ACE00",
+                   brat_r_coef=[[float(v) for v in row] for row in brat_r]), fh)
 print("wrote", dst, os.path.getsize(dst), "bytes")
