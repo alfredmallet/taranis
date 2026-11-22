@@ -319,11 +319,243 @@ def stereo_gates():
               and r_v["energy"].max() > 0, f"types {r_v['kick_types']}, E_end {r_v['energy'][-1]:.4f}")
 
 
+def pulse_gates():
+    print("camera pulse (E3)")
+    fps = 30
+    tf = np.arange(90) / fps
+    z = mt.pulse_zoom(tf, [1.0], [0.5], a=0.08, tau=0.25)
+    want = np.where(tf >= 1.0, 1.0 + 0.04 * np.exp(-(tf - 1.0) / 0.25), 1.0)
+    check("one onset: 1 before it, 1 + a*strength at its frame, exp(-t/tau) after",
+          np.abs(z - want).max() < 1e-15 and z[30] == 1.04 and np.all(z[:30] == 1.0))
+    z = mt.pulse_zoom(tf, [1.0, 1.1, 1.2], [1.0, 0.1, 1.0], a=0.08, tau=0.25)
+    i = lambda t: int(round(t * fps))
+    check("a weaker onset during the decay does not lower the zoom; a stronger one lifts it TO 1 + a",
+          abs(z[i(1.1)] - (1.0 + 0.08 * np.exp(-0.1 / 0.25))) < 1e-15 and abs(z[i(1.2)] - 1.08) < 1e-15
+          and z.max() <= 1.08 + 1e-15)
+    z2 = mt.pulse_zoom(tf, [1.2, 1.0, 1.1], [1.0, 1.0, 0.1], a=0.08, tau=0.25)
+    check("onset order does not matter; no onsets is 1 everywhere",
+          np.array_equal(z, z2) and np.array_equal(mt.pulse_zoom(tf, [], []), np.ones(90)))
+
+    n = 64
+    rng = np.random.default_rng(0)
+    img = rng.standard_normal((n, n))
+    check("zoom_image at 1 is the image itself", mt.zoom_image(img, 1.0) is img)
+    x = np.arange(n)
+    c = 0.5 * (n - 1)
+    f = lambda a0, a1: np.cos(2 * np.pi * 2 * a0 / n + 0.3) * np.sin(2 * np.pi * a1 / n)
+    X0, X1 = np.meshgrid(x, x, indexing="ij")
+    # bilinear error bound for this f: (k0^2 + k1^2)/8 = 6.0e-3. 0.5 looks past the edge of
+    # the box on every side, so it passes only if the sampling wraps.
+    for s_ in (1.08, 1.5, 0.5):
+        zi = mt.zoom_image(f(X0, X1), s_)
+        ex = f(c + (X0 - c) / s_, c + (X1 - c) / s_)
+        err = np.abs(zi - ex).max()
+        check(f"zoom {s_}: pixel i shows the periodic field at c + (i - c)/s (bilinear error only)",
+              err < 6.5e-3, f"max error {err:.1e}")
+    sm = f(X0, X1)
+    a_, b_ = mt.zoom_image(sm, 1.2), mt.zoom_image(sm[::-1, ::-1], 1.2)[::-1, ::-1]
+    check("the zoom is about the centre: it commutes with flipping the image", np.abs(a_ - b_).max() < 1e-13)
+
+    import tempfile
+    sr, mono = mt.click_track(duration=4.0)
+    with tempfile.TemporaryDirectory() as tmp:
+        kw = dict(n=64, nbands=4, sigma_min=3.7 * L / 256, quiet=True)
+        r0 = mt.run(sr, mono, os.path.join(tmp, "a.mp4"), **kw)
+        r1 = mt.run(sr, mono, os.path.join(tmp, "b.mp4"), pulse=0.08, **kw)
+        same = open(os.path.join(tmp, "a.mp4"), "rb").read() == open(os.path.join(tmp, "b.mp4"), "rb").read()
+        t_on, b_on, s_on = r1["onsets"]
+        bass = b_on == 0
+        check("run(pulse=): the flow is untouched (fields, energy bitwise), the movie differs",
+              np.array_equal(r0["fields"], r1["fields"]) and np.array_equal(r0["energy"], r1["energy"])
+              and not same and r0["zooms"] is None)
+        zz = r1["zooms"]
+        k = np.ceil(t_on[bass] * 30 - 1e-9).astype(int)
+        check("   ... and the zoom peaks on the frames after the bass onsets, within 1..1 + a",
+              zz.min() >= 1.0 and zz.max() <= 1.08 + 1e-12 and zz[0] == 1.0 and bass.sum() >= 5
+              and np.all(zz[k[k < len(zz)]] > zz[np.maximum(k[k < len(zz)] - 1, 0)]),
+              f"{bass.sum()} bass onsets, max zoom {zz.max():.4f}")
+
+
+def mean_field_gates():
+    print("in-plane mean field (E4)")
+    n = 128
+    b0_of_t, bmax = mt.mean_field(0.5, 0.6, [1.0, 5.0], [0.5 * np.pi, -1.0], turn_s=2.0)
+    ang = lambda t: float(np.arctan2(*[float(v) for v in b0_of_t(t)][::-1]))
+    mag = lambda t: float(np.hypot(*[float(v) for v in b0_of_t(t)]))
+    check("mean_field: fixed magnitude; angle theta0, half-way through a turn, after it, after two",
+          bmax == 0.5 and all(abs(mag(t) - 0.5) < 1e-15 for t in (0.0, 1.7, 9.0))
+          and abs(ang(0.5) - 0.6) < 1e-14 and abs(ang(2.0) - (0.6 + 0.25 * np.pi)) < 1e-14
+          and abs(ang(4.0) - (0.6 + 0.5 * np.pi)) < 1e-14 and abs(ang(8.0) - (0.6 + 0.5 * np.pi - 1.0)) < 1e-14)
+
+    th = 0.6
+    B = 0.5 * np.array([np.cos(th), np.sin(th)])
+    step = mt.Stepper(n, 1.0 / 120.0, 0.0, 4, b0=mt.mean_field(0.5, th, [], []))
+    kick, observe = mt.make_kick(step.p, step.kg)
+    kx, ky = np.asarray(step.kg.kx), np.asarray(step.kg.ky)
+    blob, none = np.array([[2.0, 3.0, 0.3, 1.0]]), np.zeros((0, 4))
+    for sign, name, way in ((1, "z+", "against"), (-1, "z-", "along")):
+        s = jr.initialize(lambda x, y: jnp.zeros((2, 1, n, n)), step.p)
+        s = s._replace(fields=kick(s.fields, mt.pad(blob if sign > 0 else none), mt.pad(none if sign > 0 else blob)))
+        f0, e0 = np.asarray(s.fields), float(observe(s.fields)[2])
+        s, k = step.advance(s, 2.0, 1.0)
+        t, f = float(s.t), np.asarray(s.fields)
+        shifted = lambda d: f0 * np.exp(-1j * d * t * (kx * B[0] + ky * B[1]))     # f0(x - d B t)
+        err = np.abs(f - shifted(-sign)).max() / np.abs(f0).max()
+        bad = np.abs(f - shifted(sign)).max() / np.abs(f0).max()
+        e1 = float(observe(s.fields)[2])
+        check(f"one {name} blob from rest translates rigidly {way} B0 at |B0| (a distance {0.5 * t:.2f} = 3.3 sigma)",
+              err < 1e-4 and bad > 1.0, f"rel error {err:.1e} ({k} steps); the other direction {bad:.2f}")
+        check("   ... energy unchanged by the term (no dissipation in this run)", abs(e1 / e0 - 1.0) < 1e-4,
+              f"E/E0 - 1 = {e1 / e0 - 1.0:+.1e}")
+
+    # a turning field: the blob has moved by the time integral of B0
+    b0 = mt.mean_field(0.5, 0.2, [0.5], [2.0], turn_s=1.0)
+    step = mt.Stepper(n, 1.0 / 120.0, 0.0, 4, b0=b0)
+    kick, observe = mt.make_kick(step.p, step.kg)
+    s = jr.initialize(lambda x, y: jnp.zeros((2, 1, n, n)), step.p)
+    s = s._replace(fields=kick(s.fields, mt.pad(none), mt.pad(blob)))
+    f0 = np.asarray(s.fields)
+    s, k = step.advance(s, 2.5, 1.0)
+    t = float(s.t)
+    tq = np.linspace(0.0, t, 20001)
+    bq = np.array([[float(v) for v in b0[0](x)] for x in tq[::20]])
+    tc = tq[::20]
+    disp = np.sum(0.5 * (bq[1:] + bq[:-1]) * np.diff(tc)[:, None], axis=0)
+    f = np.asarray(s.fields)
+    err = np.abs(f - f0 * np.exp(-1j * (kx * disp[0] + ky * disp[1]))).max() / np.abs(f0).max()
+    check("a z- blob under a field that turns by 2 rad: displaced by the integral of B0 dt",
+          err < 2e-3 and abs(np.hypot(*disp) - 0.5 * t) > 0.05,
+          f"rel error {err:.1e}; path {0.5 * t:.2f}, net displacement {np.hypot(*disp):.2f}")
+
+    # both channels overlapping: the nonlinear run conserves energy with the term on
+    step = mt.Stepper(n, 1.0 / 120.0, 0.0, 4, b0=mt.mean_field(0.5, th, [], []))
+    kick, observe = mt.make_kick(step.p, step.kg)
+    rng = np.random.default_rng(2)
+    s = jr.initialize(lambda x, y: jnp.zeros((2, 1, n, n)), step.p)
+    s = s._replace(fields=kick(s.fields, mt.pad(mt.blobs_for(rng, 0.45, 3, 0.5)), mt.pad(mt.blobs_for(rng, 0.45, 3, 0.5))))
+    e0 = float(observe(s.fields)[2])
+    s, k = step.advance(s, 1.0, 1.0)
+    e1 = float(observe(s.fields)[2])
+    check("z+ and z- together, nonlinear, no dissipation: energy conserved with B0 on", abs(e1 / e0 - 1.0) < 1e-3,
+          f"E/E0 - 1 = {e1 / e0 - 1.0:+.1e} over {k} steps")
+    st0 = mt.Stepper(n, 1.0 / 120.0, 0.0, 4)
+    kick0 = mt.make_kick(st0.p, st0.kg)[0]
+    ks = []
+    for stp, kk in ((st0, kick0), (step, kick)):
+        s0 = jr.initialize(lambda x, y: jnp.zeros((2, 1, n, n)), stp.p)
+        # the adaptive path directly: advance() would pick the fixed dt_cap for one of them
+        ks.append(int(stp._adaptive(s0._replace(fields=kk(s0.fields, mt.pad(blob), mt.pad(none))), 2.0)[1]))
+    check("the field's rate joins the CFL sum: the same blob takes more steps with B0 = 0.5",
+          ks[1] > 1.2 * ks[0], f"{ks[1]} vs {ks[0]} steps to t = 2")
+
+
+def driven_field_gates():
+    print("driven mean field (the bass-hit random walk's path)")
+    n, th = 128, 0.6
+    B = 0.5 * np.array([np.cos(th), np.sin(th)])
+    blob, none = np.array([[2.0, 3.0, 0.3, 1.0]]), np.zeros((0, 4))
+    out = []
+    for b0 in (mt.mean_field(0.5, th, [], []), "driven-explicit", "driven"):
+        step = mt.Stepper(n, 1.0 / 20.0, 0.0, 4, b0=b0)       # dt_cap out of the way: adaptive dt
+        kick, observe = mt.make_kick(step.p, step.kg)
+        s = jr.initialize(lambda x, y: jnp.zeros((2, 1, n, n)), step.p)
+        s = s._replace(fields=kick(s.fields, mt.pad(blob), mt.pad(0.5 * blob)))
+        s, k = step.advance(s, 1.0, 1.0, *((B,) if isinstance(b0, str) else ()))
+        out.append((np.asarray(s.fields), float(s.t), k))
+    (fa, ta, ka), (fb, tb, kb), (fc, tc, kc) = out
+    err = np.abs(fa - fb).max() / np.abs(fa).max()
+    check("driven-explicit, constant field, reproduces mean_field's run (nonlinear, both channels)",
+          err < 1e-10 and ka == kb and abs(ta - tb) < 1e-12, f"rel {err:.1e}, {ka} and {kb} steps")
+    # the exact-linear run ends at its own t (fewer, longer steps), so the two differ by
+    # the evolution over tc - ta as well as by the time-stepping error
+    err = np.abs(fa - fc).max() / np.abs(fa).max()
+    check("driven (field in the exact linear step): the same nonlinear run in fewer steps",
+          err < 3e-2 and abs(tc - ta) < 2e-2 and kc < ka,
+          f"rel {err:.1e} with t apart by {tc - ta:+.1e}; {kc} against {ka} steps")
+
+    # one z- blob alone has no nonlinearity: the exact step translates it to round-off, and
+    # held piecewise constant over two advances it is displaced by the sum of B0 dt
+    kx, ky = np.asarray(step.kg.kx), np.asarray(step.kg.ky)
+    s = jr.initialize(lambda x, y: jnp.zeros((2, 1, n, n)), step.p)
+    s = s._replace(fields=kick(s.fields, mt.pad(none), mt.pad(blob)))
+    f0 = np.asarray(s.fields)
+    B2 = np.array([-0.3, 0.9])
+    s, _ = step.advance(s, 1.0, 1.0, B)
+    t1 = float(s.t)
+    s, _ = step.advance(s, 1.5, 1.0, B2)
+    disp = B * t1 + B2 * (float(s.t) - t1)
+    err = np.abs(np.asarray(s.fields) - f0 * np.exp(-1j * (kx * disp[0] + ky * disp[1]))).max() / np.abs(f0).max()
+    check("two advances with different fields: the blob is displaced by the sum of B0 dt, to round-off",
+          err < 1e-11, f"rel {err:.1e}")
+    bad = 0
+    for st, args in ((step, ()), (mt.Stepper(32, 1.0 / 120.0, 0.0, 4), (B,))):
+        try:
+            st.advance(None, 1.0, 1.0, *args)
+        except ValueError:
+            bad += 1
+    check("bvec missing in driven mode, or given without it, is an error", bad == 2)
+
+
+def section_gates():
+    print("section trigger")
+    sr = 22050
+    rng = np.random.default_rng(0)
+    from scipy.signal import lfilter
+    lo = lfilter(*mt._bandpass(80.0, 400.0, sr), rng.standard_normal(60 * sr))
+    hi = lfilter(*mt._bandpass(2000.0, 8000.0, sr), rng.standard_normal(60 * sr))
+    t = np.arange(60 * sr) / sr
+    steady = lo + 0.3 * hi
+    ts, ss, tr = mt.detect_sections(sr, steady)
+    check("steady noise for 60 s: no trigger", len(ts) == 0, f"novelty max {tr[:, 1].max():.3f} decades")
+    # bass-heavy until 20 s, treble-heavy until 40 s, bass-heavy again
+    w = ((t >= 20.0) & (t < 40.0)).astype(float)
+    x = (1.0 - 0.9 * w) * lo + (0.1 + 0.9 * w) * hi
+    ts, ss, tr = mt.detect_sections(sr, x)
+    check("the balance of the bands changes at 20 s and 40 s: one trigger 1-8 s after each, no other",
+          len(ts) == 2 and 1.0 < ts[0] - 20.0 < 8.0 and 1.0 < ts[1] - 40.0 < 8.0,
+          "triggers at " + ", ".join(f"{a:.1f}" for a in ts))
+    # causal: the triggers of the first 30 s do not depend on what comes after
+    ts30 = mt.detect_sections(sr, x[:30 * sr])[0]
+    check("causal: the first 30 s alone give the same first trigger", len(ts30) == 1 and ts30[0] == ts[0])
+    # changes at 20, 24 and 40 s with short windows: the one at 24 s falls in the 8 s gap
+    w = (((t >= 20.0) & (t < 24.0)) | (t >= 40.0)).astype(float)
+    y = (1.0 - 0.9 * w) * lo + (0.1 + 0.9 * w) * hi
+    ts = mt.detect_sections(sr, y, win_s=1.0, smooth_s=0.3)[0]
+    ts2 = mt.detect_sections(sr, y, win_s=1.0, smooth_s=0.3, min_gap_s=2.0)[0]
+    near = lambda a, b: 0.0 < a - b < 3.0
+    check("changes at 20, 24, 40 s (1 s windows): the second is inside min_gap_s = 8 s and is skipped; "
+          "with min_gap_s = 2 it fires",
+          len(ts) == 2 and near(ts[0], 20.0) and near(ts[1], 40.0)
+          and len(ts2) == 3 and near(ts2[1], 24.0),
+          "8 s: " + ", ".join(f"{a:.1f}" for a in ts) + "; 2 s: " + ", ".join(f"{a:.1f}" for a in ts2))
+    ts = mt.detect_sections(sr, 0.0 * x)[0]
+    check("silence: no trigger, no NaN", len(ts) == 0)
+
+    import tempfile
+    sr, mono = mt.click_track(duration=6.0)
+    with tempfile.TemporaryDirectory() as tmp:
+        kw = dict(n=64, nbands=4, sigma_min=3.7 * L / 256, quiet=True)
+        r0 = mt.run(sr, mono, os.path.join(tmp, "a.mp4"), **kw)
+        r1 = mt.run(sr, mono, os.path.join(tmp, "b.mp4"), mean_field_b0=0.5, section_every=4, **kw)
+        nbass = int(np.sum(r1["onsets"][1] == 0))
+        check("run(mean_field_b0=, section_every=4): finite, the flow differs, a redraw every 4th bass onset",
+              np.all(np.isfinite(r1["energy"])) and not np.array_equal(r0["fields"], r1["fields"])
+              and len(r1["sections"]) == nbass // 4 and r0["sections"] is None,
+              f"{nbass} bass onsets, redraws at " + ", ".join(f"{a:.2f}" for a in r1["sections"]))
+        r2 = mt.run(sr, mono, os.path.join(tmp, "c.mp4"), mean_field_b0=0.5, **kw)
+        check("run(mean_field_b0=) with the detector on a 6 s track: no section yet, still runs",
+              len(r2["sections"]) == 0 and np.all(np.isfinite(r2["energy"])))
+
+
 if __name__ == "__main__":
     if jr._precision.ftype != jnp.float64:
         sys.exit("run with TARANIS_PRECISION=64")
     kick_gates()
     dipole_gate()
     stereo_gates()
+    pulse_gates()
+    mean_field_gates()
+    driven_field_gates()
+    section_gates()
     print(f"\n{'ALL PASSED' if not FAILED else f'{len(FAILED)} FAILED: ' + '; '.join(FAILED)}")
     sys.exit(1 if FAILED else 0)

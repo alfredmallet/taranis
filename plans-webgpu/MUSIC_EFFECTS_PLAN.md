@@ -249,3 +249,129 @@ adds 11–12% on the Beths excerpt, 20% on the click track. Movies, all with ste
 **Alfred, 2026-11-21: the stereo placement "looks good"; of the two sheet variants,
 variant 1 (Elsasser sheets, 15 per kick, `--sheet-energy 2`) is the better.** The defaults
 are his to fix at step 4; `sheet-island` stays in the script as an available type.
+
+## Step 2 record (2026-11-21): E3 pulse offline
+
+`--pulse [a]` (0.08 if no value; 0 = off, the default), `--pulse-tau` (0.25 s),
+`--pulse-band` (0). Two pure functions in the script: `pulse_zoom` (zoom per frame from
+one band's onsets: an onset lifts the zoom TO 1 + a·strength and never lowers it, the
+excess decays as exp(−t/τ), causal) and `zoom_image` (bilinear, periodic wrap, about the
+image centre; exactly the input at zoom 1). The zoom is applied to the normalised frame,
+so the colour scale is computed on the unzoomed field. Gate: 10 new checks (59 in all) —
+the zoom law, the sampling against an analytic periodic field at 1.08, 1.5 and 0.5, and
+that `run(pulse=)` leaves fields and energy bitwise while the movie changes. Pulse off:
+the three baseline movies are still byte-identical.
+
+On the Beths excerpt at a = 0.08 (3.8 bass onsets/s, median strength 0.71): mean zoom
+1.034, 5–95% 1.004–1.067, above 1.02 on 79% of frames — at that onset rate the camera
+rarely gets back to 1, so it reads as a wobble about ~1.03 more than as separate hits.
+A shorter τ or a higher threshold for the pulse alone are the knobs if that is the verdict.
+
+Movies (variety, stereo gain 2, sheet energy 2): `e3_beths_pulse0.08`,
+`e3_beths_pulse0.15`, `e3_click_pulse0.08`.
+
+**Found: the script is not run-to-run reproducible at 256² on a long track, switches off
+included** (two identical 12 s Beths runs: same step count, energies differ from frame 5,
+final fields differ; also on a143b2e). At 128² and 64² on the click track runs repeat
+bitwise, which is where every "bitwise" statement in these records was made.
+**Cause, localised:** one solver step at 256² differs between calls by ~1e-8 (fp32) under
+XLA's multi-threaded CPU backend and repeats exactly with
+`XLA_FLAGS="--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1"`; the kick,
+the transforms alone and `observe` repeat exactly either way. So it is the solver's
+compiled step under threading, not the script. **Left as is (Alfred, 2026-11-21: fine not
+to be bitwise)**; the flag is the way to get a repeatable run if one is ever needed. Consequence: two
+256² movies of the same settings are different realisations after ~10 s (the three Beths
+movies of step 2 and `e12b_beths_v1` share E to 4 digits at 10 s and differ at 30 s), so
+compare effects on such movies by eye, not frame by frame.
+
+**Alfred, 2026-11-21: the pulse movie "looks good".**
+
+## Step 3 record (2026-11-21): slow trigger + E4 mean field, offline
+
+**Slow trigger** — `SectionDetector` (per-frame class, fed the same spectra as
+`CausalOnsetDetector`, so it ports the same way) and `detect_sections`. As planned, with
+these specifics: band level = log10 of band energy over a 30 s peak-hold of the total,
+floored at −60 dB, 2 s exponential smoothing; novelty = rms over bands of (mean of the last
+4 s − mean of the 4 s before), in decades; normalised by the **75th** percentile over 60 s
+but by no less than **0.1 decade** (the absolute floor: steady noise never fires);
+trigger = local maximum above **1.5**, one frame late, at most one per 8 s. It fires
+~5 s after the change (measured 5.3 s on a synthetic balance flip) and never in the first
+8 s. `--section-threshold` moves the 1.5; `--section-every N` is the fallback (every N-th
+bass onset).
+
+How it does on real tracks, which I cannot judge by ear:
+- Beths, whole track (251 s): 7 triggers, at 43, 69, 83, 133, 146, 171, 239 s.
+- Goldberg variations 1–4, 50 s of each back to back (true boundaries at 50, 100, 150 s):
+  4 triggers at 32, 55, 84, 133 s — it catches the first boundary and misses the other
+  two; dynamics INSIDE a variation move the band levels more (novelty peaks ~0.95 decade)
+  than two of the boundaries do (0.4–0.5). Band energy is a weak section cue for solo
+  piano. At percentile 90 / threshold 1.0 (first try) the counts were 7 and 11.
+
+**E4** — `--mean-field [b]` (0.5 if no value, in units of amp; 0 = off). `mean_field()`
+builds B0(t) of fixed magnitude whose angle turns by a random 45–180° either way over 2 s
+at each trigger (its own RNG stream, so the kicks keep theirs), as a jax function of
+`state.t`; `Stepper(b0=)` wraps `rhs` and `set_timestep`, `taranis/` untouched.
+
+- **Sign, derived and measured:** B0 = ẑ×∇ψ0 adds ∂tφ = (B0·∇)ψ, ∂tψ = (B0·∇)φ, so
+  ∂t z± = ±(B0·∇)z±: **z+ streams along −B0, z− along +B0**, as the plan guessed.
+- Gate (fp64, 128², no dissipation): one z+ blob after t = 2 at |B0| = 0.5 equals the
+  initial fields shifted by −B0·t to 1.4e-6 (the other direction: error 1.9), z− likewise
+  along +B0; energy change −2.8e-6; under a field turning by 2 rad the displacement is
+  ∫B0 dt to 1e-6; with both channels overlapping and nonlinear, energy to −6e-7.
+- CFL: |B0|(1/dx + 1/dy) is added to the rate (an upper bound, direction-independent),
+  and the script's "slow flow → fixed dt" test counts 2|B0| as speed. Same blob to t = 2:
+  204 adaptive steps with B0 = 0.5, 102 without.
+
+Gate: 74 checks. Switches off: the three baseline movies still byte-identical.
+
+Movies (variety, stereo gain 2, sheet energy 2, pulse 0.08): `e4_click_b0.5` (30 s,
+`--section-every 8`), `e4_beths_b0.5` and `e4_beths_b1.0` on `beths_stereo_30-150s.wav`
+(120 s, detector).
+
+Rendered: on the 120 s Beths excerpt the detector redraws the direction at 39, 53, 92,
+103, 116 s (69, 83, 122, 133, 146 s of the track; the whole-track run gave 69, 83, 133,
+146 there — the normalisation depends on the history it has seen). **Cost for the page:**
+the field's CFL rate raises the step count from ~360 to **495 steps per second of audio at
+B0 = 0.5 and 590 at B0 = 1.0** (256², this excerpt), against the ~600 steps/s the M1 was
+measured to manage live — B0 = 1 leaves no headroom there. The bass beat contrast is
+unchanged by the field (+0.14, +0.15).
+
+**Strong-field round (2026-11-21).** Alfred on `e4_beths_b0.5`/`b1.0`: streaming visible
+only early on, the direction changes not visible. Reason: the developed flow has peak
+speed ~3.5 and rms ~0.9 (units of amp), so B0 ≤ 1 is at or below the flow itself.
+Rendered `e4_beths_b3` and `e4_beths_b6` (first 60 s of the excerpt, redraws at 39 and
+53 s): 960 and 1560 steps per second of audio. In single frames of the B0 = 6 movie the
+structures are elongated along one direction, and that direction differs between 30 s and
+50 s. Energy and beat contrast are unchanged by the field (E ≈ 0.42 at 30 s in both; bass
+contrast +0.13). At these strengths the page cannot take the field through the CFL limit
+(~600 steps/s live on the M1): it would have to go into the exact linear propagator
+instead (L gains the off-diagonal ±i k·B0 pair — the putzer2 form the 2D page does not
+have today).
+
+### Bass-hit random walk and the exact linear step (2026-11-21)
+
+Alfred's verdict on the strong-field round: the field is clearly visible at 3 and 6, but
+the section trigger does not switch at sensible moments, and a fixed 1 is nearly isotropic
+once the energy has built up. His replacement, built offline:
+
+- `--field-walk [deg]` (30): each bass onset (the pulse band) turns the field by a random
+  angle, rms `deg` times the onset strength; relaxes to the new value over 0.1 s.
+- `--mean-field R` is then |B0| in units of the rms fluctuation sqrt(2E) at the time, so
+  the field keeps its hold as the energy builds (fluctuations are ~0.9 after the buildup,
+  which is why a fixed 1 looked isotropic and 3 did not).
+- `--ratio-walk s`: the ratio also random-walks by rms `s` per full-strength onset,
+  reflected into [0, R].
+- The field is held constant over each advance (at most one frame) and passed as a traced
+  argument (`Stepper(b0="driven")`), which is how the page would do it with a uniform.
+- **It is in the exact linear step** (Alfred: essential): the off-diagonal pair
+  `i k.B0` joins the solver's L as a putzer2 operator built per call with
+  `propagators.build`, nothing in `taranis/` changed. `"driven-explicit"` keeps the RHS +
+  CFL version for comparison. The section-trigger mode is still explicit.
+
+Cost, 256^2, first 60 s of the local excerpt, steps per second of audio: ratio 2 explicit
+738, exact 367; ratio walk 0-3 explicit 621, exact 368 -- the exact step costs the same
+number of steps as no field at all (~360). Wall time per step is higher (the putzer2
+coefficients are evaluated per stage), so offline wall time did not drop; on the page the
+equivalent is a 2x2 complex rotation per mode in the linear kernel.
+Gate: `driven_field_gates` (78 checks in all). Movies: `e4_beths_walk_r2.mp4`,
+`e4_beths_walk_r0-3.mp4` (exact), `*_explicit.mp4` (the same with the explicit field).

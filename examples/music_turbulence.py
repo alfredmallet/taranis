@@ -21,7 +21,15 @@
 #                               or a list, one type per band, low to high)
 #   --stereo [--stereo-gain 2]  E2: a band's blobs land where the band sits in the stereo
 #                               image (x = left..right), the bass band excepted
-#   python examples/music_turbulence_check.py   is the gate for both (fp64).
+#   --pulse [0.08]              E3: the picture zooms in by that fraction on each bass
+#                               onset and relaxes back (display only; the flow is untouched)
+#   --mean-field [0.5]          E4: a uniform in-plane magnetic field of that strength
+#                               (x amp), along which z+ and z- stream in opposite
+#                               directions; its direction is redrawn at each section
+#                               change (SectionDetector, or --section-every N bass onsets)
+#   --field-walk [--ratio-walk] instead: the direction (and |B0| / rms fluctuation) take a
+#                               random-walk step at each bass onset
+#   python examples/music_turbulence_check.py   is the gate for all of them (fp64).
 #
 # A kick is a state edit between steps, not a forcing term: `forcing` stays off and the
 # solver is untouched. The kick amplitude is a velocity increment (cm/s in CGS; here Alfven
@@ -56,6 +64,7 @@ import jax
 import jax.numpy as jnp
 
 import taranis as jr
+from taranis import propagators
 from taranis.grids import fft, ifft
 from taranis.physics import equation_registry, construct_rhs
 from taranis.timestepping import get_scheme
@@ -318,6 +327,91 @@ def detect_onsets_causal(sr, x, nbands=3, fmin=40.0, fmax=10000.0, fps=60.0, nff
             np.array(strengths)[order], det.edges, np.array(fires)[order])
 
 
+class SectionDetector:
+    """The SLOW trigger (plans-webgpu/MUSIC_EFFECTS_PLAN.md): fires when the music changes
+    character -- a section change, a few times a minute at most -- causally, from the same
+    per-frame magnitude spectra `CausalOnsetDetector` is fed (see its docstring for what
+    `mag` and `t_now` are, and for the gap rule, which is the same here).
+
+      * per band, log10 of the band energy relative to a peak-hold of the total energy
+        (decaying over `ref_decay_s`), floored at `floor_db`, then smoothed with a
+        `smooth_s` exponential;
+      * novelty = rms over the bands of (its mean over the last `win_s` seconds minus its
+        mean over the `win_s` before that), in decades;
+      * normalised by the `pct`-th percentile of the novelty over the trailing `norm_s`
+        seconds, but never by less than `min_novelty` -- the absolute floor that keeps a
+        steady passage from firing on its own fluctuations;
+      * a trigger is a local maximum of the normalised novelty above `threshold`, declared
+        one frame late, at most one per `min_gap_s`.
+
+    `push` returns [] or [(t_now, strength)], strength being the normalised novelty. A
+    change is seen about `win_s`/2 + `smooth_s` after it happens; nothing fires in the
+    first 2 `win_s`.
+    """
+
+    def __init__(self, sr, nbands=4, fmin=40.0, fmax=10000.0, fps=60.0, nfft=2048,
+                 smooth_s=2.0, win_s=4.0, norm_s=60.0, pct=75.0, threshold=1.5,
+                 min_novelty=0.1, min_gap_s=8.0, ref_decay_s=30.0, floor_db=-60.0, gap_s=0.1):
+        freqs = np.fft.rfftfreq(nfft, 1.0 / sr)
+        edges = np.geomspace(fmin, min(fmax, 0.5 * sr), nbands + 1)
+        self.sels = [(freqs >= edges[b]) & (freqs < edges[b + 1]) for b in range(nbands)]
+        self.fps, self.gap_s, self.threshold = fps, gap_s, threshold
+        self.min_novelty, self.min_gap_s, self.pct = min_novelty, min_gap_s, pct
+        self.alpha = 1.0 - np.exp(-1.0 / (smooth_s * fps))
+        self.nw = max(1, int(round(win_s * fps)))
+        self.nnorm = max(1, int(round(norm_s * fps)))
+        self.decay = np.exp(-1.0 / (ref_decay_s * fps))
+        self.floor = 10.0 ** (floor_db / 10.0)
+        self.ref, self.smooth, self.t_last = 0.0, None, None
+        self.hist, self.nov, self.last_fire = [], [], -np.inf
+
+    def push(self, mag, t_now):
+        gap = self.t_last is not None and t_now - self.t_last > self.gap_s
+        self.t_last = t_now
+        if gap:                       # the music moved on while nobody was looking
+            self.hist, self.nov, self.smooth = [], [], None
+        e = np.array([float(np.sum(mag[sel] ** 2)) for sel in self.sels])
+        self.ref = max(self.ref * self.decay, float(e.sum()), 1e-300)
+        lev = np.log10(np.maximum(e / self.ref, self.floor))
+        self.smooth = lev if self.smooth is None else self.smooth + self.alpha * (lev - self.smooth)
+        self.hist.append(self.smooth)
+        del self.hist[:-2 * self.nw]
+        if len(self.hist) < 2 * self.nw:
+            return []
+        h = np.array(self.hist)
+        d = float(np.sqrt(np.mean((h[self.nw:].mean(axis=0) - h[:self.nw].mean(axis=0)) ** 2)))
+        self.nov.append(d)
+        del self.nov[:-self.nnorm]
+        if len(self.nov) < 3:
+            return []
+        q = max(float(np.percentile(self.nov, self.pct)), self.min_novelty)
+        s0, s1, s2 = self.nov[-3] / q, self.nov[-2] / q, self.nov[-1] / q
+        t_peak = t_now - 1.0 / self.fps
+        if s1 > s0 and s1 >= s2 and s1 > self.threshold and t_peak - self.last_fire >= self.min_gap_s:
+            self.last_fire = t_peak
+            return [(t_now, s1)]
+        return []
+
+
+def detect_sections(sr, x, nbands=4, fps=60.0, nfft=2048, **kw):
+    """Run `SectionDetector` over a whole signal the way a page would see it (one Blackman
+    frame per display frame, as `detect_onsets_causal`). Returns (fire times [s], strengths,
+    the novelty trace per frame as (t, novelty in decades))."""
+    det = SectionDetector(sr, nbands=nbands, fps=fps, nfft=nfft, **kw)
+    win = np.blackman(nfft)
+    times, strengths, trace = [], [], []
+    for i in range(int(len(x) / sr * fps)):
+        end = int(round((i + 1) / fps * sr))
+        if end < nfft:
+            continue
+        mag = np.abs(np.fft.rfft(win * x[end - nfft:end])) / nfft
+        for t, s in det.push(mag, end / sr):
+            times.append(t); strengths.append(s)
+        if det.nov:
+            trace.append((end / sr, det.nov[-1]))
+    return np.array(times), np.array(strengths), np.array(trace).reshape(-1, 2)
+
+
 # ---------------------------------------------------------------------------------------
 # solver pieces
 # ---------------------------------------------------------------------------------------
@@ -327,21 +421,89 @@ class Stepper:
     that the adaptive dt would exceed it (each mode has its own Parameters and kgrid -- a
     kgrid is never reused across Parameters)."""
 
-    def __init__(self, n, dt_cap, diss, hyper, cfl=0.4):
+    def __init__(self, n, dt_cap, diss, hyper, cfl=0.4, b0=None):
+        # b0: None, (b0_of_t, b0_max) -- the in-plane mean field, see mean_field() -- or
+        # "driven": (B0x, B0y) is then an argument of each advance() call, held over it,
+        # and the field is in the EXACT linear step, so it costs no timestep
+        # ("driven-explicit": the same in the RHS and the CFL sum, for comparison)
+        self.driven = isinstance(b0, str)
+        if self.driven and b0 not in ("driven", "driven-explicit"):
+            raise ValueError(f"b0 must be None, (b0_of_t, b0_max), 'driven' or 'driven-explicit', got {b0!r}")
+        self.exact = b0 == "driven"
+        self.b0_max = 0.0 if b0 is None or self.driven else float(b0[1])
         kw = dict(nx=n, ny=n, Lx=LBOX, Ly=LBOX, cfl_safety=cfl, dims=2, comm_backend="serial",
                   eqpars={"diss": (diss, diss), "hyper": hyper})
         self.p = jr.Parameters(adaptive_timestep=True, **kw)
         self.kg = jr.setup_kgrids(self.p)
         p_fix = jr.Parameters(adaptive_timestep=False, dt=dt_cap, **kw)
-        self._adaptive = self._build(self.p, self.kg)
-        self._fixed = self._build(p_fix, jr.setup_kgrids(p_fix))
+        self._adaptive = self._build(self.p, self.kg, b0)
+        self._fixed = self._build(p_fix, jr.setup_kgrids(p_fix), b0)
         self.dt_cap, self.cfl, self.dx = dt_cap, cfl, LBOX / n
 
     @staticmethod
-    def _build(params, kgrid):
+    def _build(params, kgrid, b0=None):
         recipe = equation_registry[params.eqtype]
         rhs, set_timestep = construct_rhs(recipe), recipe.set_timestep_func
         stepper, scheme = get_scheme("lsrk33")
+        if b0 == "driven":
+            # the linear pair below, d_t (phi, psi) = i k.B0 (psi, phi), as the off-diagonal
+            # of the solver's own L: the integrating-factor step then carries the field's
+            # waves exactly at any dt (the dense 2x2 "putzer2" operator, built the way
+            # setup_kgrids builds it, from the traced B0 of this call)
+            ftype = kgrid.kx.dtype
+
+            def to_target(state, target, bvec):
+                kb = 1j * (kgrid.kx * bvec[0].astype(ftype) + kgrid.ky * bvec[1].astype(ftype))[None]
+                d = kgrid.lin.dense()
+                L = jnp.stack([jnp.stack([d[0, 0], kb + 0 * d[0, 0]]), jnp.stack([kb + 0 * d[0, 0], d[1, 1]])])
+                kg = kgrid._replace(lin=propagators.build(L, params))
+
+                def body(c):
+                    return stepper(c[0], kg, params, rhs, set_timestep, scheme), c[1] + 1
+                return jax.lax.while_loop(lambda c: c[0].t < target, body, (state, 0))
+            return jax.jit(to_target, donate_argnums=(0,))
+        if isinstance(b0, str):
+            # the same linear pair as below, with (B0x, B0y) a traced argument of the call
+            rhs0, set_timestep0 = rhs, set_timestep
+            ftype = kgrid.kx.dtype
+
+            def to_target(state, target, bvec):
+                bx, by = bvec[0].astype(ftype), bvec[1].astype(ftype)
+                kb, bmag = kgrid.kx * bx + kgrid.ky * by, jnp.sqrt(bx * bx + by * by)
+
+                def rhs(state, kgrid, params):
+                    f, grads = rhs0(state, kgrid, params)
+                    return f + 1j * kb * state.fields[::-1], grads
+
+                def set_timestep(grads, params):
+                    dt = set_timestep0(grads, params)
+                    return 1.0 / (1.0 / dt + bmag * (1.0 / params.dx + 1.0 / params.dy) / params.cfl_safety)
+
+                def body(c):
+                    return stepper(c[0], kgrid, params, rhs, set_timestep, scheme), c[1] + 1
+                return jax.lax.while_loop(lambda c: c[0].t < target, body, (state, 0))
+            return jax.jit(to_target, donate_argnums=(0,))
+        if b0 is not None:
+            # A uniform in-plane field B0 = zhat x grad(psi0) is psi -> psi + psi0 in the
+            # brackets (d_t lap phi = {psi, j} - {phi, lap phi}, d_t psi = -{phi, psi},
+            # {a, b} = a_x b_y - a_y b_x), which adds the k-local linear pair
+            #     d_t phi = (B0.grad) psi,   d_t psi = (B0.grad) phi
+            # i.e. d_t z+- = +-(B0.grad) z+-: z+ = phi + psi streams along -B0 and z-
+            # along +B0, at |B0|. It is added to the solver's RHS here (explicit), B0 a
+            # function of the traced state.t, and its rate joins the CFL sum.
+            b0_of_t, b0_max = b0
+            rhs0, set_timestep0 = rhs, set_timestep
+            ftype = kgrid.kx.dtype
+
+            def rhs(state, kgrid, params):
+                f, grads = rhs0(state, kgrid, params)
+                bx, by = b0_of_t(state.t)
+                kb = kgrid.kx * bx.astype(ftype) + kgrid.ky * by.astype(ftype)
+                return f + 1j * kb * state.fields[::-1], grads
+
+            def set_timestep(grads, params):
+                dt = set_timestep0(grads, params)
+                return 1.0 / (1.0 / dt + b0_max * (1.0 / params.dx + 1.0 / params.dy) / params.cfl_safety)
 
         def to_target(state, target):
             def body(c):
@@ -349,11 +511,32 @@ class Stepper:
             return jax.lax.while_loop(lambda c: c[0].t < target, body, (state, 0))
         return jax.jit(to_target, donate_argnums=(0,))
 
-    def advance(self, state, target, umax):
+    def advance(self, state, target, umax, bvec=None):
         # umax is the speed at entry; returns (state, steps taken). Consumes `state`.
-        slow = 0.5 * self.cfl * self.dx / max(umax, 1e-30) > self.dt_cap
-        state, nstep = (self._fixed if slow else self._adaptive)(state, target)
+        # (the mean field counts as speed: the fixed dt_cap must also resolve its waves)
+        # bvec = (B0x, B0y): required with b0 = "driven", and only then
+        if self.driven != (bvec is not None):
+            raise ValueError("bvec goes with b0 = 'driven', and only with it")
+        b0 = float(np.hypot(*bvec)) if self.driven and not self.exact else self.b0_max
+        slow = 0.5 * self.cfl * self.dx / max(umax + 2.0 * b0, 1e-30) > self.dt_cap
+        args = (jnp.asarray(bvec, float),) if self.driven else ()
+        state, nstep = (self._fixed if slow else self._adaptive)(state, target, *args)
         return state, int(nstep)
+
+
+def mean_field(b0, theta0, t_turn, dtheta, turn_s=2.0):
+    """(b0_of_t, b0) for `Stepper`: a field of fixed magnitude `b0` whose direction starts
+    at angle `theta0` from x and, at each time t_turn[i], turns by dtheta[i] over `turn_s`
+    (a smoothstep). b0_of_t(t) -> (B0x, B0y) is jax-traceable in t. Times in SIMULATION
+    units."""
+    tt = jnp.asarray(np.concatenate([[0.0], np.asarray(t_turn, float)]))
+    dd = jnp.asarray(np.concatenate([[0.0], np.asarray(dtheta, float)]))
+
+    def b0_of_t(t):
+        u = jnp.clip((t - tt) / turn_s, 0.0, 1.0)
+        th = theta0 + jnp.sum(dd * u * u * (3.0 - 2.0 * u))
+        return b0 * jnp.cos(th), b0 * jnp.sin(th)
+    return b0_of_t, float(b0)
 
 
 def make_kick(params, kgrid):
@@ -565,7 +748,19 @@ def pad(blobs):
 def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=None, diss=None,
         hyper=4, cfl=0.4, threshold=0.3, causal=False, field="speed", cmap=None, sigma_min=None, seed=0,
         duration=None, audio_path=None, quiet=False, kick_types=None, sheet_ratio=SHEET_RATIO,
-        stereo=None, stereo_gain=1.0, stereo_bands=None, sheet_energy=1.0):
+        stereo=None, stereo_gain=1.0, stereo_bands=None, sheet_energy=1.0,
+        pulse=0.0, pulse_tau=0.25, pulse_band=0, mean_field_b0=0.0, section_every=None,
+        section_kw=None, turn_s=2.0, field_walk=None, ratio_walk=0.0, walk_tau=0.1):
+    # field_walk: None, or the rms turn in DEGREES of the mean field's direction at each
+    # full-strength onset of pulse_band (a random walk; the step scales with the onset's
+    # strength). mean_field_b0 is then |B0| in units of the rms fluctuation sqrt(2 E) at the
+    # time, not of amp, so the field keeps its hold as the energy builds up; with
+    # ratio_walk > 0 that ratio also random-walks, by rms ratio_walk per full-strength
+    # onset, reflected into [0, mean_field_b0]. Both relax to their new values over walk_tau
+    # seconds. This replaces the section trigger.
+    # mean_field_b0: |B0| in units of amp (0 = off). Its direction is redrawn at each
+    # section change: SectionDetector's triggers (section_kw are its options), or with
+    # section_every = N at every N-th onset of the bass band.
     # kick_types: see kick_types_for. stereo: the (n, 2) [left, right] samples behind the
     # mono `audio` (same length), which switches stereo placement on; stereo_bands: the
     # bands that take part (default: all but the lowest -- the bass is centred in nearly
@@ -622,7 +817,33 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         # 2.3e-2, E(60)/E(10) 1.1e-2 against 1.0e-3, tail still falling to 2e-4 at k = 84).
         diss = 48.0 * amp / (n / 3.0) ** (2 * hyper)
 
-    step = Stepper(n, rate / (4.0 * fps), diss, hyper, cfl)
+    b0, sections = None, None
+    walk = None
+    if mean_field_b0 and field_walk is not None:
+        rng_b = np.random.default_rng([seed, 5])
+        th = rng_b.uniform(0.0, 2.0 * np.pi)
+        r = rng_b.uniform(0.0, mean_field_b0) if ratio_walk else float(mean_field_b0)
+        walk = dict(th=th, r=r, th_to=th, r_to=r, bvec=(0.0, 0.0), trace=[])
+        b0 = "driven"
+        if not quiet:
+            print(f"  mean field: direction walks {field_walk:.0f} deg rms per band-{pulse_band} onset, "
+                  + (f"|B0|/rms walks {ratio_walk:.2f} per onset in 0-{mean_field_b0:.2f}"
+                     if ratio_walk else f"|B0| = {mean_field_b0:.2f} rms"), flush=True)
+    elif mean_field_b0:
+        if section_every:
+            sections = t_on[b_on == 0][section_every - 1::section_every]
+        else:
+            sections = detect_sections(sr, audio, nbands=nbands, **(section_kw or {}))[0]
+        sections = sections[sections < T]
+        rng_b = np.random.default_rng([seed, 4])            # its own stream: the kicks keep theirs
+        theta0 = rng_b.uniform(0.0, 2.0 * np.pi)
+        # each turn is at least 45 degrees either way, so a section change always shows
+        dtheta = rng_b.uniform(0.25 * np.pi, np.pi, len(sections)) * rng_b.choice([-1.0, 1.0], len(sections))
+        b0 = mean_field(mean_field_b0 * amp, theta0, rate * sections, dtheta, rate * turn_s)
+        if not quiet:
+            print(f"  mean field {mean_field_b0 * amp:.2f}, direction redrawn at "
+                  + (" ".join(f"{t:.0f}" for t in sections) or "no time") + " s", flush=True)
+    step = Stepper(n, rate / (4.0 * fps), diss, hyper, cfl, b0)
     kick, observe = make_kick(step.p, step.kg)
     state = jr.initialize(lambda x, y: jnp.zeros((2, 1, n, n)), step.p)
 
@@ -633,6 +854,11 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
     events += [(i / fps, 1, i) for i in range(nframes)]
     events.sort(key=lambda ev: (ev[0], ev[1]))
 
+    # the camera pulse (display only): zoom per frame from the onsets of one band
+    zooms = None
+    if pulse:
+        sel = (b_on == pulse_band) & (t_on < T)
+        zooms = pulse_zoom(np.arange(nframes) / fps, t_on[sel], s_on[sel], pulse, pulse_tau)
     rng = np.random.default_rng(seed)
     signed = field not in ("speed", "bperp")
     cm = get_cmap(cmap or ("RdBu_r" if signed else "magma"))
@@ -640,10 +866,21 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
     writer = imageio.get_writer(video, fps=fps, codec="libx264", quality=8,
                                 macro_block_size=None, pixelformat="yuv420p")
     vmax, energy, umaxs, late, jumps = None, [], [], [], [[] for _ in range(nbands)]
-    umax, t_prev, nsteps = 0.0, 0.0, 0
+    umax, t_prev, nsteps, e, t_walk = 0.0, 0.0, 0, 0.0, 0.0
     t0 = time.perf_counter()
     for t_ev, kind, payload in events:
-        state, k = step.advance(state, rate * t_ev, umax)
+        if walk is None:
+            state, k = step.advance(state, rate * t_ev, umax)
+        else:
+            # relax towards the walk's current target, then hold B0 over this advance
+            # (events are at most a frame apart)
+            w = 1.0 - np.exp(-(t_ev - t_walk) / walk_tau)
+            walk["th"] += w * (walk["th_to"] - walk["th"])
+            walk["r"] += w * (walk["r_to"] - walk["r"])
+            t_walk = t_ev
+            bmag = walk["r"] * np.sqrt(2.0 * e)
+            walk["bvec"] = (bmag * np.cos(walk["th"]), bmag * np.sin(walk["th"]))
+            state, k = step.advance(state, rate * t_ev, umax, walk["bvec"])
         nsteps += k
         t_now = float(state.t)
         late.append((t_now - rate * t_ev) / rate)
@@ -652,6 +889,12 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         t_prev = t_now
         if kind == 0:
             band, strength, xc = payload
+            if walk is not None and band == pulse_band:
+                walk["th_to"] += np.deg2rad(field_walk) * strength * rng_b.standard_normal()
+                if ratio_walk:
+                    # reflect into [0, mean_field_b0]
+                    x = (walk["r_to"] + ratio_walk * strength * rng_b.standard_normal()) % (2.0 * mean_field_b0)
+                    walk["r_to"] = x if x <= mean_field_b0 else 2.0 * mean_field_b0 - x
             e_before = float(observe(state.fields)[2])
             bp, bm = kick_blobs(rng, kinds[band], sigmas[band], nblobs[band], amp * strength,
                                 xc, sheet_ratio, sheet_energy)
@@ -666,12 +909,16 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         if not np.isfinite(e):
             raise FloatingPointError(f"non-finite energy at t = {t_ev:.2f} s")
         energy.append(e); umaxs.append(umax)
+        if walk is not None:
+            walk["trace"].append((walk["th"], walk["r"], float(np.hypot(*walk["bvec"]))))
         img = np.asarray(imgs[field])
         # colour scale: slow-moving 99.5th percentile (time constant 4 s), so a beat shows
         # as a brightening rather than being normalised away frame by frame
         cur = max(np.percentile(np.abs(img), 99.5), 1e-12)
         vmax = cur if vmax is None else max(vmax + (cur - vmax) / (4.0 * fps), 0.5 * cur)
         u = img.T[::-1] / vmax
+        if zooms is not None:
+            u = zoom_image(u, zooms[payload])
         rgb = cm(0.5 + 0.5 * np.clip(u, -1.0, 1.0) if signed else np.clip(u, 0.0, 1.0))[..., :3]
         writer.append_data((255 * rgb).astype(np.uint8))
         if not quiet and payload % (5 * fps) == 0:
@@ -687,8 +934,38 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         os.remove(video)
 
     return dict(energy=np.array(energy), umax=np.array(umaxs), late=np.array(late), jumps=jumps,
-                onsets=(t_on, b_on, s_on), kick_types=kinds, pans=pans, edges=edges, sigmas=sigmas, nblobs=nblobs, fps=fps, diss=diss, nsteps=nsteps, fields=np.asarray(state.fields),
+                onsets=(t_on, b_on, s_on), kick_types=kinds, pans=pans, zooms=zooms, sections=sections, walk=None if walk is None else np.array(walk["trace"]), edges=edges, sigmas=sigmas, nblobs=nblobs, fps=fps, diss=diss, nsteps=nsteps, fields=np.asarray(state.fields),
                 duration=T, wall=time.perf_counter() - t0)
+
+
+def pulse_zoom(t_frames, t_on, s_on, a=0.08, tau=0.25):
+    """The camera pulse: zoom factor s >= 1 at each frame time. An onset at t0 of strength
+    q lifts the zoom TO 1 + a q (never lowers it), and between onsets s - 1 decays as
+    exp(-(t - t0)/tau). An onset at exactly a frame time is in that frame. Causal."""
+    out = np.ones(len(t_frames))
+    order = np.argsort(t_on, kind="stable")
+    t_on, s_on = np.asarray(t_on, float)[order], np.asarray(s_on, float)[order]
+    excess, t_last, j = 0.0, 0.0, 0
+    for i, t in enumerate(t_frames):
+        while j < len(t_on) and t_on[j] <= t:
+            excess = max(excess * np.exp(-(t_on[j] - t_last) / tau), a * s_on[j])
+            t_last = t_on[j]
+            j += 1
+        out[i] = 1.0 + excess * np.exp(-(t - t_last) / tau)
+    return out
+
+
+def zoom_image(img, s):
+    """`img` (square, PERIODIC) magnified by s about its centre, same shape: output pixel i
+    shows the input at c + (i - c)/s, c = (n - 1)/2, bilinear, wrapping. The box is
+    periodic, so s < 1 would show the tiling; s == 1 returns img itself."""
+    if s == 1.0:
+        return img
+    from scipy.ndimage import map_coordinates
+    n0, n1 = img.shape
+    i0 = 0.5 * (n0 - 1) + (np.arange(n0) - 0.5 * (n0 - 1)) / s
+    i1 = 0.5 * (n1 - 1) + (np.arange(n1) - 0.5 * (n1 - 1)) / s
+    return map_coordinates(img, np.meshgrid(i0, i1, indexing="ij"), order=1, mode="grid-wrap")
 
 
 BRAT_GREEN = (0x8A / 255.0, 0xCE / 255.0, 0.0)
@@ -748,6 +1025,26 @@ def main():
                     help="multiplies the pan before placement (most mixes are narrow: try 2-3)")
     ap.add_argument("--stereo-bands", default=None,
                     help="comma list of the band indices placed by pan (default: all but band 0)")
+    ap.add_argument("--pulse", type=float, nargs="?", const=0.08, default=0.0,
+                    help="E3: zoom in by this fraction (0.08 if no value) on a full-strength bass "
+                         "onset, relaxing over --pulse-tau; display only")
+    ap.add_argument("--pulse-tau", type=float, default=0.25, help="relaxation time of the pulse, seconds")
+    ap.add_argument("--pulse-band", type=int, default=0, help="the band whose onsets pulse the camera")
+    ap.add_argument("--mean-field", type=float, nargs="?", const=0.5, default=0.0,
+                    help="E4: uniform in-plane magnetic field, in units of --amp (0.5 if no value); "
+                         "z+ and z- stream along it in opposite directions")
+    ap.add_argument("--section-every", type=int, default=None,
+                    help="redraw the mean field's direction every N-th bass onset instead of at "
+                         "the detected section changes")
+    ap.add_argument("--section-threshold", type=float, default=None,
+                    help="SectionDetector threshold (default 1.5; lower = more section changes)")
+    ap.add_argument("--field-walk", type=float, nargs="?", const=30.0, default=None,
+                    help="random-walk the mean field's direction instead: rms turn in degrees "
+                         "(30 if no value) at each full-strength onset of --pulse-band. "
+                         "--mean-field is then |B0| in units of the rms fluctuation at the time")
+    ap.add_argument("--ratio-walk", type=float, default=0.0,
+                    help="with --field-walk: also random-walk |B0|/rms by this rms step per "
+                         "full-strength onset, within 0 to --mean-field")
     ap.add_argument("--click-stereo", action="store_true",
                     help="the click track in stereo: snare left, hats alternating right/left")
     ap.add_argument("--bpm", type=float, default=120.0, help="click track tempo")
@@ -781,7 +1078,11 @@ def main():
     res = run(sr, audio, a.out, n=a.n, fps=a.fps, rate=a.rate, amp=a.amp, memory=a.memory or None, nbands=a.bands, sigma_min=a.sigma_min, diss=a.diss, hyper=a.hyper, cfl=a.cfl, threshold=a.threshold, causal=a.causal,
               field=a.field, cmap=a.cmap, seed=a.seed, duration=duration, audio_path=audio_path,
               kick_types=a.kick_types, sheet_ratio=a.sheet_ratio, stereo=lr if a.stereo else None,
-              stereo_gain=a.stereo_gain, stereo_bands=stereo_bands, sheet_energy=a.sheet_energy)
+              stereo_gain=a.stereo_gain, stereo_bands=stereo_bands, sheet_energy=a.sheet_energy,
+              pulse=a.pulse, pulse_tau=a.pulse_tau, pulse_band=a.pulse_band,
+              mean_field_b0=a.mean_field, section_every=a.section_every,
+              section_kw=None if a.section_threshold is None else dict(threshold=a.section_threshold),
+              field_walk=a.field_walk, ratio_walk=a.ratio_walk)
     t_on, b_on, _ = res["onsets"]
     print(f"wrote {a.out}  ({res['wall']:.0f} s wall, {res['nsteps']} steps, diss = {res['diss']:.2e}, "
           f"events late by {1e3 * res['late'].mean():.1f} ms mean / {1e3 * res['late'].max():.1f} ms max)")
