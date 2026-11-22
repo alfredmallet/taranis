@@ -834,24 +834,26 @@ function legSync(state) {
      err < 0.023 && Math.abs(err - C.magma_fit_max_error) < 1e-5 && C.magma_table.length === 256, "max |fit - table| = " + err.toFixed(4));
   ok("  ... it starts black and ends pale: (0, 0, 0) at 0 within the fit, near (0.99, 0.99, 0.75) at 1",
      poly(maps[0].coef, 0).every(v => v < 0.02) && poly(maps[0].coef, 1)[0] > 0.95 && poly(maps[0].coef, 1)[2] > 0.7);
-  const b1 = poly(maps[1].coef, 1), b0 = poly(maps[1].coef, 0);
-  ok("brat is black at 0 and #8ACE00 at 1: (138, 206, 0) / 255",
+  // labels swapped 2026-11-21 (Alfred): `brat` is green -> black, `brat_r` black -> green
+  const dn = maps[1], up = maps[2];
+  const b1 = poly(up.coef, 1), b0 = poly(up.coef, 0);
+  ok("brat_r is black at 0 and #8ACE00 at 1: (138, 206, 0) / 255",
      b0.every(v => v === 0) && b1.map(v => Math.round(255 * v)).join() === "138,206,0" && C.brat_hex === "#8ACE00" &&
-     JSON.stringify(maps[1].coef) === JSON.stringify(C.brat_coef));
-  // brat_r is brat run backwards: the cover's green at 0 (still flow), black at 1
+     JSON.stringify(up.coef) === JSON.stringify(C.brat_r_coef));
+  // brat is the cover: its green at 0 (still flow), black at 1 -- brat_r run backwards
   let rev = 0, rmono = true;
   for (let i = 0; i <= 200; i++) {
-    const a = poly(maps[2].coef, i / 200), b = poly(maps[1].coef, 1 - i / 200);
+    const a = poly(dn.coef, i / 200), b = poly(up.coef, 1 - i / 200);
     rev = Math.max(rev, Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]), Math.abs(a[2] - b[2]));
-    if (i > 0 && !(a[1] < poly(maps[2].coef, (i - 1) / 200)[1])) rmono = false;
+    if (i > 0 && !(a[1] < poly(dn.coef, (i - 1) / 200)[1])) rmono = false;
   }
-  ok("brat_r is brat reversed: #8ACE00 at 0, black at 1, brat_r(t) = brat(1 - t) to 1e-6, green strictly falling",
-     poly(maps[2].coef, 0).map(v => Math.round(255 * v)).join() === "138,206,0" && poly(maps[2].coef, 1).every(v => Math.abs(v) < 1e-12) &&
-     rev < 1e-6 && rmono && JSON.stringify(maps[2].coef) === JSON.stringify(C.brat_r_coef), "max |brat_r(t) - brat(1-t)| = " + rev.toExponential(1));
+  ok("brat is #8ACE00 at 0 and black at 1, brat(t) = brat_r(1 - t) to 1e-6, green strictly falling",
+     poly(dn.coef, 0).map(v => Math.round(255 * v)).join() === "138,206,0" && poly(dn.coef, 1).every(v => Math.abs(v) < 1e-12) &&
+     rev < 1e-6 && rmono && JSON.stringify(dn.coef) === JSON.stringify(C.brat_coef), "max |brat(t) - brat_r(1-t)| = " + rev.toExponential(1));
   let mono = true, lin = 0;
   const luma = v => 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
   for (let i = 1; i <= 200; i++) {
-    const a = poly(maps[1].coef, (i - 1) / 200), b = poly(maps[1].coef, i / 200);
+    const a = poly(up.coef, (i - 1) / 200), b = poly(up.coef, i / 200);
     if (!(luma(b) > luma(a)) || b[0] < a[0] || b[1] < a[1]) mono = false;
     lin = Math.max(lin, Math.abs(b[0] - (i / 200) * b1[0]), Math.abs(b[1] - (i / 200) * b1[1]), b[2]);
   }
@@ -1777,12 +1779,13 @@ async function legFix(state) {
   let P = await mk(), env = P.env, A = P.A;
   const cm = JSON.parse(env.run(`function(){ const c = cards.disp[0]; return JSON.stringify({ names: cmapNames(), shared: CMAP_NAMES,
     opts: Array.from(c.selCmap.options).map(o => cmapNames()[+o.value]), sel: c.selCmap.value, cmap: c.cmap(), field: c.selField.value,
-    rgb4: cmapRGB(4, 0.37), rgb5: cmapRGB(5, 1), rgb0: cmapRGB(0, 0.37), code: solver.pl.colorize.__code, dflt: MUSIC_CMAP_DEFAULT }); }`));
+    rgb4: cmapRGB(4, 0.37), rgb5: cmapRGB(5, 0), rgb0: cmapRGB(0, 0.37), code: solver.pl.colorize.__code, dflt: MUSIC_CMAP_DEFAULT, arrows: c.cbArrow.checked }); }`));
+  ok("the music page's display starts with the arrow overlay OFF (the shared default is on)", cm.arrows === false);
   ok("the music page's colormap menu is the shared four plus magma, brat and brat_r, and the speed display starts on magma",
      cm.names.join() === "afmhot,viridis,RdBu,grayscale,magma,brat,brat_r" && cm.shared.length === 4 && cm.opts.join() === cm.names.join() &&
      cm.sel === "4" && cm.cmap === 4 && cm.dflt === 4 && cm.field === "4", cm.opts.join(" "));
   const polyOf = (co, t) => [0, 1, 2].map(c => { let v = co[6][c]; for (let k = 5; k >= 0; k--) v = v * t + co[k][c]; return Math.max(0, Math.min(1, v)); });
-  ok("the CPU twin (cmapRGB: the colour bar, the saved PNG's bar) evaluates the SAME table: magma at 0.37, brat's green at 1, afmhot unmoved",
+  ok("the CPU twin (cmapRGB: the colour bar, the saved PNG's bar) evaluates the SAME table: magma at 0.37, brat's green at 0, afmhot unmoved",
      JSON.stringify(cm.rgb4) === JSON.stringify(polyOf(M.MUSIC_CMAPS[0].coef, 0.37)) && cm.rgb5.map(v => Math.round(255 * v)).join() === "138,206,0" &&
      JSON.stringify(cm.rgb0) === JSON.stringify([0.74, 0.24, 0]));
   // the emitted display kernel carries exactly those coefficients

@@ -594,8 +594,9 @@ function musicStartError(kind, err, tabAudioLikely) {
 // table, the other pages' menus and their emitted WGSL are untouched.
 //   magma  matplotlib's, the map of the offline |u| movies: a least-squares fit to its
 //          256-point table, max channel error 0.0226 (gen_musiccmap.py prints these rows)
-//   brat   black -> #8ACE00, linear, EXACT in this form: rgb = t * (138, 206, 0) / 255
-//   brat_r brat reversed, #8ACE00 -> black: rgb = (1 - t) * (138, 206, 0) / 255 (still flow is green)
+//   brat   #8ACE00 -> black, linear, EXACT in this form: rgb = (1 - t) * (138, 206, 0) / 255
+//          (the cover: still flow is the green, the fastest is black)
+//   brat_r brat reversed, black -> #8ACE00: rgb = t * (138, 206, 0) / 255
 const MUSIC_CMAPS = [
   { name: "magma", coef: [
       [-0.002067, -0.000688, -0.009548],
@@ -607,8 +608,8 @@ const MUSIC_CMAPS = [
       [18.664253, -11.490027, -5.570769]
     ] },
   { name: "brat", coef: [
-      [0.000000, 0.000000, 0.000000],
       [0.541176, 0.807843, 0.000000],
+      [-0.541176, -0.807843, 0.000000],
       [0.000000, 0.000000, 0.000000],
       [0.000000, 0.000000, 0.000000],
       [0.000000, 0.000000, 0.000000],
@@ -616,8 +617,8 @@ const MUSIC_CMAPS = [
       [0.000000, 0.000000, 0.000000]
     ] },
   { name: "brat_r", coef: [
+      [0.000000, 0.000000, 0.000000],
       [0.541176, 0.807843, 0.000000],
-      [-0.541176, -0.807843, 0.000000],
       [0.000000, 0.000000, 0.000000],
       [0.000000, 0.000000, 0.000000],
       [0.000000, 0.000000, 0.000000],

@@ -765,7 +765,7 @@ async function boot() {
   };
   rebuild();
   // |u| is where a kick shows (7-13x the baseline frame change against 1.5x in vorticity)
-  cardsLayout({ disp: [{ sel: 4, cmap: MUSIC_CMAP_DEFAULT }], charts: ["energy", "spectrum"] });
+  cardsLayout({ disp: [{ sel: 4, cmap: MUSIC_CMAP_DEFAULT, arrows: false }], charts: ["energy", "spectrum"] });
   loop();
 }
 boot();
