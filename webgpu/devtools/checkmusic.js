@@ -1521,7 +1521,7 @@ async function legLive(state) {
   const run = async (sec) => { let k = 0; const n = Math.round(sec * 60); for (let f = 1; f <= n; f++) { await P.frame(T + f / 60); k += P.takeLog().filter(e => e.op === "kick").length; } T += sec; return k; };
 
   // ---- the select, before anything is started -------------------------------------
-  ok("the source select offers the four sources", Array.from(env.getEl("selSrc").options).map(o => o.value).join() === "click,file,tab,input");
+  ok("the source select offers the four sources", Array.from(env.getEl("selSrc").options).map(o => o.value).join() === "tab,file,input,click");
   ok("before Start the mode line says what each source will get: the click track compensated",
      /^sound delayed 56 ms, kicks held 0 ms \(output latency 0 ms, detection 56 ms\): the page plays this source$/.test(env.getEl("musicMode").textContent) &&
      env.getEl("rTrim").value === "0" && env.getEl("vTrim").textContent === "0", env.getEl("musicMode").textContent);
