@@ -110,10 +110,20 @@ function tracesBinRange(nx, ny, Lx, Ly) {
 // the amp slider -- top = TRACES_TOP * amp^2, TRACES_DECADES decades down -- and never
 // against the data, so no line moves unless the flow does and a quiet passage shows as a
 // spectrum that sinks (the same choice as the page's fixed colour scale).
+// The span grows with the grid: a k^(-5/3) range that is longer by a factor f in k falls
+// (5/3) log10 f further, so past the standard grid's k span (TRACES_KSPAN, 256 x 256) the
+// floor drops by that much -- 4 decades at 256 and below, 5 at 512, 6 at 1024 -- and the
+// dissipation range stays on the plot at any resolution. The horizontal range already
+// follows the grid (the drawn bins end at the dealias cutoff).
+const TRACES_KSPAN = 84;
+function tracesSpecDecades(bins) {
+  const span = Math.max(bins.last, bins.first + 1) / bins.first;
+  return TRACES_DECADES + Math.max(0, Math.ceil(-TRACES_SLOPE * Math.log10(span / TRACES_KSPAN) - 1e-9));
+}
 function tracesSpecRange(amp, bins) {
   const a = Math.max(amp || 0, 1e-3), e1 = TRACES_TOP * a * a;
   return { k0: bins.first * bins.kunit, k1: Math.max(bins.last, bins.first + 1) * bins.kunit,
-           e0: e1 * Math.pow(10, -TRACES_DECADES), e1: e1 };
+           e0: e1 * Math.pow(10, -tracesSpecDecades(bins)), e1: e1 };
 }
 // (k, E) -> canvas pixels in `box` {x, y, w, h} (y down), log-log over `r` {k0, k1, e0, e1}.
 // Not clamped: the caller clips to the box.

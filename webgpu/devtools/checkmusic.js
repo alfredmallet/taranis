@@ -2602,6 +2602,10 @@ async function legTraces() {
      close(T.tracesSpecRange(1, r21).k0, 1) && close(T.tracesSpecRange(1, r21).k1, 84.5));
   ok("  ... FOUR decades under 0.3 amp^2 (six was too flat in a band a fifth of the screen high), and the cut's fade is a quarter of the slider's",
      T.TRACES_DECADES === 4 && T.TRACES_TOP === 0.3 && close(T.tracesSpecRange(1, sq).e0, 3e-5) && T.TRACES_CUT_TAU_FRAC === 0.25);
+  const dg = n => { const b = T.tracesBinRange(n, n, 1, 1), r = T.tracesSpecRange(1, b); return Math.round(Math.log10(r.e1 / r.e0)); };
+  ok("  ... and the span GROWS with the grid, (5/3) log10 of the extra k range rounded up: 4 decades at 128 and 256, 5 at 512, 6 at 1024 (the top never moves)",
+     dg(128) === 4 && dg(256) === 4 && dg(512) === 5 && dg(1024) === 6 &&
+     close(T.tracesSpecRange(1, T.tracesBinRange(1024, 1024, 1, 1)).e1, T.TRACES_TOP), [128, 256, 512, 1024].map(dg).join());
   const kl = T.tracesKLabels(1, 84), kl2 = T.tracesKLabels(1, 4);
   ok("two or three wavenumber labels, from 1-2-5, inside the range", kl.join() === "1,10,50" && kl2.join() === "1,2", kl.join() + " | " + kl2.join());
   ok("colour by age: the bright end when new, the middle when old, 1/e of the way left at tau -- from either end",
