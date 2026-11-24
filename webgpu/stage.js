@@ -1,11 +1,11 @@
 "use strict";
 // ===========================================================================
 // stage.js -- the music page as a STAGE (plans-webgpu/MUSIC_STAGE_PLAN.md, S1).
-// Loaded by music.html only, and live only with `?stage` in the URL: without the flag
-// every entry point below returns at its first line, no element is created and no listener
-// is installed, so the page is the shipped one.
+// Loaded by music.html only. It is the page's layout unless the URL carries `?plain`: with
+// that flag every entry point below returns at its first line, no element is created and no
+// listener is installed, and the page is the card layout of phases 1 and 2.
 //
-// With the flag:
+// Without `?plain`:
 //   * `#stage` (position: fixed, the whole window) holds the picture -- the display card's
 //     own `.cvwrap`, moved here -- shown WHOLE, centred in the window: the sides left over are black or repeat
 //     the picture (the box is periodic) -- the page's `sides` control. The canvas backing size
@@ -32,8 +32,11 @@ const STAGE_GRACE_MS = 400;        // after a waking press is released, how long
 const STAGE_RESIZE_MS = 120;       // a window being dragged: the backing store waits for it to settle
 
 // ---- pure: the flag ---------------------------------------------------------------
-// `?stage` or `&stage`, as a whole word (so `?stagefright` is not it; `?stage=1` is)
-function stageFlag(search) { return /[?&]stage(?![\w-])/.test(String(search || "")); }
+// The stage IS the page (since 2026-11-24): on unless the URL carries `?plain` / `&plain` as
+// a whole word (`?plain=1` is it, `?plainly` is not), which keeps the card layout the page
+// was born with -- for the gates and for a look at the charts. `?stage` is accepted and
+// means nothing any more.
+function stageFlag(search) { return !/[?&]plain(?![\w-])/.test(String(search || "")); }
 
 // ---- pure: window -> canvas -------------------------------------------------------
 // The picture is a box of aspect `aspect` (width / height; 1 while the box is square)
@@ -304,7 +307,7 @@ function stageFrame(drawn) {
     c.drawImage(a.card.cv, p[0], p[1], w, h);
 }
 // where the picture is, for the trace overlay: its left edge and width in CSS pixels of
-// #stage, and whether it repeats. null without ?stage.
+// #stage, and whether it repeats. null with ?plain.
 function stagePicture() {
   if (!STAGE_ON || !stage.fit) return null;
   return { x: stage.fit.left, w: stage.fit.cssW, y: stage.fit.top, h: stage.fit.cssH, tile: stageFill() === "tile" };
@@ -318,7 +321,7 @@ function stageCss(f) {
     st.width = f.cssW.toFixed(2) + "px"; st.height = f.cssH.toFixed(2) + "px";
   }
 }
-// What music.html's cardAspect() answers under ?stage (null without it): the backing size
+// What music.html's cardAspect() answers on the stage (null with ?plain): the backing size
 // for the window AS IT IS NOW. The shared card code asks every time it re-applies a card
 // (cardsSync: a control moved, a rebuild), so a solver rebuilt with another box shape is
 // picked up with no call from here.

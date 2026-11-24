@@ -264,8 +264,10 @@ else running, plugged in.
   no analytics beacon.
 - `stage.js`, `stage.css`, `traces.js` — the music page's STAGE layout and its fading-trace
   overlays (plans-webgpu/MUSIC_STAGE_PLAN.md; see "The music page: the stage"). Loaded by
-  `music.html` only and live only with `?stage` (the traces also with `?traces`): without a
-  flag every entry point returns at its first line and no CSS rule matches. Deployed and
+  `music.html` only. The stage is the page's layout since 2026-11-24; with `?plain` (the
+  card layout of phases 1 and 2, which the gates and the charts use) every stage entry point
+  returns at its first line and no CSS rule matches, and the traces are then on only with
+  `?traces`. Deployed and
   cache-busted by `pages.yml` with the rest.
 - `gen_musicfixture.py` — records `devtools/fixtures/music_ref.json`, the offline
   `band_plan`'s and `CausalOnsetDetector`'s own output for `devtools/checkmusic.js`.
@@ -2016,11 +2018,12 @@ steps/s, 6.3 steps a frame (max 15, never at the cap of 64), no rebase, the simu
 FILE or a tab capture in a browser, and any device but the M1.
 
 
-### The music page: the stage (`?stage`; MUSIC_STAGE_PLAN)
+### The music page: the stage (the default layout; MUSIC_STAGE_PLAN)
 
-`music.html?stage` is the same page laid out to be watched: the picture fills the window,
-the controls sit in a bar and a drawer that fade after 3 s without activity, and the charts
-are gone. Without the flag the page is the card layout above. What is where:
+`music.html` is laid out to be watched: the picture fills the window, the controls sit in a
+bar and a drawer that fade after 3 s without activity, and the charts are gone.
+`music.html?plain` is the card layout described above (`stageFlag`; `?stage` is accepted
+and means nothing). What is where:
 
 - **`stage.js`** (pure parts first: `stageFlag`, `stageFit`, `stageTiles`, `stageIdleNew` /
   `stageIdleEvent`, `stageStatusPlace`, `stageFullscreen`; then the page side). `stageBuild`
@@ -2034,11 +2037,12 @@ are gone. Without the flag the page is the card layout above. What is where:
   window is another shape the `sides` select (`selFill`) leaves the two strips black or
   repeats the picture: `stageFrame(drawn)` copies the card's canvas onto `#stageTile`, a 2D
   canvas over the picture, at `stageTiles`' positions. A WebGPU canvas can only be read in
-  the task that rendered it, so `music.html` wraps `renderCards` (this page, `?stage` only)
+  the task that rendered it, so `music.html` wraps `renderCards` (this page, the stage only)
   and passes whether a card drew; on a frame with no render nothing is copied, and stale
   copies mark the card dirty so the next frame renders. The camera pulse scales
   `#stageTile` with the card's canvas. A saved PNG or a recording is the single picture.
-- **The box, the grid, the background** (`grpSim` / `grpFx`, with and without the flag):
+- **The box, the grid, the background** (`grpSim` / `grpFx`, on both layouts; the grid
+  defaults to auto on the stage and to standard with `?plain`):
   `selBox` square (default) or the window's shape (short side 2π, long side up to 2.4×,
   read at boot, Start, Reset and on a select change, never on a resize); `selGrid` auto /
   light 256×128 / standard 256×256 / sharp 512×256 (auto starts on standard, drops to light
@@ -2053,14 +2057,14 @@ are gone. Without the flag the page is the card layout above. What is where:
   uploaded at Reset. Choosing them puts `magnetic |b|` on the picture, and the fixed colour
   scale's reference becomes the sheet's peak field / 1.5 (`musicScaleRef`).
 - **`traces.js`** (`musicTraces`; pure helpers `traces*`) draws on one `<canvas
-  class="traces">` over `#stage` (or over the display card with `?traces` alone): the total
+  class="traces">` over `#stage` (or over the display card with `?plain&traces`): the total
   energy spectrum along the bottom and the displayed field's middle-row cut along the top,
   as lines that fade with age in the picture's colormap; tick labels behind a toggle. The
-  cut follows `musicTraces.picture()` (the stage's `stagePicture`) and its repeats. **Side
-  panels** (`cbTrSides`, off by default) use the two black strips instead: four spectra
-  (E_u, E_b, E+, E−) and, per `selTrSide`, the same energies against time (from the loop's
-  own stats readback) or four signed cuts u_x, b_x, z+_x, z−_x along x = Lx/2 (the solver's
-  `readCutLine`). Readbacks: the spectrum (shared with the spectrum card where one exists,
+  cut follows `musicTraces.picture()` (the stage's `stagePicture`) and its repeats. Both are OFF by default; what shows by default is the **side
+  panels** (`cbTrSides`), four in each of the two black strips, of the kind its select says
+  (`selTrA`, `selTrB`): spectra (E_u, E_b, E+, E−, each with a k^(-5/3) guide), those
+  energies against time (from the loop's own stats readback), or four signed cuts u_x, b_x,
+  z+_x, z−_x along x = Lx/2 (the solver's `readCutLine`). Readbacks: the spectrum (shared with the spectrum card where one exists,
   else its own, every 6th frame), nx + 1 four-byte copies for the top cut, one cut line.
 
 ## Alfvén-wave collision: directions, placement, χ

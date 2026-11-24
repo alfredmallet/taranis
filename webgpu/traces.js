@@ -5,7 +5,8 @@
 // in the display's own colormap. A 2D canvas laid over a host element; never part of the
 // solver, and not in a recording or a saved PNG (those are the WebGPU canvas alone).
 //
-// Live only with ?traces or ?stage in the URL. Without either this file defines names and
+// Live with the stage (the page's layout unless ?plain) and, on the card layout, with
+// ?traces. Otherwise this file defines names and
 // does nothing: groups() is empty, attach() returns null, frame() returns at once.
 //
 // What is drawn (2026-11-23, after Alfred saw the first version in Chrome):
@@ -60,7 +61,9 @@ const TRACES_TOP = 0.3;          // ... whose top is this multiple of amp^2 (see
 const TRACES_CUT_TAU_FRAC = 0.25;  // the cut fades this much FASTER: its time constant, as a fraction of the slider's
 const TRACES_SLOPE = -5 / 3;     // the guide line
 
-const TRACES_ON = typeof location !== "undefined" && /[?&](traces|stage)(?![\w-])/.test(location.search || "");
+// on with the stage (the page's layout unless `?plain`), and on the card layout with `?traces`
+function tracesFlag(search) { const q = String(search || ""); return !/[?&]plain(?![\w-])/.test(q) || /[?&]traces(?![\w-])/.test(q); }
+const TRACES_ON = typeof location !== "undefined" && tracesFlag(location.search);
 
 // ---------------------------------------------------------------------------
 // pure
@@ -273,7 +276,14 @@ const TRACES_CUT_NAMES = ["u_x", "b_x", "z+_x", "z\u2212_x"];
 // picture spans the width, above and below (four columns each). `a` is the first strip's
 // four boxes (the spectra), `b` the second's (the energies in time), each box inset by
 // `gap`. null where neither pair of strips is at least `min` across: no room, no panels.
-const TRACES_SIDE_MIN = 90;      // CSS px: the least width (or height) of a strip that takes panels
+const TRACES_SIDE_MIN = 90;
+// what a strip of side panels can show (the two selects' options), and a wanted kind made safe
+const TRACES_SIDE_KINDS = [["spec", "spectra"], ["cuts", "line cuts"], ["time", "energies in time"]];
+const TRACES_SIDE_TIP = "what this strip shows (first: left, or top on a tall window). spectra: kinetic, "
+  + "magnetic, E+ and E-, each with a k^(-5/3) guide. line cuts: the x components of u, b, z+ and z- along "
+  + "the vertical line through the middle of the box (x = Lx/2), against y. energies in time: those four "
+  + "energies' histories.";
+function tracesSideKind(v, dflt) { return v === "spec" || v === "cuts" || v === "time" ? v : dflt; }      // CSS px: the least width (or height) of a strip that takes panels
 function tracesSidePanels(W, H, x, y, w, h, min, gap) {
   const g = gap || 0, cut = (X, Y, Wd, Hd, rows) => {
     const out = [];
@@ -347,7 +357,7 @@ const musicTraces = {
   groups() {
     if (!TRACES_ON) return [];
     return [{ id: "grpTraces", summary: "traces", rows: [
-      [{ k: "cbl", id: "cbTrSpec", t: "spectrum", v: true,
+      [{ k: "cbl", id: "cbTrSpec", t: "spectrum", v: false,
          ti: "the total energy spectrum along the bottom of the picture, log-log, as lines that "
            + "fade with age; the faint straight line is k^(-5/3). The vertical range is fixed "
            + "against the amp slider." },
@@ -361,17 +371,15 @@ const musicTraces = {
          ti: "a spectrum line's opacity is exp(-age / this); it is dropped below 2%. The line "
            + "cut fades four times faster." },
        { k: "val", id: "vTrTau" }],
-      [{ k: "cbl", id: "cbTrSides", t: "side panels", v: false,
-         ti: "where the picture leaves black sides: four spectra on one side (kinetic, "
-           + "magnetic, E+, E-) and the same four energies against time on the other, fading "
-           + "as the other traces do. They take the place of the spectrum along the bottom. "
-           + "Nothing is drawn while the sides repeat the picture or are too narrow." },
-       { k: "lab", t: "second side", for: "selTrSide" },
-       { k: "sel", id: "selTrSide", o: [["time", "energies in time"], ["cuts", "line cuts"]], v: "time",
-         ti: "what the second strip of the side panels shows. energies in time: the four "
-           + "energies' histories. line cuts: the x components of u, b, z+ and z- along the "
-           + "vertical line through the middle of the box (x = Lx/2), against y, fading as "
-           + "the line cut does." }]
+      [{ k: "cbl", id: "cbTrSides", t: "side panels", v: true,
+         ti: "where the picture leaves black sides: four panels in each, of the kind chosen "
+           + "for that side, fading as the other traces do. They take the place of the "
+           + "spectrum along the bottom. Nothing is drawn while the sides repeat the picture "
+           + "or are too narrow." },
+       { k: "lab", t: "first", for: "selTrA" },
+       { k: "sel", id: "selTrA", o: TRACES_SIDE_KINDS, v: "spec", ti: TRACES_SIDE_TIP },
+       { k: "lab", t: "second", for: "selTrB" },
+       { k: "sel", id: "selTrB", o: TRACES_SIDE_KINDS, v: "time", ti: TRACES_SIDE_TIP }]
     ] }];
   },
 
@@ -395,7 +403,7 @@ const musicTraces = {
     this.busy = { spec: false, cut: false }; this.mark = { spec: null, cut: null }; this.cacheAt = null;
     const g = id => (typeof document !== "undefined" && document.querySelector && document.querySelector("#" + id))
                     || (typeof el === "function" ? el(id) : null);
-    this.ui = { spec: g("cbTrSpec"), cut: g("cbTrCut"), ticks: g("cbTrTicks"), tau: g("rTrTau"), vTau: g("vTrTau"), sides: g("cbTrSides"), side2: g("selTrSide") };
+    this.ui = { spec: g("cbTrSpec"), cut: g("cbTrCut"), ticks: g("cbTrTicks"), tau: g("rTrTau"), vTau: g("vTrTau"), sides: g("cbTrSides"), sideA: g("selTrA"), sideB: g("selTrB") };
     if (this.ui.tau) this.ui.tau.oninput = () => this.label();
     this.label();
     this.fit();
@@ -411,8 +419,9 @@ const musicTraces = {
   // what the controls say (their defaults where a control is missing)
   opts() {
     const u = this.ui || {}, t = u.tau ? parseFloat(u.tau.value) : NaN;
-    return { spec: u.spec ? !!u.spec.checked : true, cut: u.cut ? !!u.cut.checked : false,
-             sides: u.sides ? !!u.sides.checked : false, side2: u.side2 && u.side2.value === "cuts" ? "cuts" : "time",
+    return { spec: u.spec ? !!u.spec.checked : false, cut: u.cut ? !!u.cut.checked : false,
+             sides: u.sides ? !!u.sides.checked : false,
+             sideA: tracesSideKind(u.sideA && u.sideA.value, "spec"), sideB: tracesSideKind(u.sideB && u.sideB.value, "time"),
              ticks: u.ticks ? !!u.ticks.checked : true, tau: isFinite(t) && t > 0 ? t : TRACES_TAU };
   },
   dpr() { return (typeof window !== "undefined" && window.devicePixelRatio) || 1; },
@@ -437,7 +446,8 @@ const musicTraces = {
     // the side panels' energies in time: the loop's own stats readback (no read of ours),
     // at most every TRACES_ENER_MS of a state that has moved -- 30 a second whatever the
     // display's rate, so a kick shows as a step and the cap holds the longest panel
-    if (!this.opts().sides) this.ener.length = 0;
+    const oo = this.opts();
+    if (!(oo.sides && (oo.sideA === "time" || oo.sideB === "time"))) this.ener.length = 0;
     else if (sv && tracesEnerDue(this.enerAt, nowMs) && typeof statsCache !== "undefined" && statsCache.s) {
       const s = statsCache.s, mark = typeof stateMark === "function" ? stateMark() : this.frames;
       if (mark !== this.mark.ener && isFinite(s[2]) && isFinite(s[3])) {
@@ -451,7 +461,8 @@ const musicTraces = {
   // has moved since the last one (a paused page reads nothing, and its lines fade out).
   sample(sv, nowMs) {
     const o = this.opts(), mark = typeof stateMark === "function" ? stateMark() : this.frames;
-    if (!o.spec && !o.sides) { this.spec.length = 0; this.mark.spec = null; }
+    const want = k => o.sides && (o.sideA === k || o.sideB === k);   // a strip of side panels shows kind k
+    if (!o.spec && !want("spec")) { this.spec.length = 0; this.mark.spec = null; }
     else if (this.hasSpecCard()) {
       // the chart card's readback (common.js loop): take each new one once
       const c = autoDissCache;
@@ -465,7 +476,7 @@ const musicTraces = {
     // the side panels' four cuts: u_x, b_x, z+_x, z-_x (signed) along the line x = Lx/2, off the
     // solver's own cut-line readback (4 * ny floats: u_x, u_y, b_x, b_y -- what rmhd2d's
     // cut chart reads), one small map
-    if (!(o.sides && o.side2 === "cuts")) { this.rows4.length = 0; this.mark4 = null; }
+    if (!want("cuts")) { this.rows4.length = 0; this.mark4 = null; }
     else if (!this.busy4 && mark !== this.mark4 && sv.readCutLine) {
       this.busy4 = true; this.mark4 = mark; this.reads.line = (this.reads.line || 0) + 1;
       const ny = sv.p.ny;
@@ -569,7 +580,7 @@ const musicTraces = {
     // what each band will be labelled with, first: the label column is as wide as the
     // longest of them (one column for both bands), and exists only while ticks are shown
     const sv = typeof solver !== "undefined" ? solver : null;
-    const bins = !(o.spec || o.sides) ? null : this.spec.length ? this.spec[this.spec.length - 1].bins
+    const bins = !(o.spec || (o.sides && (o.sideA === "spec" || o.sideB === "spec"))) ? null : this.spec.length ? this.spec[this.spec.length - 1].bins
                : sv ? tracesBinRange(sv.p.nx, sv.p.ny, sv.p.Lx, sv.p.Ly) : null;
     const r = bins ? tracesSpecRange(this.ampOf(), bins) : null;
     const decs = r ? tracesDecades(r.e0, r.e1) : [];
@@ -588,58 +599,66 @@ const musicTraces = {
       ? tracesSidePanels(W, H, pc.x * px, pc.y * px, pc.w * px, pc.h * px, TRACES_SIDE_MIN * px, 10 * px) : null;
     if (side) {
       tracesExpire(this.ener, nowMs, o.tau);
+      tracesExpire(this.rows4, nowMs, tauCut);
       const span = 4 * o.tau;                      // s of history across an energy panel (2% opacity at its old end)
-      for (let i = 0; i < 4; i++) {
-        const A = side.a[i], Bx = side.b[i];
-        if (bins) {
-          clipTo(A);
-          for (const e of this.spec) {
-            const age = (nowMs - e.t) / 1000;
-            for (const run of tracesLaneRuns(e.perp, e.nb, e.bins, i)) {
-              const pts = [];
-              for (let j = 0; j < run.length; j += 2) { const p = tracesLogMap(run[j], run[j + 1], r, A); pts.push(p[0], p[1]); }
-              stroke(pts, age, o.tau);
+      // one panel of one strip: `kind` is what the strip shows, `i` the lane, `B` the box
+      const panel = (kind, i, B) => {
+        let title = "";
+        if (kind === "spec") {
+          // the lane's spectrum on the bottom band's own axes, with its k^(-5/3) guide
+          title = TRACES_LANES[i] + "(k)";
+          if (bins) {
+            clipTo(B);
+            const g = tracesGuide(r, B);
+            c.beginPath(); c.moveTo(g.x0, g.y0); c.lineTo(g.x1, g.y1);
+            c.strokeStyle = "rgba(0,0,0,0.3)"; c.lineWidth = 3 * px; c.stroke();
+            c.strokeStyle = tracesCss(rgb(0.5 + 0.5 * (bright - 0.5)), 0.55); c.lineWidth = px; c.stroke();
+            for (const e of this.spec) {
+              const age = (nowMs - e.t) / 1000;
+              for (const run of tracesLaneRuns(e.perp, e.nb, e.bins, i)) {
+                const pts = [];
+                for (let j = 0; j < run.length; j += 2) { const p = tracesLogMap(run[j], run[j + 1], r, B); pts.push(p[0], p[1]); }
+                stroke(pts, age, o.tau);
+              }
             }
+            c.restore();
           }
-          c.restore();
-        }
-        // the energy against time: now at the right edge, `span` seconds back at the left,
-        // from zero up to the largest value on show; each short piece fades with ITS age
-        let top = 0;
-        let hi = 0;
-        if (o.side2 === "cuts") {
+        } else if (kind === "cuts") {
           // against position along the line, signed, zero at mid-height, out to the largest |value| on show
-          tracesExpire(this.rows4, nowMs, tauCut);
+          let hi = 0;
           for (const e of this.rows4) for (const v of e.rows[i]) if (Math.abs(v) > hi) hi = Math.abs(v);
-          clipTo(Bx);
+          clipTo(B);
           if (hi > 0) for (const e of this.rows4) {
             const row = e.rows[i], n = row.length, rg = { lo: -hi / 0.92, hi: hi / 0.92 }, pts = [];
             for (let ix = 0; ix < n; ix++) {
               if (!isFinite(row[ix])) { pts.length = 0; break; }
-              const p = tracesCutMap(ix, n, row[ix], rg, Bx);
+              const p = tracesCutMap(ix, n, row[ix], rg, B);
               pts.push(p[0], p[1]);
             }
             stroke(pts, (nowMs - e.t) / 1000, tauCut);
           }
           c.restore();
-        } else for (const e of this.ener) if (e.v[i] > top) top = e.v[i];
-        if (top > 0) {
-          clipTo(Bx);
-          const at = e => [Bx.x + Bx.w * (1 - (nowMs - e.t) / 1000 / span), Bx.y + Bx.h * (1 - 0.92 * e.v[i] / top)];
-          for (let j = 0; j + 1 < this.ener.length; j += 3) {
-            const pts = [];
-            for (let q = j; q <= Math.min(j + 3, this.ener.length - 1); q++) { const p = at(this.ener[q]); pts.push(p[0], p[1]); }
-            stroke(pts, (nowMs - this.ener[Math.min(j + 3, this.ener.length - 1)].t) / 1000, o.tau);
+          title = TRACES_CUT_NAMES[i] + "(y)" + (hi > 0 ? "  \u00b1" + parseFloat(hi.toPrecision(2)) : "");
+        } else {
+          // the energy against time: now at the right edge, `span` seconds back at the left,
+          // from zero up to the largest value on show; each short piece fades with ITS age
+          let top = 0;
+          for (const e of this.ener) if (e.v[i] > top) top = e.v[i];
+          if (top > 0) {
+            clipTo(B);
+            const at = e => [B.x + B.w * (1 - (nowMs - e.t) / 1000 / span), B.y + B.h * (1 - 0.92 * e.v[i] / top)];
+            for (let j = 0; j + 1 < this.ener.length; j += 3) {
+              const pts = [];
+              for (let q = j; q <= Math.min(j + 3, this.ener.length - 1); q++) { const p = at(this.ener[q]); pts.push(p[0], p[1]); }
+              stroke(pts, (nowMs - this.ener[Math.min(j + 3, this.ener.length - 1)].t) / 1000, o.tau);
+            }
+            c.restore();
           }
-          c.restore();
+          title = TRACES_LANES[i] + "(t)" + (top > 0 ? "  max " + parseFloat(top.toPrecision(2)) : "");
         }
-        if (o.ticks) {
-          text(TRACES_LANES[i] + "(k)", A.x + A.w - pad, A.y + pad, "right", "top");
-          if (o.side2 === "cuts") {
-            text(TRACES_CUT_NAMES[i] + "(y)" + (hi > 0 ? "  \u00b1" + parseFloat(hi.toPrecision(2)) : ""), Bx.x + pad, Bx.y + pad, "left", "top");
-          } else text(TRACES_LANES[i] + "(t)" + (top > 0 ? "  max " + parseFloat(top.toPrecision(2)) : ""), Bx.x + pad, Bx.y + pad, "left", "top");
-        }
-      }
+        if (o.ticks) text(title, B.x + pad, B.y + pad, "left", "top");
+      };
+      for (let i = 0; i < 4; i++) { panel(o.sideA, i, side.a[i]); panel(o.sideB, i, side.b[i]); }
     }
     if (o.spec && !side) {
       const B = P.spec;

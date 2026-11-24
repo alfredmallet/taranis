@@ -1,6 +1,6 @@
 /* The music page as a stage (plans-webgpu/MUSIC_STAGE_PLAN.md, S1; built by stage.js).
    Linked from music.html ONLY, and every rule is scoped under `html.stage` or `#stage`,
-   both of which exist only when the URL carries ?stage -- so without the flag this file
+   both of which exist unless the URL carries ?plain -- so with that flag this file
    matches nothing and the page is the shipped one.
 
    Stacking inside #stage, low to high: the picture (.cvwrap), canvas.traces (traces.js),

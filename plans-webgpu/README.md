@@ -24,9 +24,8 @@ disagree, the file is right.
 ## Live
 
 - **MUSIC_STAGE_PLAN.md** — phase 3 of the music project, drafted, accepted and built
-  behind `?stage` 2026-11-23 (its "Build record" says what changed while Alfred watched: a
-  square box by default with black or repeated sides, side panels); the stage is not yet the
-  page's only layout. The plan as drafted: the page as a full-window stage with controls in a drawer, the box
+  2026-11-23, the page's default layout since 2026-11-24 (`?plain` keeps the card layout) (its "Build record" says what changed while Alfred watched: a
+  square box by default with black or repeated sides, side panels). The plan as drafted: the page as a full-window stage with controls in a drawer, the box
   taking the window's shape (a three-rung grid ladder, 256 × 128 to 512 × 256), the spectrum
   and line cut as fading trace overlays, and a maintained current-sheet pair as an
   alternative background to the walking mean field. No kernel changes; its four decisions are settled as proposed.

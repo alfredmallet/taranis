@@ -1029,7 +1029,7 @@ const realFails = env => env.fails.filter(f => !TOLERATED.some(id => String(f).i
 // 7. music.html, booted
 // ===========================================================================
 async function legBoot(state) {
-  const P = state.page = await musicPage("?musicdebug=energy"), env = P.env, M = state.M;
+  const P = state.page = await musicPage("?plain&musicdebug=energy"), env = P.env, M = state.M;
   ok("music.html boots under the stub with no failure of its own", realFails(env).length === 0,
      realFails(env).slice(0, 3).join(" | ") || env.fails.length + " tolerated control lookups");
   const html = fs.readFileSync(path.join(dir, "music.html"), "utf8");
@@ -1387,7 +1387,7 @@ async function legRun(state) {
 // ===========================================================================
 async function legPlain(state) {
   // ?musicdebug WITHOUT =energy: the record, and no readback per kick
-  const D = await musicPage("?musicdebug");
+  const D = await musicPage("?plain&musicdebug");
   D.env.run(MODEL, 0.004);
   D.A.t = 5;
   await D.click("btnRun");
@@ -1396,7 +1396,7 @@ async function legPlain(state) {
   ok("?musicdebug alone keeps the kick and frame records but makes NO readback per kick (one per frame); the per-kick energies are NaN",
      dd.e === false && dd.k.length > 10 && dd.f === 180 && dd.r <= 181 && dd.k.every(k => k.eBefore === null && k.eAfter === null && k.tApplied >= k.tFire),
      dd.k.length + " kicks, " + dd.r + " readbacks in 180 frames");
-  const P = await musicPage(""), env = P.env, A = P.A;
+  const P = await musicPage("?plain"), env = P.env, A = P.A;
   env.run(MODEL, 0.004);
   A.t = 5;
   await P.click("btnRun");
@@ -1411,7 +1411,7 @@ async function legPlain(state) {
   // The model the solver actually presents after silence: dt at the quiescent floor
   // (cfl*dx/0.1 = 0.098 at 256^2) until a kick, then -- from the kicked step on, which the
   // solver takes at a freshly computed dt -- a small one.
-  const Q = await musicPage("?musicdebug");
+  const Q = await musicPage("?plain&musicdebug");
   Q.env.run(MODEL, 0.098);
   Q.env.run("function(){ const k = solver.kick; solver.kick = l => { solver.__dt = 0.003; return k(l); }; }");
   Q.A.t = 5;
@@ -1440,7 +1440,7 @@ async function legPlain(state) {
      after.length === 5 && after[2].dt === Math.fround(0.003) && Math.abs(after[3].lag) <= 1 / 60 + 0.003 && after.every(f => !f.rebased),
      "lag over the next frames: " + after.map(f => (1e3 * f.lag).toFixed(0)).join(" ") + " ms");
   // ---- a 120 Hz display: the detector is still fed at its nominal 60 ---------------------
-  const H = await musicPage("?musicdebug");
+  const H = await musicPage("?plain&musicdebug");
   H.env.run(MODEL, 0.004);
   H.A.t = 5;
   await H.click("btnRun");
@@ -1453,7 +1453,7 @@ async function legPlain(state) {
      hf.length === 360 && Math.abs(H.env.run("function(){ return solver.__t; }") - 3) < 0.03 &&
      hf.slice(60).every(n => n >= 1 && n <= 4), "simulation time " + H.env.run("function(){ return solver.__t; }").toFixed(3) + " after 3 s");
   // ---- a context that is not at 44100 Hz --------------------------------------------------
-  const W = await musicPage("", 48000);
+  const W = await musicPage("?plain", 48000);
   W.A.t = 2;
   await W.click("btnRun");
   ok("on a 48 kHz AudioContext the click track is synthesised at 48 kHz and the detector is built for 48 kHz",
@@ -1461,12 +1461,12 @@ async function legPlain(state) {
      W.env.run("function(){ return music.det.sr; }") === 48000 &&
      W.env.run("function(){ return music.det.bins[0][0]; }") === Math.ceil(40 / (48000 / 2048)));
   ok("with no AudioContext in the browser, Start says so and starts nothing", await (async () => {
-    const Q = await musicPage("");
+    const Q = await musicPage("?plain");
     Q.env.run("function(){ window.AudioContext = undefined; window.webkitAudioContext = undefined; }");
     await Q.click("btnRun");
     return Q.env.run("function(){ return running; }") === false && /no Web Audio/.test(Q.env.getEl("status").textContent); })());
   ok("  ... and the prefixed webkitAudioContext is used where that is all there is", await (async () => {
-    const Q = await musicPage("");
+    const Q = await musicPage("?plain");
     Q.env.run("function(C){ window.AudioContext = undefined; window.webkitAudioContext = C; }", Q.A.Ctx);
     await Q.click("btnRun");
     return Q.env.run("function(){ return running; }") === true && Q.A.ctxs.length === 1; })());
@@ -1520,7 +1520,7 @@ async function legOthers(state) {
 async function legLive(state) {
   const M = state.M;
   const click = M.musicClickTrack({ sr: 44100, bpm: 120, beats: 16, seed: 1 }).samples;
-  const P = await musicPage("?musicdebug"), env = P.env, A = P.A, FM = fakeMedia(A, click);
+  const P = await musicPage("?plain&musicdebug"), env = P.env, A = P.A, FM = fakeMedia(A, click);
   env.run("function(m){ navigator.mediaDevices = m; }", FM.api);
   env.run(MODEL, 0.004);
   const st = () => JSON.parse(env.run(`function(){ const a = music.audio; return JSON.stringify({ run: running, starting: !!music.starting,
@@ -1780,7 +1780,7 @@ async function legLive(state) {
   ok("through all of it the page logged no failure of its own", realFails(env).length === 0, realFails(env).slice(0, 2).join(" | "));
 
   // ---- a 48 kHz context with a live source -----------------------------------------------------
-  const W = await musicPage("", 48000), FW = fakeMedia(W.A, M.musicClickTrack({ sr: 48000, bpm: 120, beats: 16, seed: 1 }).samples);
+  const W = await musicPage("?plain", 48000), FW = fakeMedia(W.A, M.musicClickTrack({ sr: 48000, bpm: 120, beats: 16, seed: 1 }).samples);
   W.env.run("function(m){ navigator.mediaDevices = m; }", FW.api);
   W.env.run(MODEL, 0.004);
   W.env.getEl("selSrc").value = "tab"; W.env.getEl("selSrc").onchange({}); await turn();
@@ -1799,7 +1799,7 @@ async function legFix(state) {
   const M = state.M, L = M.MUSIC_LDET;
   const click = M.musicClickTrack({ sr: 44100, bpm: 120, beats: 16, seed: 1 }).samples;
   const mk = async (search) => {
-    const P = await musicPage(search === undefined ? "?musicdebug" : search), FM = fakeMedia(P.A, click);
+    const P = await musicPage(search === undefined ? "?plain&musicdebug" : search), FM = fakeMedia(P.A, click);
     P.env.run("function(m){ navigator.mediaDevices = m; }", FM.api);
     P.env.run(MODEL, 0.004);
     P.FM = FM;
@@ -2083,7 +2083,7 @@ async function legFix(state) {
 // m * amp there before each render and the autoscale's maxFinal lands in a scratch buffer.
 // Off: nothing is written and the render is the class's own, dispatch for dispatch.
 async function legScale() {
-  const P = await musicPage("?musicdebug"), env = P.env;
+  const P = await musicPage("?plain&musicdebug"), env = P.env;
   env.run(`function(){
     window.__w = [];
     const q = device.queue, wb = q.writeBuffer.bind(q);
@@ -2324,7 +2324,7 @@ async function legEffects(state) {
      "max |mean - mono| " + cm.toExponential(1));
 
   // ---- the page, with its DEFAULTS, on a stereo context --------------------------------------
-  const P = await musicPage("?musicdebug", 44100, "stereo"), env = P.env, A = P.A;
+  const P = await musicPage("?plain&musicdebug", 44100, "stereo"), env = P.env, A = P.A;
   const ui = JSON.parse(env.run("function(){ return JSON.stringify(musicUi()); }"));
   ok("the page's defaults: variety kicks, sheet energy 2, stereo on at gain 2, pulse 0.08, mean field up to 1.5 rms turning 30 degrees, strength walking",
      ui.kick === "variety" && ui.sheetE === 2 && ui.stereo === true && ui.panGain === 2 && ui.pulse === 0.08 && ui.field === 1.5
@@ -2475,7 +2475,7 @@ async function legEffects(state) {
   ok("  ... and the page raised no failure of its own", realFails(env).length === 0, realFails(env).slice(0, 3).join(" | "));
 
   // a context that cannot split channels (and a mono source): placement falls back to uniform
-  const Q = await musicPage("?musicdebug", 44100, true);
+  const Q = await musicPage("?plain&musicdebug", 44100, true);
   Q.env.run(MODEL, 0.004);
   Q.A.t = 50;
   await Q.click("btnRun");
@@ -2485,7 +2485,7 @@ async function legEffects(state) {
   // ever placed (the review's finding: pan 0 used to send every band to the centre column) --
   // and it is an input device, so this is also the splitter branch's "nothing reaches the
   // speakers" row
-  const R = await musicPage("?musicdebug", 44100, "stereo"), FR = fakeMedia(R.A, c0.samples);
+  const R = await musicPage("?plain&musicdebug", 44100, "stereo"), FR = fakeMedia(R.A, c0.samples);
   R.env.run("function(m){ navigator.mediaDevices = m; }", FR.api);
   R.env.run(MODEL, 0.004);
   R.env.getEl("selSrc").value = "input"; R.env.getEl("selSrc").onchange({}); await turn();
@@ -2500,7 +2500,7 @@ async function legEffects(state) {
      rc.streamSources.length === 1 && toSpeakers(rc.streamSources[0]) === null && rc.delays.length === 0
      && rc.destination.ins.length === 0);
   // the click track is mono again when stereo placement is unticked at Start
-  const U = await musicPage("", 44100, "stereo");
+  const U = await musicPage("?plain", 44100, "stereo");
   U.env.run("function(){ el('cbStereo').checked = false; syncLabels(); }");
   await U.click("btnRun");
   const ub = U.A.ctxs[0].sources[0].buffer;
@@ -2538,9 +2538,13 @@ async function legTraces() {
      T.musicTraces.on === false && T.musicTraces.groups().length === 0 && T.musicTraces.attach({}) === null &&
      throws(() => T.musicTraces.frame(null, 0)) === "" && T.musicTraces.frames === 0);
   const flagOf = q => { const c = vm.createContext({ location: { search: q } }); vm.runInContext(src, c); return vm.runInContext("TRACES_ON", c); };
-  ok("the flag: ?traces and ?stage (alone, first or later, with a value) switch it on; nothing else does",
-     ["?traces", "?stage", "?musicdebug&traces", "?musicdebug&stage", "?traces=1", "?stage&musicdebug"].every(q => flagOf(q) === true) &&
-     ["", "?musicdebug", "?tracesx", "?stagecraft", "?notraces", "?x=traces", "?backstage"].every(q => flagOf(q) === false));
+  const tracesFlag = vm.runInContext("tracesFlag", ctx);
+  const TON = ["", undefined, "?musicdebug", "?stage", "?stage=1", "?traces", "?plainly", "?x=plain", "?explain", "?plain_2", "?plain&traces", "?traces&plain", "?plain=1&traces=1", "?a=1&plain&b&traces"];
+  const TOFF = ["?plain", "?a=1&plain", "?plain=1", "?plain&musicdebug", "?plain&tracesfoo", "?plain&traces-old", "?plain&x=traces", "?plain&notraces", "?plain&stage"];
+  ok("tracesFlag: the traces are ON unless the URL says ?plain (a whole word: ?plain=1 is it, ?plainly / ?explain / ?x=plain are not) -- and even then with ?traces (a whole word too: ?plain&tracesfoo is off); ?stage means nothing",
+     TON.every(q => tracesFlag(q) === true) && TOFF.every(q => tracesFlag(q) === false), TON.filter(q => tracesFlag(q) !== true).concat(TOFF.filter(q => tracesFlag(q) !== false)).join(" "));
+  ok("  ... and TRACES_ON is that function of location.search (false where there is no location at all, as in the bare context above)",
+     TON.filter(q => q !== undefined).every(q => flagOf(q) === true) && TOFF.every(q => flagOf(q) === false) && /const TRACES_ON = typeof location !== "undefined" && tracesFlag\(location\.search\);/.test(src));
   ok("the defaults are the plan's: every 6th frame, tau 2 s, dropped below 2%",
      T.TRACES_EVERY === 6 && T.TRACES_TAU === 2 && T.TRACES_FLOOR === 0.02);
   ok("fade weight = exp(-age / tau): 1 at age 0, 1/e at tau, 1/e^2 at 2 tau; a negative age is new",
@@ -2659,10 +2663,10 @@ async function legTraces() {
      T.tracesDecades(3e-7, 0.3).join() + " | " + T.tracesPow10(-3));
 
   // ---- without the flag: the shipped page -------------------------------------------------
-  const Z = await musicPage("?musicdebug");
+  const Z = await musicPage("?plain&musicdebug");
   const grp = env => env.descendants(env.getEl("controls"), "details").map(d => d.id);
   for (let f = 0; f < 8; f++) { Z.env.run("function(){ stateBumped(); }"); await Z.frame(); }
-  ok("without ?traces / ?stage nothing exists: no canvas.traces anywhere, no grpTraces, no frame counted, no readback started",
+  ok("with ?plain (and no ?traces) nothing exists: no canvas.traces anywhere, no grpTraces, no frame counted, no readback started",
      Z.env.allEls.every(e => e.className !== "traces") && grp(Z.env).indexOf("grpTraces") < 0 && grp(Z.env).length === 4 &&
      Z.env.run("function(){ return musicTraces.on === false && musicTraces.canvas === null && musicTraces.frames === 0 && musicTraces.reads.spec === 0 && musicTraces.reads.cut === 0; }") &&
      realFails(Z.env).length === 0, grp(Z.env).join());
@@ -2672,14 +2676,14 @@ async function legTraces() {
      Z.env.run("function(){ return nbins(256, 256, 2 * Math.PI, 2 * Math.PI) === tracesBinRange(256, 256, 2 * Math.PI, 2 * Math.PI).nb && nbins(512, 256, 4 * Math.PI, 2 * Math.PI) === tracesBinRange(512, 256, 4 * Math.PI, 2 * Math.PI).nb && nbins(256, 256, 2 * Math.PI * 16 / 9, 2 * Math.PI) === tracesBinRange(256, 256, 2 * Math.PI * 16 / 9, 2 * Math.PI).nb && solver.g.kunit === tracesBinRange(256, 256, solver.p.Lx, solver.p.Ly).kunit; }") === true);
 
   // ---- ?traces ------------------------------------------------------------------------------
-  const P = await musicPage("?traces"), env = P.env;
+  const P = await musicPage("?plain&traces"), env = P.env;
   ok("with ?traces the page boots with no failure of its own, and the frame hook is the wrapper",
      realFails(env).length === 0 && env.run("function(){ return String(frameHook).indexOf('musicTraces.frame') >= 0; }") === true, realFails(env).slice(0, 3).join(" | "));
   const q = JSON.parse(env.run(`function(){ const c = musicTraces.canvas, w = cards.disp[0].wrap;
     return JSON.stringify({ on: musicTraces.on, child: w.children.indexOf(c), last: w.children[w.children.length - 1] === c,
       n: w.children.filter(e => e.className === "traces").length, kind: c.kind, cls: c.className, st: c.style, w: c.width, h: c.height,
-      spec: el("cbTrSpec").checked, cut: el("cbTrCut").checked, ticks: el("cbTrTicks").checked, sides: el("cbTrSides").checked, side2: el("selTrSide").value,
-      side2o: el("selTrSide").options.map(o => o.value),
+      spec: el("cbTrSpec").checked, cut: el("cbTrCut").checked, ticks: el("cbTrTicks").checked, sides: el("cbTrSides").checked, sideA: el("selTrA").value, sideB: el("selTrB").value,
+      sideO: [el("selTrA"), el("selTrB")].map(e => e.options.map(o => o.value).join()),
       tau: el("rTrTau").value, vTau: el("vTrTau").textContent, o: musicTraces.opts(),
       ids: (function ids(e){ return (e.id ? [e.id] : []).concat(...(e.children || []).map(ids)); })(el("grpTraces")) }); }`));
   ok("  ... ONE <canvas class=\"traces\"> is attached to the display card's wrap, after (so over) the picture",
@@ -2688,11 +2692,25 @@ async function legTraces() {
   ok("  ... absolutely positioned to fill it, taking no pointer events, and sized from it (the stub's 512 x 512 at ratio 1)",
      q.st.position === "absolute" && q.st.left === "0" && q.st.top === "0" && q.st.width === "100%" && q.st.height === "100%" &&
      q.st.pointerEvents === "none" && q.w === 512 && q.h === 512, q.w + " x " + q.h);
-  ok("  ... the group grpTraces is there, with exactly these controls: spectrum ON, cut OFF, tick labels ON, fade 2 s, and -- on a second row -- side panels OFF with their second side on \"time\" (the other choice: \"cuts\")",
-     grp(env).indexOf("grpTraces") === grp(env).length - 1 && grp(env).length === 5 && q.spec === true && q.cut === false && q.ticks === true &&
-     q.tau === "2" && q.vTau === "2.0" && q.o.spec === true && q.o.cut === false && q.o.ticks === true && q.o.tau === 2 &&
-     q.sides === false && q.side2 === "time" && q.side2o.join() === "time,cuts" && q.o.sides === false && q.o.side2 === "time" &&
-     q.ids.join() === "grpTraces,cbTrSpec,cbTrCut,cbTrTicks,rTrTau,vTrTau,cbTrSides,selTrSide", q.ids.join());
+  ok("  ... the group grpTraces is there, with exactly these controls: spectrum OFF, cut OFF, tick labels ON, fade 2 s, and -- on a second row -- side panels ON with their first strip on \"spec\" and their second on \"time\" (each select offers spec / cuts / time; the one-select selTrSide is gone)",
+     grp(env).indexOf("grpTraces") === grp(env).length - 1 && grp(env).length === 5 && q.spec === false && q.cut === false && q.ticks === true &&
+     q.tau === "2" && q.vTau === "2.0" && q.o.spec === false && q.o.cut === false && q.o.ticks === true && q.o.tau === 2 &&
+     q.sides === true && q.sideA === "spec" && q.sideB === "time" && q.sideO.join("|") === "spec,cuts,time|spec,cuts,time" && !env.allEls.some(e => e.id === "selTrSide") &&
+     q.o.sides === true && q.o.sideA === "spec" && q.o.sideB === "time" && !("side2" in q.o) &&
+     q.ids.join() === "grpTraces,cbTrSpec,cbTrCut,cbTrTicks,rTrTau,vTrTau,cbTrSides,selTrA,selTrB", q.ids.join());
+  // On THIS page (?plain&traces: the card layout) nobody tells the traces where the picture
+  // is, so the side panels have nowhere to go, and the spectrum box is unticked: at its
+  // defaults the overlay draws nothing at all.
+  const dflt = env.run(`function(){ const c = musicTraces.ctx, s0 = c.stroke; let n = 0; c.stroke = () => { n++; return s0(); };
+    const nb = solver.nb, p = new Float32Array(3 * nb); for (let b = 1; b < nb; b++) p[b] = p[nb + b] = 0.005 * Math.pow(b, -5 / 3);
+    musicTraces.spec = [{ t: 50000, perp: p, nb: nb, bins: tracesBinRange(256, 256, 2 * Math.PI, 2 * Math.PI) }]; musicTraces.ener = [{ t: 49000, v: [1, 1, 1, 1] }, { t: 50000, v: [2, 2, 2, 2] }];
+    c.__texts.length = 0; musicTraces.draw(50000); c.stroke = s0; const out = [n, c.__texts.length, musicTraces.picture === null].join(); musicTraces.spec = []; musicTraces.ener = []; return out; }`);
+  ok("  ... and at those defaults, on this card page (no picture hook: musicTraces.picture is null), the overlay strokes nothing and writes nothing even with a spectrum and energies to show -- until a box is ticked", dflt === "0,0,true", dflt);
+  // (every row from here to the side panels' own section was written for the bottom spectrum
+  // with the side panels off, the defaults until 2026-11-24: both boxes are put that way here,
+  // through the controls, and those rows go on testing what they tested)
+  env.getEl("cbTrSpec").checked = true;
+  env.getEl("cbTrSides").checked = false;
   // a resize: the stub has no ResizeObserver, so the canvas looks at its host every frame
   env.run("function(){ const w = cards.disp[0].wrap; w.clientWidth = 300; w.clientHeight = 200; window.devicePixelRatio = 2; }");
   await P.frame();
@@ -3005,7 +3023,7 @@ async function legTraces() {
   env.getEl("cbTrSpec").checked = false;
   ok("with both overlays off nothing is stroked or written", draw(200000).length === 0 && cx.__texts.length === 0);
   ok("nothing non-finite reached the canvas, and the page logged no failure of its own through all of it", realFails(env).length === 0, realFails(env).slice(0, 3).join(" | "));
-  { // ---- the side panels (cbTrSides, off by default) ----------------------------------------------
+  { // ---- the side panels (cbTrSides: on by default, switched off above for the rows before this) ----
   // Where the page says where the picture is (musicTraces.picture, the stage's) and it leaves
   // two strips of the host free, eight panels take the place of the bottom spectrum: four
   // spectra (E_u, E_b, E+, E-) in the first strip and, in the second, the same four
@@ -3013,7 +3031,7 @@ async function legTraces() {
   // own cut line, x = Lx/2). What the stub cannot say: what any of it looks like, or that the numbers a
   // GPU hands back are these (every stub readback is zeros; the rows that need values put
   // them in by hand, and say so).
-  const TS = vm.runInContext("({ tracesLane, tracesLaneRuns, tracesSidePanels, tracesLineFields, TRACES_LANES, TRACES_CUT_NAMES, TRACES_SIDE_MIN })", ctx);
+  const TS = vm.runInContext("({ tracesLane, tracesLaneRuns, tracesSidePanels, tracesLineFields, tracesSideKind, tracesGuide, TRACES_LANES, TRACES_CUT_NAMES, TRACES_SIDE_MIN, TRACES_SIDE_KINDS })", ctx);
   ok("tracesLane: 0 is E_u, 1 is E_b, 2 is E+ = E_u + E_b + H_c, 3 is E- = E_u + E_b - H_c -- (3, 2, 1) -> 3, 2, 6, 4 -- which is common.js's SPEC_SETS convention, named E_u, E_b, E+, E−",
      [0, 1, 2, 3].map(i => TS.tracesLane(i, 3, 2, 1)).join() === "3,2,6,4" && [0, 1, 2, 3].map(i => TS.tracesLane(i, 3, 2, -1)).join() === "3,2,4,6" &&
      Array.from(TS.TRACES_LANES).join() === "E_u,E_b,E+,E\u2212" &&
@@ -3069,12 +3087,18 @@ async function legTraces() {
      JSON.stringify(Array.from(lmY).map(r => Array.from(r))) === JSON.stringify(Array.from(lm).map(r => Array.from(r))) &&
      Array.from(TS.TRACES_CUT_NAMES).join() === "u_x,b_x,z+_x,z−_x" && vm.runInContext("typeof tracesLineMags", ctx) === "undefined", Array.from(lm).map(r => Array.from(r).join("/")).join("  "));
 
+  ok("tracesSideKind: what a strip shows is \"spec\", \"cuts\" or \"time\" (TRACES_SIDE_KINDS, the two selects' options), and anything else -- a missing control -- is the default handed in",
+     ["spec", "cuts", "time"].every(k => TS.tracesSideKind(k, "x") === k) && [undefined, null, "", "Spec", "energy", 0].every(v => TS.tracesSideKind(v, "time") === "time" && TS.tracesSideKind(v, "spec") === "spec") &&
+     Array.from(TS.TRACES_SIDE_KINDS).map(k => k[0]).join() === "spec,cuts,time");
+  ok("  ... and with no controls at all (traces.js in the bare context) opts() is: spectrum off, cut off, side panels OFF, first strip spec, second strip time, ticks on, fade 2 s",
+     JSON.stringify(T.musicTraces.opts()) === JSON.stringify({ spec: false, cut: false, sides: false, sideA: "spec", sideB: "time", ticks: true, tau: 2 }), JSON.stringify(T.musicTraces.opts()));
+
   // ---- on the page: OFF, the overlay is what it was ------------------------------------------------
   const sq = () => JSON.parse(env.run(`function(){ return JSON.stringify({ ener: musicTraces.ener.map(e => e.v), rows4: musicTraces.rows4.map(e => e.rows.map(r => r.length)),
     spec: musicTraces.spec.length, line: musicTraces.reads.line || 0, o: musicTraces.opts(), old: typeof musicTraces.readPlane + typeof musicTraces.stage4 + typeof tracesSideRow }); }`));
   const sq0 = sq();
-  ok("side panels OFF (the default), through every frame and readback above: no energy history, no line cuts, the solver's readCutLine never called (reads.line never counted), and nothing of the withdrawn plane read exists (readPlane, stage4, tracesSideRow)",
-     sq0.o.sides === false && sq0.o.side2 === "time" && sq0.ener.length === 0 && sq0.rows4.length === 0 && sq0.line === 0 && st().cutline === 0 && sq0.old === "undefinedundefinedundefined", JSON.stringify(sq0));
+  ok("side panels OFF (switched off above), through every frame and readback since: no energy history, no line cuts, the solver's readCutLine never called (reads.line never counted), and nothing of the withdrawn plane read exists (readPlane, stage4, tracesSideRow)",
+     sq0.o.sides === false && sq0.o.sideA === "spec" && sq0.o.sideB === "time" && sq0.ener.length === 0 && sq0.rows4.length === 0 && sq0.line === 0 && st().cutline === 0 && sq0.old === "undefinedundefinedundefined", JSON.stringify(sq0));
   const LRPIC = { x: 156, y: 0, w: 200, h: 512, tile: false }, TBPIC = { x: 0, y: 150, w: 512, h: 212, tile: false };
   const panelsOf = (pic, i, second) => pic === LRPIC ? { x: (second ? 356 : 0) + 10, y: 128 * i + 10, w: 136, h: 108 } : { x: 128 * i + 10, y: (second ? 362 : 0) + 10, w: 108, h: 130 };
   const enerIn = () => env.run(`function(){ musicTraces.ener = [4, 3, 2, 1, 0].map((age, j) => ({ t: 100000 - 1000 * age, v: [1, 2, 3, 4].map(m => m * (j + 1)) })); }`);
@@ -3096,53 +3120,88 @@ async function legTraces() {
   enerIn();
   const on1 = draw(100000), on1T = tx();
   const clipIs = (e, b) => sameBox(e.clip, b);
-  ok("side panels ON: the spectrum along the bottom is GONE (no guide, nothing clipped to its band, no k or decade labels) and every stroke is clipped to one of eight boxes -- per row, four strokes in the left box (two spectrum lines, halo and line) then four in the right (the energy's history in two pieces)",
-     on1.length === 32 && !on1.some(e => e.s === "rgba(0,0,0,0.3)" || sameBox(e.clip, SB) || sameBox(e.clip, SBAND)) &&
-     on1.every((e, k) => clipIs(e, panelsOf(LRPIC, k >> 3, (k & 7) >= 4))) && on1.every(e => e.dash === 0) &&
-     !on1T.some(t => /^k = |^10/.test(t[0])), on1.length + " strokes; clips " + Array.from(new Set(on1.map(e => e.clip && e.clip.join()))).length);
+  // (per row of panels: the first strip's box, then the second's. A "spec" box is six
+  // strokes -- the k^(-5/3) guide, halo and line, then the two spectrum lines, halo and
+  // line each; a "time" or a "cuts" box is four)
+  const NST = { spec: 6, time: 4, cuts: 4 };
+  const blocks = (d, pic, kA, kB, boxOf) => { const out = []; let at = 0;
+    for (let i = 0; i < 4; i++) for (const [k, sec] of [[kA, false], [kB, true]]) { const B = (boxOf || panelsOf)(pic, i, sec); out.push({ k: k, i: i, B: B, s: d.slice(at, at + NST[k]) }); at += NST[k]; }
+    return out; };
   const lane = (i, e) => [0.5 * e, 0.5 * e, 1.5 * e, 0.5 * e][i];         // inject(): E_u = E_b = H_c = e / 2
+  const guideOK = (b) => { const g = TS.tracesGuide(SR, b.B);
+    return b.s[0].s === "rgba(0,0,0,0.3)" && b.s[0].w === 3 * (b.B.w > 200 ? 2 : 1) && b.s[1].pts.length === 2 && close(b.s[1].pts[0][0], g.x0, 1e-9) && close(b.s[1].pts[0][1], g.y0, 1e-9) &&
+           close(b.s[1].pts[1][0], g.x1, 1e-9) && close(b.s[1].pts[1][1], g.y1, 1e-9) && JSON.stringify(b.s[0].pts) === JSON.stringify(b.s[1].pts); };
+  const kindOK = b => {
+    if (b.s.length !== NST[b.k] || !b.s.every(e => clipIs(e, b.B) && e.dash === 0)) return false;
+    if (b.k === "spec") { const ln = b.s[5], p0 = T.tracesLogMap(1, lane(b.i, 0.01), SR, b.B), p9 = T.tracesLogMap(10, lane(b.i, 0.01 * Math.pow(10, -5 / 3)), SR, b.B);
+      return guideOK(b) && ln.pts.length === 84 && close(ln.pts[0][0], b.B.x, 1e-9) && close(ln.pts[0][1], p0[1], 1e-6) && close(ln.pts[9][0], p9[0], 1e-9) && close(ln.pts[9][1], p9[1], 1e-6) &&
+             ln.s === css(cm(1), 1) && b.s[3].s === css(cm(0.5 + 0.5 / Math.E), Math.exp(-1)) && b.s[4].s === "rgba(0,0,0,0.350)"; }
+    if (b.k === "time") { const a = b.s[1], z = b.s[3], B = b.B;
+      return a.pts.length === 4 && z.pts.length === 2 && [4, 3, 2, 1].every((age, j) => close(a.pts[j][0], B.x + B.w * (1 - age / 8), 1e-9) && close(a.pts[j][1], B.y + B.h * (1 - 0.92 * (j + 1) / 5), 1e-9)) &&
+             close(z.pts[0][0], a.pts[3][0], 1e-12) && close(z.pts[1][0], B.x + B.w, 1e-9) && close(z.pts[1][1], B.y + B.h * 0.08, 1e-9) &&
+             b.s[0].s === "rgba(0,0,0," + (0.35 * Math.exp(-0.5)).toFixed(3) + ")" && b.s[2].s === "rgba(0,0,0,0.350)" && z.s === css(cm(1), 1); }
+    const old = b.s[0], ln = b.s[3], B = b.B;
+    return ln.pts.length === 256 && close(ln.pts[0][0], B.x + B.w * 0.5 / 256, 1e-9) && close(ln.pts[255][0], B.x + B.w * 255.5 / 256, 1e-9) &&
+           close(ln.pts[0][1], B.y + B.h * 0.04, 1e-9) && close(ln.pts[1][1], B.y + B.h * 0.73, 1e-9) && close(ln.pts[2][1], B.y + B.h * 0.5, 1e-9) && close(ln.pts[255][1], B.y + B.h * 0.5, 1e-9) &&
+           old.s === "rgba(0,0,0," + (0.35 * Math.exp(-1)).toFixed(3) + ")" && ln.s === css(cm(1), 1); };
+  const titleOf = (k, i) => k === "spec" ? ["E_u", "E_b", "E+", "E−"][i] + "(k)" : k === "time" ? ["E_u", "E_b", "E+", "E−"][i] + "(t)  max " + 5 * (i + 1)
+                                         : ["u_x", "b_x", "z+_x", "z−_x"][i] + "(y)  ±" + (i + 1);
+  const titlesOK = (t, bl, pad) => t.length === 8 && bl.every((b, k) => JSON.stringify(t[k]) === JSON.stringify([titleOf(b.k, b.i), b.B.x + (pad || 4), b.B.y + (pad || 4), "left", "top"]));
+  const rowsIn = () => env.run(`function(){ musicTraces.rows4 = [500, 0].map(age => ({ t: 100000 - age, rows: [1, 2, 3, 4].map(m => { const r = new Float32Array(256); r[0] = m; r[1] = -m / 2; return r; }) })); }`);
+  const bl1 = blocks(on1, LRPIC, "spec", "time");
+  ok("side panels ON (first strip spec, second time, the defaults): the spectrum along the bottom is GONE (nothing clipped to its band, no k or decade labels) and every stroke is clipped to one of eight boxes -- per row, six strokes in the left box (the guide, then two spectrum lines, halo and line each) then four in the right (the energy's history in two pieces)",
+     on1.length === 40 && !on1.some(e => sameBox(e.clip, SB) || sameBox(e.clip, SBAND)) && bl1.every(b => b.s.length === NST[b.k] && b.s.every(e => clipIs(e, b.B))) && on1.every(e => e.dash === 0) &&
+     !on1T.some(t => /^k = |^10/.test(t[0])), on1.length + " strokes; clips " + Array.from(new Set(on1.map(e => e.clip && e.clip.join()))).length);
   ok("  ... the left boxes are the four SPECTRA, log-log on the bottom spectrum's own axes (k 1..84, four decades under 0.3 amp^2): E_u, E_b, E+ = 3 x and E- = 1 x the kinetic one for the injected E_u = E_b = H_c, the older line at 1/e",
-     [0, 1, 2, 3].every(i => { const A = panelsOf(LRPIC, i, false), ln = on1[8 * i + 3], old = on1[8 * i + 1], p0 = T.tracesLogMap(1, lane(i, 0.01), SR, A), p9 = T.tracesLogMap(10, lane(i, 0.01 * Math.pow(10, -5 / 3)), SR, A);
-       return ln.pts.length === 84 && close(ln.pts[0][0], A.x, 1e-9) && close(ln.pts[0][1], p0[1], 1e-6) && close(ln.pts[9][0], p9[0], 1e-9) && close(ln.pts[9][1], p9[1], 1e-6) &&
-              ln.s === css(cm(1), 1) && old.s === css(cm(0.5 + 0.5 / Math.E), Math.exp(-1)) && on1[8 * i + 2].s === "rgba(0,0,0,0.350)"; }),
-     on1[3] && on1[3].pts.length + " points; E_u at k = 1: y " + on1[3].pts[0][1]);
+     bl1.filter(b => b.k === "spec").length === 4 && bl1.filter(b => b.k === "spec").every(kindOK), on1[5] && on1[5].pts.length + " points; E_u at k = 1: y " + on1[5].pts[0][1]);
+  ok("  ... each under its own k^(-5/3) GUIDE, drawn first: tracesGuide for that box (a decade under the top at 20% of the log-k axis, to 80% of it), a dark halo then the faint line -- four guides, one per spectrum box, and none anywhere else",
+     bl1.filter(b => b.k === "spec").every(guideOK) && on1.filter(e => e.s === "rgba(0,0,0,0.3)").length === 4 && bl1.filter(b => b.k === "time").every(b => !b.s.some(e => e.s === "rgba(0,0,0,0.3)")),
+     JSON.stringify(on1[1] && on1[1].pts));
   ok("  ... the right boxes are the same four energies against TIME: 4 x the fade time across (8 s), now at the right edge, zero at the bottom and the largest value on show 0.92 of the way up, in pieces of up to four samples each faded by its own age (samples 4, 3, 2, 1, 0 s old: a piece of four, 1 s old, and a piece of two, new)",
-     [0, 1, 2, 3].every(i => { const B = panelsOf(LRPIC, i, true), a = on1[8 * i + 5], b = on1[8 * i + 7];
-       return a.pts.length === 4 && b.pts.length === 2 && [4, 3, 2, 1].every((age, j) => close(a.pts[j][0], B.x + B.w * (1 - age / 8), 1e-9) && close(a.pts[j][1], B.y + B.h * (1 - 0.92 * (j + 1) / 5), 1e-9)) &&
-              close(b.pts[0][0], a.pts[3][0], 1e-12) && close(b.pts[1][0], B.x + B.w, 1e-9) && close(b.pts[1][1], B.y + B.h * 0.08, 1e-9) &&
-              on1[8 * i + 4].s === "rgba(0,0,0," + (0.35 * Math.exp(-0.5)).toFixed(3) + ")" && on1[8 * i + 6].s === "rgba(0,0,0,0.350)" && b.s === css(cm(1), 1); }),
-     JSON.stringify(on1[7] && on1[7].pts));
-  ok("  ... with the tick labels on each box has a title and nothing else: \"E_u(k)\" ... at the left boxes' top right, \"E_u(t)  max 5\" ... (the largest value on show: 5, 10, 15, 20) at the right boxes' top left",
-     on1T.length === 8 && [0, 1, 2, 3].every(i => { const A = panelsOf(LRPIC, i, false), B = panelsOf(LRPIC, i, true), nm = ["E_u", "E_b", "E+", "E\u2212"][i];
-       return JSON.stringify(on1T[2 * i]) === JSON.stringify([nm + "(k)", A.x + A.w - 4, A.y + 4, "right", "top"]) &&
-              JSON.stringify(on1T[2 * i + 1]) === JSON.stringify([nm + "(t)  max " + 5 * (i + 1), B.x + 4, B.y + 4, "left", "top"]); }), on1T.map(t => t[0]).join(" | "));
+     bl1.filter(b => b.k === "time").length === 4 && bl1.filter(b => b.k === "time").every(kindOK), JSON.stringify(on1[9] && on1[9].pts));
+  ok("  ... with the tick labels on each box has a title and nothing else, at its top LEFT (4 px in): \"E_u(k)\" ... on the spectra, \"E_u(t)  max 5\" ... (the largest value on show: 5, 10, 15, 20) on the histories",
+     titlesOK(on1T, bl1), on1T.map(t => t[0] + "@" + t[1] + "," + t[2] + " " + t[3]).join(" | "));
   env.getEl("cbTrSpec").checked = false;
   const on2 = draw(100000);
   env.getEl("cbTrTicks").checked = false;
   const on3 = draw(100000), on3T = tx().length;
   env.getEl("cbTrTicks").checked = true;
-  ok("  ... the panels do not need the `spectrum` box (unticked: the same 32 strokes), and without tick labels they are the same strokes with no text at all",
+  ok("  ... the panels do not need the `spectrum` box (unticked, its default: the same 40 strokes), and without tick labels they are the same strokes with no text at all",
      JSON.stringify(on2) === JSON.stringify(on1) && JSON.stringify(on3) === JSON.stringify(on1) && on3T === 0);
   setPic(TBPIC);
-  const on4 = draw(100000);
-  ok("  ... a picture that spans the host's WIDTH (y 150..362) puts the panels above and below it, four columns each: the same 32 strokes, clipped to boxes 108 x 130 at x = 10, 138, 266, 394, the spectra on top",
-     on4.length === 32 && on4.every((e, k) => clipIs(e, panelsOf(TBPIC, k >> 3, (k & 7) >= 4))) && close(on4[3].pts[0][0], 10, 1e-9) && close(on4[7].pts[1][0], 10 + 108, 1e-9),
+  const on4 = draw(100000), bl4 = blocks(on4, TBPIC, "spec", "time");
+  ok("  ... a picture that spans the host's WIDTH (y 150..362) puts the panels above and below it, four columns each: the same 40 strokes, clipped to boxes 108 x 130 at x = 10, 138, 266, 394, the first strip (the spectra) on top",
+     on4.length === 40 && bl4.every(kindOK) && close(on4[5].pts[0][0], 10, 1e-9) && close(on4[9].pts[1][0], 10 + 108, 1e-9) && on4[0].clip[1] === 10 && on4[6].clip[1] === 372,
      Array.from(new Set(on4.map(e => e.clip && e.clip.join()))).join(" | "));
-  // second side = line cuts (values put in by hand: lane i's row is i + 1 at sample 0, MINUS half that at sample 1, zero after)
-  env.getEl("selTrSide").value = "cuts";
+  // second strip = line cuts (values put in by hand: lane i's row is i + 1 at sample 0, MINUS half that at sample 1, zero after)
+  env.getEl("selTrB").value = "cuts";
   setPic(LRPIC);
-  env.run(`function(){ musicTraces.rows4 = [500, 0].map(age => ({ t: 100000 - age, rows: [1, 2, 3, 4].map(m => { const r = new Float32Array(256); r[0] = m; r[1] = -m / 2; return r; }) })); }`);
-  const cu = draw(100000), cuT = tx();
-  ok("second side = line cuts: the right boxes show u_x, b_x, z+_x, z−_x along the line instead of the histories, SIGNED -- sample i at (i + 0.5) / n of the box, zero at its mid-height, the largest |value| on show 0.92 of the way from there to its top (and minus half of it 0.23 of the box below the middle), fading as the line cut does (0.5 s old: 1/e)",
-     cu.length === 32 && [0, 1, 2, 3].every(i => { const B = panelsOf(LRPIC, i, true), old = cu[8 * i + 4], ln = cu[8 * i + 7];
-       return [4, 5, 6, 7].every(k => clipIs(cu[8 * i + k], B)) && ln.pts.length === 256 && close(ln.pts[0][0], B.x + B.w * 0.5 / 256, 1e-9) && close(ln.pts[255][0], B.x + B.w * 255.5 / 256, 1e-9) &&
-              close(ln.pts[0][1], B.y + B.h * 0.04, 1e-9) && close(ln.pts[1][1], B.y + B.h * 0.73, 1e-9) && close(ln.pts[2][1], B.y + B.h * 0.5, 1e-9) && close(ln.pts[255][1], B.y + B.h * 0.5, 1e-9) &&
-              old.s === "rgba(0,0,0," + (0.35 * Math.exp(-1)).toFixed(3) + ")" && ln.s === css(cm(1), 1); }) &&
-     JSON.stringify(cu.slice(0, 4)) === JSON.stringify(on1.slice(0, 4)), cu.length + " strokes; " + JSON.stringify(cu[7] && cu[7].pts.slice(0, 3)));
-  ok("  ... titled \"u_x(y)  ±1\", \"b_x(y)  ±2\", \"z+_x(y)  ±3\", \"z−_x(y)  ±4\" (cbTrSpec is off: the left boxes keep their spectra and titles)",
-     cuT.length === 8 && [0, 1, 2, 3].every(i => cuT[2 * i + 1][0] === ["u_x", "b_x", "z+_x", "z\u2212_x"][i] + "(y)  \u00b1" + (i + 1) && cuT[2 * i + 1][3] === "left") && cuT[0][0] === "E_u(k)",
-     cuT.map(t => t[0]).join(" | "));
-  env.getEl("selTrSide").value = "time";
+  rowsIn();
+  const cu = draw(100000), cuT = tx(), blc = blocks(cu, LRPIC, "spec", "cuts");
+  ok("second strip = line cuts: the right boxes show u_x, b_x, z+_x, z−_x along the line instead of the histories, SIGNED -- sample i at (i + 0.5) / n of the box, zero at its mid-height, the largest |value| on show 0.92 of the way from there to its top (and minus half of it 0.23 of the box below the middle), fading as the line cut does (0.5 s old: 1/e)",
+     cu.length === 40 && blc.every(kindOK) && JSON.stringify(cu.slice(0, 6)) === JSON.stringify(on1.slice(0, 6)), cu.length + " strokes; " + JSON.stringify(cu[9] && cu[9].pts.slice(0, 3)));
+  ok("  ... titled \"u_x(y)  ±1\", \"b_x(y)  ±2\", \"z+_x(y)  ±3\", \"z−_x(y)  ±4\", at the top left like the rest (the left boxes keep their spectra and titles)",
+     titlesOK(cuT, blc) && cuT[1][0] === "u_x(y)  ±1" && cuT[0][0] === "E_u(k)", cuT.map(t => t[0]).join(" | "));
+  // every pairing of the two selects, the same kind twice included
+  const combos = [];
+  for (const kA of ["spec", "cuts", "time"]) for (const kB of ["spec", "cuts", "time"]) {
+    env.getEl("selTrA").value = kA; env.getEl("selTrB").value = kB;
+    inject(); enerIn(); rowsIn();
+    const d = draw(100000), t = tx(), bl = blocks(d, LRPIC, kA, kB), guides = d.filter(e => e.s === "rgba(0,0,0,0.3)").length;
+    const good = d.length === 4 * (NST[kA] + NST[kB]) && bl.every(kindOK) && titlesOK(t, bl) && guides === 4 * ((kA === "spec") + (kB === "spec")) &&
+                 bl.every(b => (b.s[0].s === "rgba(0,0,0,0.3)") === (b.k === "spec")) && !d.some(e => sameBox(e.clip, SB) || sameBox(e.clip, SBAND));
+    if (!good) combos.push(kA + "+" + kB + " (" + d.length + " strokes, " + guides + " guides)");
+  }
+  ok("all NINE pairings of the two selects (spec / cuts / time on the first strip x the same on the second, a kind twice included) draw the first select's kind in the LEFT boxes and the second's in the RIGHT: the right strokes at the right places in each box, a guide in exactly the spectrum boxes, the matching title at each top left, and never the bottom band",
+     combos.length === 0, combos.join("; "));
+  env.getEl("selTrA").value = "time"; env.getEl("selTrB").value = "spec";
+  setPic(TBPIC); inject(); enerIn(); rowsIn();
+  const sw = draw(100000), blsw = blocks(sw, TBPIC, "time", "spec");
+  ok("  ... and above / below likewise: with time first and spec second on the picture that spans the width, the histories are on TOP and the spectra (with their guides) underneath",
+     sw.length === 40 && blsw.every(kindOK) && sw[0].clip[1] === 10 && sw[4].clip[1] === 372 && sw[4].s === "rgba(0,0,0,0.3)", sw.length + " strokes");
+  env.getEl("selTrA").value = "spec";
+  setPic(LRPIC);
+  env.getEl("selTrB").value = "time";
   env.run("function(){ musicTraces.rows4 = []; }");
 
   // ---- ON, but nowhere to put them: no panels, and the bottom band is back ---------------------------
@@ -3160,7 +3219,7 @@ async function legTraces() {
   const noHook = draw(100000), noHookT = JSON.stringify(tx());
   ok("side panels ON but no room for them -- the sides repeat the picture (tile), the strips are under 90 px (56 here), the picture fills the host, has no height, or the hook answers null: NO panel is drawn and the bottom spectrum is back, stroke for stroke and label for label",
      noPanel.length === 0, noPanel.join(", "));
-  ok("  ... and on a page with no picture hook at all -- this one, ?traces without ?stage -- the option draws no panels either: the bottom spectrum as before",
+  ok("  ... and on a page with no picture hook at all -- this one, ?plain&traces: the card page -- the option draws no panels either: the bottom spectrum as before",
      env.run("function(){ return musicTraces.picture; }") === null && JSON.stringify(noHook) === JSON.stringify(base) && noHookT === baseT);
   env.getEl("cbTrSpec").checked = false;
   setPic(Object.assign({}, LRPIC, { tile: true }));
@@ -3195,7 +3254,7 @@ async function legTraces() {
   // second side = cuts: the solver's own readCutLine, here answering u = (3, 4), b = (i, 9) at sample i
   env.run(`function(){ window.__iz = []; solver.readCutLine = iz => { window.__cutline++; window.__iz.push(iz); const ny = solver.p.ny, a = new Float32Array(4 * ny);
     for (let i = 0; i < ny; i++) { a[i] = 3; a[ny + i] = 4; a[2 * ny + i] = i; a[3 * ny + i] = 9; } return Promise.resolve(a); }; }`);
-  env.getEl("selTrSide").value = "cuts";
+  env.getEl("selTrB").value = "cuts";
   reset();
   await run(12, true);
   const c1 = st(), c1q = sq();
@@ -3218,12 +3277,12 @@ async function legTraces() {
   const c3 = st();
   ok("  ... another displayed field does NOT start that history again (these cuts are not the picture's field: both lines are held), and a state that stands still reads no line",
      c2q.rows4.length === 2 && c2t === "1000,1100" && c2q.line === 4 && c3.cutline === 0 && c3.p.every(e => e.which !== "rows4") && c3.sp === 0, c2q.rows4.length + " lines; " + c3.cutline + " reads in 12 still frames");
-  env.getEl("selTrSide").value = "time";
+  env.getEl("selTrB").value = "time";
   reset();
   await run(6, true);
   const c4 = st(), c4q = sq();
   ok("  ... back on \"time\" the next sample empties the line cuts and reads no more of them", c4q.rows4.length === 0 && c4.cutline === 0 && c4.p.every(e => e.which !== "rows4") && c4q.ener.length > 0);
-  env.getEl("selTrSide").value = "cuts";
+  env.getEl("selTrB").value = "cuts";
   env.run("function(){ window.__rcl = solver.readCutLine; solver.readCutLine = undefined; }");
   reset();
   await run(12, true);
@@ -3231,7 +3290,26 @@ async function legTraces() {
   env.run("function(){ solver.readCutLine = window.__rcl; }");
   ok("  ... and a solver with no readCutLine is tolerated: frames pass, nothing is counted or pushed for the cuts, nothing is logged as a failure",
      c5.f === 12 && c5q.rows4.length === 0 && c5q.line === 0 && c5.p.every(e => e.which !== "rows4") && c5.sp === 2 && realFails(env).length === 0, realFails(env).slice(0, 2).join(" | "));
-  env.getEl("selTrSide").value = "time";
+  // what is read follows what the two strips show (the spectrum box unticked; six frames of a moving state, one due sample)
+  const sampBad = [], sampLog = [];
+  for (const kA of ["spec", "cuts", "time"]) for (const kB of ["spec", "cuts", "time"]) {
+    env.getEl("selTrA").value = kA; env.getEl("selTrB").value = kB;
+    reset();
+    await run(6, true);
+    const r6 = st(), has = k => kA === k || kB === k;
+    const got = [r6.sp > 0, r6.cutline > 0, r6.p.some(e => e.which === "ener"), r6.p.some(e => e.which === "rows4"), r6.cut > 0].join();
+    sampLog.push(kA[0] + kB[0] + ":" + r6.sp + "/" + r6.cutline + "/" + r6.p.filter(e => e.which === "ener").length);
+    if (got !== [has("spec"), has("cuts"), has("time"), has("cuts"), false].join() || r6.sp > 1 || r6.cutline > 1) sampBad.push(kA + "+" + kB + " " + got);
+  }
+  env.getEl("selTrA").value = "cuts"; env.getEl("selTrB").value = "cuts"; env.getEl("cbTrSpec").checked = true;
+  reset();
+  await run(6, true);
+  const ccs = st();
+  env.getEl("cbTrSpec").checked = false; env.getEl("selTrA").value = "spec"; env.getEl("selTrB").value = "time";
+  ok("what is sampled follows the two selects, in all nine pairings: the spectrum is read only where a strip shows spec (spec + spec: no line read, no energy pushed), the solver's cut line only where one shows cuts (cuts + cuts: no spectrum), the energies pushed only where one shows time (time + time: neither read) -- one read at most per due frame, and never a row gather",
+     sampBad.length === 0 && sampLog.length === 9, sampBad.join("; ") || sampLog.join(" "));
+  ok("  ... and cuts + cuts with the `spectrum` box TICKED does read the spectrum (for the bottom band, should the panels have no room)", ccs.sp === 1 && ccs.cutline === 1 && !ccs.p.some(e => e.which === "ener"), ccs.sp + "/" + ccs.cutline);
+  env.getEl("selTrB").value = "time";
   env.getEl("cbTrSides").checked = false;
   reset();
   await run(6, true);
@@ -3258,7 +3336,7 @@ async function legTraces() {
   // a handler that THROWS must not leave its readback marked busy for ever (each chain ends
   // .catch(console.error).then(busy = false)): tracesPush is made to throw for the next three pushes
   await turn();                                    // (whatever the frames above started has landed)
-  env.getEl("cbTrSpec").checked = true; env.getEl("cbTrCut").checked = true; env.getEl("cbTrSides").checked = true; env.getEl("selTrSide").value = "cuts";
+  env.getEl("cbTrSpec").checked = true; env.getEl("cbTrCut").checked = true; env.getEl("cbTrSides").checked = true; env.getEl("selTrB").value = "cuts";
   env.run(`function(){ musicTraces.spec = []; musicTraces.cut = []; musicTraces.rows4 = []; musicTraces.reads = { spec: 0, cut: 0, line: 0 };
     window.__errs = []; window.__cerr = console.error; console.error = e => { window.__errs.push(String(e && e.message || e)); };
     const tp = tracesPush; let k = 3; window.__tp = tp; tracesPush = function(h, e, m){ if (k > 0) { k--; throw new Error("boom in the handler"); } return tp(h, e, m); };
@@ -3282,20 +3360,20 @@ async function legTraces() {
       musicTraces.spec = [{ t: 7000000 - age, perp: p, nb: nb, bins: tracesBinRange(256, 256, 2 * Math.PI, 2 * Math.PI) }]; musicTraces.ener = []; }`, age);
     const d = draw(7000000); return [d.length, env.run("function(){ return musicTraces.rows4.length; }"), env.run("function(){ return musicTraces.spec.length; }")].join(); };
   const oc19 = oldCut(1900), oc20 = oldCut(2000);
-  ok("the side cuts fade on the CUT's clock, a quarter of the slider's 2 s: a line 1.9 s old (2.2%) is drawn in all four boxes beside the spectra of the same age, one 2.0 s old (1.8%) is dropped while those spectra (37%) stay",
-     oc19 === "16,1,1" && oc20 === "8,0,1", oc19 + " | " + oc20);
+  ok("the side cuts fade on the CUT's clock, a quarter of the slider's 2 s: a line 1.9 s old (2.2%) is drawn in all four boxes beside the spectra of the same age (and their guides), one 2.0 s old (1.8%) is dropped while those spectra (37%) stay",
+     oc19 === "24,1,1" && oc20 === "16,0,1", oc19 + " | " + oc20);
   env.run("function(){ musicTraces.rows4 = []; musicTraces.spec = []; }");
 
   // devicePixelRatio 2: the host is still 512 CSS px, the canvas 1024 backing px, and the
   // picture hook answers in CSS px -- every length of the panels and of the cut doubles
-  env.getEl("selTrSide").value = "time";
+  env.getEl("selTrB").value = "time";
   env.run("function(){ window.devicePixelRatio = 2; }");
   const box2 = (i, second) => ({ x: (second ? 712 : 0) + 20, y: 256 * i + 20, w: 272, h: 216 });
   setPic(LRPIC); inject(); enerIn();
   const hd = draw(100000), hdW = env.run("function(){ return musicTraces.canvas.width + 'x' + musicTraces.canvas.height; }"), hdT = tx();
   ok("at devicePixelRatio 2 (a 1024 x 1024 canvas on the same 512 px host) the picture's CSS box is scaled to backing pixels for the panels: the strips are 312 wide, the boxes 272 x 216 after a 20 px gap, at x = 20 and x = 732, and the titles sit 8 px inside them",
-     hdW === "1024x1024" && hd.length === 32 && hd.every((e, k) => clipIs(e, box2(k >> 3, (k & 7) >= 4))) && close(hd[7].pts[1][0], 732 + 272, 1e-9) && close(hd[3].pts[0][0], 20, 1e-9) &&
-     hdT.length === 8 && hdT[0][1] === 20 + 272 - 8 && hdT[0][2] === 28 && hdT[1][1] === 732 + 8, hdW + "; clips " + Array.from(new Set(hd.map(e => e.clip && e.clip.join()))).slice(0, 2).join(" | "));
+     hdW === "1024x1024" && hd.length === 40 && blocks(hd, LRPIC, "spec", "time", (pc, i, sec) => box2(i, sec)).every(kindOK) && close(hd[9].pts[1][0], 732 + 272, 1e-9) && close(hd[5].pts[0][0], 20, 1e-9) &&
+     hd[0].w === 6 && hd[1].w === 2 && titlesOK(hdT, blocks(hd, LRPIC, "spec", "time", (pc, i, sec) => box2(i, sec)), 8) && hdT[0][1] === 28 && hdT[0][2] === 28 && hdT[1][1] === 732 + 8, hdW + "; clips " + Array.from(new Set(hd.map(e => e.clip && e.clip.join()))).slice(0, 2).join(" | "));
   env.getEl("cbTrSpec").checked = true;
   setPic({ x: 80, y: 0, w: 352, h: 512, tile: false }); inject(); enerIn();
   const hdNarrow = draw(100000);
@@ -3303,7 +3381,7 @@ async function legTraces() {
   const hdRoom = draw(100000);
   ok("  ... and the 90 px minimum is CSS pixels there too: strips of 80 CSS px (160 backing) take no panels -- the bottom spectrum is drawn, in its band of the 1024 px canvas -- and strips of 100 do",
      hdNarrow.length === 6 && hdNarrow.every(e => e.clip && close(e.clip[1], 1024 - 204.8, 1e-9) && e.clip[0] + e.clip[2] === 1024) &&
-     hdRoom.length === 32 && hdRoom.every((e, k) => clipIs(e, { x: ((k & 7) >= 4 ? 824 : 0) + 20, y: 256 * (k >> 3) + 20, w: 160, h: 216 })), hdNarrow.length + " and " + hdRoom.length + " strokes");
+     hdRoom.length === 40 && blocks(hdRoom, LRPIC, "spec", "time", (pc, i, sec) => ({ x: (sec ? 824 : 0) + 20, y: 256 * i + 20, w: 160, h: 216 })).every(b => b.s.length === NST[b.k] && b.s.every(e => clipIs(e, b.B))), hdNarrow.length + " and " + hdRoom.length + " strokes");
   env.getEl("cbTrSpec").checked = false; env.getEl("cbTrSides").checked = false; env.getEl("cbTrCut").checked = true;
   cutIn([{ t: 200000, fill: 0, head: [2, 0, -2], max: 2, kind: "signed", mode: 0 }]);
   setPic({ x: 100, w: 256, y: 0, h: 512, tile: false });
@@ -3331,16 +3409,16 @@ async function legTraces() {
     h.clientWidth = 1280; h.clientHeight = 720; const c = musicTraces.attach(h);
     return c !== old && old.parentNode === null && c.parentNode === h && h.children.length === 1 && c.width === 1280 && c.height === 720; }`);
   ok("attach(host) takes ANY host: moved to a 1280 x 720 element, the old canvas is removed and the new one is sized from the new host", moved === true);
-  // ?stage is the same switch, and there the shell (stage.js, leg 15) has made #stage. The
+  // The stage (the bare URL) has the traces too, and there the shell (stage.js, leg 15) has made #stage. The
   // wiring line hands the traces `document.querySelector("#stage") || cards.disp[0].wrap`: in
   // a browser that is #stage itself (the canvas beside the picture, so the zoom pulse does
   // not scale it). The stub's querySelector knows no "#stage", so HERE the canvas lands on
   // the card's wrap -- which the shell has moved into #stage. Both halves are stated.
-  const S = await musicPage("?stage");
+  const S = await musicPage("");
   const stq = JSON.parse(S.env.run(`function(){ const c = musicTraces.canvas, w = cards.disp[0].wrap;
     return JSON.stringify({ on: musicTraces.on, cv: !!c, inWrap: !!c && c.parentNode === w, wrapInStage: !!stage.el && w.parentNode === stage.el,
       qs: document.querySelector("#stage") === null, n: w.children.filter(x => x.className === "traces").length }); }`));
-  ok("?stage switches the traces on too: ONE canvas, inside #stage -- under the stub on the picture's wrap (which the shell moved into #stage), because the stub cannot resolve \"#stage\"; the wiring line asks for #stage first",
+  ok("the bare URL has the traces on: ONE canvas, inside #stage -- under the stub on the picture's wrap (which the shell moved into #stage), because the stub cannot resolve \"#stage\"; the wiring line asks for #stage first",
      stq.on === true && stq.cv && stq.inWrap && stq.wrapInStage && stq.qs === true && stq.n === 1 &&
      /musicTraces\.attach\(document\.querySelector\("#stage"\) \|\| cards\.disp\[0\]\.wrap\);/.test(fs.readFileSync(path.join(dir, "music.html"), "utf8")) &&
      grp(S.env).indexOf("grpTraces") >= 0 && realFails(S.env).length === 0, JSON.stringify(stq));
@@ -3348,16 +3426,35 @@ async function legTraces() {
   await S.frame(); await S.frame();
   ok("  ... and there too the page's own frame hook runs under the traces' wrapper (musicScaleProbe: the autoscale read, 0 under the stub where it was NaN)",
      S.env.run("function(){ return music.autoMax === 0 && /the autoscale would be/.test(musicScaleReadout()) && musicTraces.frames >= 2; }") === true);
-  // the flag, by evaluating traces.js with a location of this file's making
-  const onFor = q => { const c = vm.createContext({ location: { search: q } }); vm.runInContext(src, c, { filename: "traces.js" }); return vm.runInContext("TRACES_ON && musicTraces.on && musicTraces.groups().length === 1", c); };
-  ok("the traces' flag is a whole word, by stage.js's rule: ?traces, ?stage, ?traces=1, ?stage=1 and &traces / &stage are on; ?tracesfoo, ?stage-x, ?traces-old, ?stagefright, ?traces_2, ?x=traces and nothing are off",
-     ["?traces", "?stage", "?traces=1", "?stage=1", "?musicdebug&traces", "?a=1&stage&b"].every(q => onFor(q) === true) &&
-     ["", "?tracesfoo", "?stage-x", "?traces-old", "?stagefright", "?traces_2", "?x=traces", "?backstage", "?musicdebug"].every(q => onFor(q) === false) &&
-     /const TRACES_ON = typeof location !== "undefined" && \/\[\?&\]\(traces\|stage\)\(\?!\[\\w-\]\)\/\.test\(location\.search \|\| ""\);/.test(src));
+  // On the stage the picture hook IS set, so at the defaults the side panels are what is drawn.
+  // (In a browser the traces' canvas is on #stage; the stub cannot resolve "#stage", so it is
+  // attached there by hand, on the stub's 1280 x 800 window, as the wiring line would.)
+  const sd = JSON.parse(S.env.run(`function(){ stage.el.clientWidth = 1280; stage.el.clientHeight = 800; musicTraces.attach(stage.el);
+    const c = musicTraces.ctx, R = c.rect, C = c.clip, X = c.restore, K = c.stroke, out = []; let r = null, cl = null;
+    c.rect = (...a) => { r = a; return R(...a); }; c.clip = () => { cl = r; return C(); }; c.restore = () => { cl = null; return X(); }; c.stroke = () => { out.push(cl ? cl.join() : "none"); return K(); };
+    const nb = solver.nb, p = new Float32Array(3 * nb); for (let b = 1; b < nb; b++) p[b] = p[nb + b] = p[2 * nb + b] = 0.005 * Math.pow(b, -5 / 3);
+    musicTraces.spec = [{ t: 9000000, perp: p, nb: nb, bins: tracesBinRange(256, 256, 2 * Math.PI, 2 * Math.PI) }];
+    musicTraces.ener = [{ t: 8999000, v: [1, 1, 1, 1] }, { t: 9000000, v: [2, 2, 2, 2] }];
+    c.__texts.length = 0; musicTraces.draw(9000000);
+    return JSON.stringify({ clips: out, texts: c.__texts.map(t => t.t), o: musicTraces.opts(), pic: musicTraces.picture(), wh: [musicTraces.canvas.width, musicTraces.canvas.height],
+      host: musicTraces.canvas.parentNode === stage.el, hook: musicTraces.picture === stagePicture }); }`));
+  const sdWant = [];
+  for (let i = 0; i < 4; i++) { for (let k = 0; k < 4; k++) sdWant.push([10, 200 * i + 10, 220, 180].join()); for (let k = 0; k < 2; k++) sdWant.push([1050, 200 * i + 10, 220, 180].join()); }
+  ok("on the stage AT ITS DEFAULTS (spectrum box off, side panels on: spec | time), with the traces on #stage in the 1280 x 800 window: the square picture leaves strips 240 wide and the eight panels are drawn in them -- per row a spectrum with its guide at x 10..230 and a history at x 1050..1270 -- with their titles, and no bottom band",
+     sd.host && sd.hook && sd.wh.join() === "1280,800" && sd.o.spec === false && sd.o.sides === true && sd.o.sideA === "spec" && sd.o.sideB === "time" &&
+     sd.pic.x === 240 && sd.pic.w === 800 && sd.pic.tile === false && JSON.stringify(sd.clips) === JSON.stringify(sdWant) &&
+     sd.texts.join("|") === "E_u(k)|E_u(t)  max 2|E_b(k)|E_b(t)  max 2|E+(k)|E+(t)  max 2|E−(k)|E−(t)  max 2" && realFails(S.env).length === 0, sd.clips.length + " strokes; " + sd.texts.join("|"));
+  // the flag, by booting: what a URL builds
+  const builds = async q => { const E = await musicPage(q); const g = E.env.descendants(E.env.getEl("controls"), "details").map(d => d.id);
+    return [E.env.run("function(){ return [STAGE_ON, musicTraces.on, !!stage.el, !!musicTraces.canvas, typeof musicTraces.picture === 'function'].join(); }"), g.indexOf("grpTraces") >= 0, E.env.allEls.some(e => e.id === "selFill"), E.env.getEl("selGrid").value].join(); };
+  const bPlain = await builds("?plain"), bPT = await builds("?plain&traces"), bStage = await builds("?stage"), bPTf = await builds("?plain&tracesfoo");
+  ok("what a URL builds: ?plain is the card page with no stage and no traces; ?plain&traces the card page with the traces (their group, their canvas, no picture hook); ?plain&tracesfoo is ?plain; and ?stage, which means nothing any more, is the bare URL -- the stage, its `sides` select, the traces with the picture hook, grid auto",
+     bPlain === "false,false,false,false,false,false,false,standard" && bPT === "false,true,false,true,false,true,false,standard" && bPTf === bPlain &&
+     bStage === "true,true,true,true,true,true,true,auto", [bPlain, bPT, bPTf, bStage].join(" | "));
 }
 
 // ===========================================================================
-// 15. the stage (plans-webgpu/MUSIC_STAGE_PLAN.md S1): stage.js / stage.css, live with ?stage
+// 15. the stage (plans-webgpu/MUSIC_STAGE_PLAN.md S1): stage.js / stage.css, live unless ?plain
 // ===========================================================================
 // What the stub can say: the pure rules (window -> canvas, the idle fade and the press that
 // only wakes, where a status goes, the fullscreen feature test), the STRUCTURE the page
@@ -3369,13 +3466,17 @@ async function legStage(state) {
   const src = fs.readFileSync(path.join(dir, "stage.js"), "utf8");
   const ctx = vm.createContext({});
   const msg = throws(() => vm.runInContext(src, ctx, { filename: "stage.js" }));
-  ok("stage.js evaluates in a bare context (no DOM, no location, none of the shared scripts) and is OFF there",
-     msg === "" && vm.runInContext("STAGE_ON === false && stage.el === null", ctx) === true, msg);
+  ok("stage.js evaluates in a bare context (no DOM, no location, none of the shared scripts): the flag is ON there -- the stage is the default -- and nothing is built by loading it",
+     msg === "" && vm.runInContext("STAGE_ON === true && stage.el === null && stage.idle === null && stage.timer === 0", ctx) === true, msg);
+  const ctxP = vm.createContext({ location: { search: "?plain" } });
+  vm.runInContext(src, ctxP, { filename: "stage.js" });
+  const SP = vm.runInContext("({ stageBuild, stageAdopt, stageAspect, stageResize, stageFrame, stagePicture, stageFill })", ctxP);
   const S = vm.runInContext(`({ stageFlag, stageFit, stageTiles, stageFill, stageFrame, stagePicture, stageIdleNew, stageIdleEvent, stageStatusPlace, stageFullscreen,
     stageBuild, stageAdopt, stageAspect, stageResize, STAGE_CAP, STAGE_IDLE_MS, STAGE_GRACE_MS })`, ctx);
-  ok("  ... where its entry points are no-ops: stageBuild / stageAdopt / stageResize / stageFrame do nothing, stageAspect() and stagePicture() are null, and the sides are black (stageFill() is \"bars\")",
-     throws(() => { S.stageBuild(); S.stageAdopt(); S.stageResize(true); S.stageFrame(); }) === "" && S.stageAspect() === null &&
-     S.stagePicture() === null && S.stageFill() === "bars" && vm.runInContext("stage.tile === null && stage.fit === null", ctx) === true);
+  ok("  ... and with ?plain in the URL it is OFF, its entry points no-ops (no DOM here, and none is asked for): stageBuild / stageAdopt / stageResize / stageFrame do nothing, stageAspect() and stagePicture() are null, and the sides are black (stageFill() is \"bars\")",
+     vm.runInContext("STAGE_ON", ctxP) === false && throws(() => { SP.stageBuild(); SP.stageAdopt(); SP.stageResize(true); SP.stageFrame(); SP.stageFrame(true); }) === "" && SP.stageAspect() === null &&
+     SP.stagePicture() === null && SP.stageFill() === "bars" && vm.runInContext("stage.el === null && stage.tile === null && stage.fit === null && stage.timer === 0", ctxP) === true &&
+     /function stageBuild\(\) \{\n  if \(!STAGE_ON \|\| stage\.el\) return;/.test(src) && (src.match(/\bstageListen\(\)/g) || []).length === 2);
   const names = [];
   for (const l of src.split("\n")) {
     const m = /^(?:async\s+)?(?:function\*?|const|let|var|class)\s+([A-Za-z_$][\w$]*)/.exec(l);
@@ -3389,9 +3490,13 @@ async function legStage(state) {
      names.filter(n => !/^(stage|STAGE_)/.test(n)).concat(clash).join(", "));
 
   // ---- the flag -------------------------------------------------------------------------
-  ok("stageFlag: ?stage, &stage and ?stage=1 are the flag; ?stagefright, ?backstage, ?x=stage and nothing are not",
-     ["?stage", "?musicdebug&stage", "?stage=1", "?stage&musicdebug=energy"].every(s => S.stageFlag(s) === true) &&
-     ["", "?stagefright", "?backstage", "?x=stage", "?stage_2", "?musicdebug", undefined].every(s => S.stageFlag(s) === false));
+  const SON = ["", undefined, "?musicdebug", "?stage", "?stage=1", "?musicdebug&stage", "?traces", "?plainly", "?x=plain", "?explain", "?plain_2", "?plains&a"];
+  const SOFF = ["?plain", "?musicdebug&plain", "?plain=1", "?plain&musicdebug=energy", "?plain&traces", "?traces&plain", "?plain&tracesfoo", "?plain&stage", "?stage&plain"];
+  ok("stageFlag: the stage is ON unless the URL carries ?plain / &plain as a whole word -- the bare URL, ?stage (which means nothing any more), ?plainly, ?explain and ?x=plain are on; ?plain, &plain, ?plain=1 are off, whatever else is there (?plain&traces, ?plain&stage)",
+     SON.every(q => S.stageFlag(q) === true) && SOFF.every(q => S.stageFlag(q) === false), SON.filter(q => S.stageFlag(q) !== true).concat(SOFF.filter(q => S.stageFlag(q) !== false)).join(" "));
+  ok("  ... and the two flags together: ?plain&traces is the card page WITH the traces (stage off, traces on), ?plain&tracesfoo has neither, the bare URL both",
+     (tf => [["?plain&traces", false, true], ["?plain&tracesfoo", false, false], ["", true, true], ["?plain", false, false], ["?stage", true, true], ["?traces", true, true]]
+       .every(([q, a, b]) => S.stageFlag(q) === a && tf(q) === b))((c => (vm.runInContext(fs.readFileSync(path.join(dir, "traces.js"), "utf8"), c), vm.runInContext("tracesFlag", c)))(vm.createContext({}))));
 
   // ---- window -> canvas -------------------------------------------------------------------
   // (two rules in one function: COVER, the five-argument form, which the page no longer
@@ -3584,7 +3689,7 @@ async function legStage(state) {
   for (const m of css.replace(/@media[^{]*\{/g, "").matchAll(/([^{}]+)\{[^{}]*\}/g))
     for (const s of m[1].split(",")) if (s.trim()) sels.push(s.trim());
   const loose = sels.filter(s => !/^(html\.stage\b|#stage)/.test(s));
-  ok("stage.css: every one of its " + sels.length + " selectors starts at html.stage or at an element stage.js creates (#stage...), so it matches nothing without the flag",
+  ok("stage.css: every one of its " + sels.length + " selectors starts at html.stage or at an element stage.js creates (#stage...), so it matches nothing with ?plain (where neither exists)",
      sels.length >= 25 && loose.length === 0, loose.join(" | "));
   ok("  ... #stage is position: fixed; inset: 0, 100dvh with a 100vh fallback BEFORE it; the picture, the repeated picture (#stageTile, the whole window), canvas.traces, the controls, the centred error stack 0 < 1 < 2 < 3 < 4",
      /#stage \{[^}]*position: fixed; inset: 0; height: 100vh; height: 100dvh;/.test(css) &&
@@ -3616,13 +3721,13 @@ async function legStage(state) {
   const users = others.filter(f => /stage\.(js|css)\b|\bstage(Build|Adopt|Aspect|Resize|Frame|Picture|Fill|Tiles|Measure)\b/.test(fs.readFileSync(path.join(dir, f), "utf8")));
   ok("no other page or shared file loads stage.js / stage.css or calls into it (" + others.length + " files)", others.length >= 9 && users.length === 0, users.join(", "));
 
-  // ---- WITHOUT ?stage: nothing of it exists ---------------------------------------------------
-  const N = await musicPage("?musicdebug"), nenv = N.env;
+  // ---- WITH ?plain: nothing of it exists - ---------------------------------------------------
+  const N = await musicPage("?plain&musicdebug"), nenv = N.env;
   const nq = JSON.parse(nenv.run(`function(){ const c = cards.disp[0]; return JSON.stringify({ on: STAGE_ON, el: stage.el, idle: stage.idle, timer: stage.timer, back: stage.back,
     asp: cardAspect(), cv: [c.cv.width, c.cv.height, c.cvVec.width], wrapIn: c.wrap.parentNode === c.root, charts: cards.chart.map(x => x.type()),
     run: el("btnRun").parentNode.id, ctl: el("grpMusic").parentNode.id, arrow: c.cbArrow.parentNode.style.display, off: !!c.rOffX && c.rOffX.style.display,
     add: el("btnAddDisp").style.display, grpOpen: [el("grpMusic").open, el("grpSim").open] }); }`));
-  ok("without ?stage: STAGE_ON is false, no element with a stage id was created, no timer and no idle state",
+  ok("with ?plain: STAGE_ON is false, no element with a stage id was created, no timer and no idle state",
      nq.on === false && nq.el === null && nq.idle === null && nq.timer === 0 && nq.back === null &&
      nenv.allEls.filter(e => /^stage/i.test(e.id || "")).length === 0, nenv.allEls.filter(e => /^stage/i.test(e.id || "")).map(e => e.id).join());
   ok("  ... no `sides` select (selFill) and no #stageTile either, the traces are told nothing about where the picture is (musicTraces.picture is null) and renderCards is the shared one, unwrapped",
@@ -3637,10 +3742,10 @@ async function legStage(state) {
      nenv.run(`function(){ stageBuild(); stageAdopt(); stageResize(true); const c = cards.disp[0];
        return stage.el === null && c.cv.width === 512 && cards.chart.length === 2 && c.wrap.parentNode === c.root; }`) === true && realFails(nenv).length === 0);
 
-  // ---- WITH ?stage ----------------------------------------------------------------------------
-  const P = await musicPage("?stage&musicdebug"), env = P.env;
-  ok("with ?stage the page boots under the stub with no failure of its own", realFails(env).length === 0, realFails(env).slice(0, 3).join(" | "));
-  // (2026-11-23, later the same day: with ?stage the box is SQUARE by default again, as it is
+  // ---- THE BARE URL: the stage----------------------------------------------------------------------
+  const P = await musicPage("?musicdebug"), env = P.env;
+  ok("the bare URL (the stage, since 2026-11-24 the page's default layout) boots under the stub with no failure of its own", realFails(env).length === 0, realFails(env).slice(0, 3).join(" | "));
+  // (2026-11-23, later the same day: on the stage the box is SQUARE by default again, as it is
   // without the flag, and the stage shows it WHOLE -- contain, never a crop -- with the two
   // sides left over black or carrying the picture again. Every row below is about the shell
   // and about a square picture in a window; the window-shaped box is leg 16's subject.)
@@ -3744,7 +3849,7 @@ async function legStage(state) {
   env.run("function(){ window.innerWidth = 1280; window.innerHeight = 800; stageResize(true); }");
 
   // ---- the sides: black, or the picture again --------------------------------------------------
-  // (`sides`, selFill, exists only with ?stage. On "tile" stageFrame -- called by the wrapped
+  // (`sides`, selFill, exists only on the stage.) On "tile" stageFrame -- called by the wrapped
   // renderCards, once a frame, and told whether a card rendered -- copies the picture's canvas over the whole window onto
   // #stageTile with drawImage; the stub's 2D context logs each drawImage's source and
   // destination. What the stub cannot say: that a WebGPU canvas is readable at that moment,
@@ -3765,7 +3870,7 @@ async function legStage(state) {
   await P.frame();
   await P.frame();
   let f0 = fq();
-  ok("the `sides` select exists with ?stage, in the simulation group in the drawer: black (\"bars\", the default) or repeat the picture (\"tile\")",
+  ok("the `sides` select exists on the stage, in the simulation group in the drawer: black (\"bars\", the default) or repeat the picture (\"tile\")",
      selFill.options.map(o => o.value).join() === "bars,tile" && selFill.value === "bars" && up(selFill, "grpSim") && up(selFill, "stageDrawer") && f0.fill === "bars",
      selFill.options.map(o => o.value).join() + " = " + selFill.value);
   ok("  ... on black, frames come and go and #stageTile stays hidden and untouched: no 2D context is ever asked of it",
@@ -3921,15 +4026,15 @@ async function legStage(state) {
      (env.run("function(){ stageTick(4e9 + 750); }"), env.getEl("status").parentNode.id === "stageStatus"));
   ok("through all of it the stage page logged no failure of its own", realFails(env).length === 0, realFails(env).slice(0, 2).join(" | "));
 
-  // ---- no WebGPU at all, with ?stage ----------------------------------------------------------------
+  // ---- no WebGPU at all, on the stage---------------------------------------------------------------
   // (gpuFallback looks up controls this page has never had -- btnParams, btnText, intro:
   // the same misses are logged on a no-WebGPU boot WITHOUT the flag, which is the reference)
   const noGpuFails = async search => { const e = await boot(dir, "music.html", { search: search, noGpu: true }); await turn(); return e; };
-  const G0 = await noGpuFails(""), G = await noGpuFails("?stage");
+  const G0 = await noGpuFails("?plain"), G = await noGpuFails("");
   const own = e => realFails(e).filter(f => realFails(G0).indexOf(f) < 0);
   G.tick();
   const gs = G.getEl("stage");
-  ok("with ?stage and NO WebGPU: the stage and its bar are built, there is no picture, and the browser advice is centred (taken back from the poster card common.js moved it to)",
+  ok("on the stage with NO WebGPU: the stage and its bar are built, there is no picture, and the browser advice is centred (taken back from the poster card common.js moved it to)",
      !!gs && gs.children.filter(c => c.className === "cvwrap").length === 0 && gs.classList.contains("fatal") &&
      G.getEl("status").parentNode.id === "stageFatal" && /WebGPU is not available/.test(G.getEl("status").textContent) &&
      up(G.getEl("btnRun"), "stageBar") && G.getEl("btnRun").disabled === true && up(G.getEl("grpMusic"), "stageDrawer") &&
@@ -4160,7 +4265,7 @@ async function legShape(state) {
      [0, 1, 3, 4, 1e6].every(n => ar("light", n) === "light") && ar("sharp", 0) === "standard" && ar("sharp", 9) === "light" && ar(undefined, 0) === "standard" &&
      (() => { let r = "standard"; const out = []; for (const n of [0, 9, 0, 0, 50, 0]) { r = ar(r, n); out.push(r); } return out.join(); })() === "standard,light,light,light,light,light");
 
-  // ---- the page, WITHOUT ?stage: at its defaults it is the shipped one ----------------------
+  // ---- the page, WITH ?plain: at its defaults it is the shipped one ----------------------
   const SNAP = `function(){ const s = solver, c = cards.disp[0]; return JSON.stringify({ p: s.p, ui: uiParams(), sh: music.shape, plan: music.plan,
     cv: [c.cv.width, c.cv.height], sel: c.selField.value, lit: music.lit.length, grave: graveyard.length,
     b0: Array.from(s._b0), hasB0: !!s.buf.b0, hasEqk: !!s.buf.eqk, lin0: s.g.gridB[1], box: el("musicBox").textContent,
@@ -4172,12 +4277,12 @@ async function legShape(state) {
   const setWin = (env, w, h) => env.run("function(w, h){ window.innerWidth = w; window.innerHeight = h; }", w, h);
   const mark = env => env.run("function(){ globalThis.__svm = solver; }");
   const same = env => env.run("function(){ return solver === __svm; }");
-  const P = await musicPage("?musicdebug"), env = P.env;
+  const P = await musicPage("?plain&musicdebug"), env = P.env;
   let q = snap(env);
   const diss0 = 48 * Math.max(1, 0.1) / Math.pow(256 / 3, 2 * 4);      // the shipped expression, MUSIC_N / 3
   const shipped = JSON.stringify({ nx: 256, ny: 256, Lx: L, Ly: L, hyper: 4, diss: diss0, pm: 1, eqsrc: false, epsP: 0, epsM: 0, tau: 1,
                                    fshell: [1, 3], smax: 1e4, cfl: 0.4, seed: 7, kick: true, mu: 1, b0: true });
-  ok("without ?stage the three selects are at box = square, grid = STANDARD (not auto: the shipped page never changes its grid), background = walking mean field; sheet field 5, sheet width 2",
+  ok("with ?plain the three selects are at box = square, grid = STANDARD (not auto: the shipped page never changes its grid), background = walking mean field; sheet field 5, sheet width 2",
      env.getEl("selBox").value === "square" && env.getEl("selGrid").value === "standard" && env.getEl("selGrid").options.map(o => o.value).join() === "auto,light,standard,sharp" && env.getEl("selBg").value === "field" &&
      env.getEl("rSheetB").value === "5" && env.getEl("rSheetW").value === "2" && env.getEl("vSheetB").textContent === "5.0" && env.getEl("vSheetW").textContent === "2.00" &&
      ["rSheetB", "rSheetW"].every(id => env.getEl(id).min !== undefined) && env.getEl("rSheetB").max === "8" && env.getEl("rSheetW").min === "1" && env.getEl("rSheetW").max === "4");
@@ -4561,7 +4666,7 @@ async function legShape(state) {
   ok("  ... and with all three selects back at their defaults the page is the shipped one again", JSON.stringify(snap(env).ui) === shipped && snap(env).sel === "4" && realFails(env).length === 0);
 
   // ---- the auto rung, on the page -----------------------------------------------------------------
-  const A = await musicPage("?musicdebug"), aenv = A.env;
+  const A = await musicPage("?plain&musicdebug"), aenv = A.env;
   const au = () => JSON.parse(aenv.run("function(){ return JSON.stringify({ behind: music.behind, a: music.auto, n: [solver.p.nx, solver.p.ny], sel: el('selGrid').value, st: el('status').textContent, box: el('musicBox').textContent, run: running }); }"));
   // one run: Start at audio time t0, `nb` frames that each find the clock a second behind, at
   // audio times t0 + from + i; then Stop
@@ -4576,8 +4681,8 @@ async function legShape(state) {
     await A.click("btnRun");
     return r;
   };
-  // (2026-11-24: without ?stage the grid select says standard, so auto is CHOSEN here; with
-  // ?stage it is the default, which the ?stage rows below state)
+  // (2026-11-24: with ?plain the grid select says standard, so auto is CHOSEN here; on the
+  // stage it is the default, which the stage rows below state)
   await A.input("selGrid", "auto");
   aenv.run("function(){ globalThis.__svm = solver; }");
   let r = await session(100, 1, 3);
@@ -4610,7 +4715,7 @@ async function legShape(state) {
   ok("  ... and it NEVER climbs: a run with no rebase at all, then Start, is still light; nor is it ever sharp",
      r.a.n === 0 && calm.a.rung === "light" && calm.n.join() === "128,128" && aenv.run("function(){ return musicShapeWanted().rung; }") === "light", JSON.stringify([r.a, calm.a, calm.n]));
   // only the first MUSIC_AUTO_WINDOW seconds count, and only while the select says auto
-  const B = await musicPage("?musicdebug"), benv = B.env;
+  const B = await musicPage("?plain&musicdebug"), benv = B.env;
   await B.input("selGrid", "auto");
   const bu = () => JSON.parse(benv.run("function(){ return JSON.stringify({ a: music.auto, n: [solver.p.nx, solver.p.ny], behind: music.behind, box: el('musicBox').textContent }); }"));
   model(benv);
@@ -4654,7 +4759,7 @@ async function legShape(state) {
      /dropped to light/.test(viaReset.box) && bu().n.join() === "256,256" && /choose standard to override/.test(bu().a.note) && !/dropped/.test(bu().box) && /on 256 × 256 \(standard\), 4 bands$/.test(bu().box), bu().box);
 
   // ---- the shipped page (no ?stage, grid = standard by default) never drops ---------------------------
-  const C = await musicPage("?musicdebug"), cenv = C.env;
+  const C = await musicPage("?plain&musicdebug"), cenv = C.env;
   const cu0 = () => JSON.parse(cenv.run("function(){ return JSON.stringify({ a: music.auto, n: [solver.p.nx, solver.p.ny], behind: music.behind, sel: el('selGrid').value, st: el('status').textContent, box: el('musicBox').textContent, ui: uiParams(), lit: music.lit.length, run: running }); }"));
   cenv.run("function(){ globalThis.__svm = solver; }");
   model(cenv);
@@ -4674,7 +4779,7 @@ async function legShape(state) {
   await C.input("selBg", "field");
   await C.input("selGrid", "standard");
   const cSel = cu0();
-  ok("without ?stage, at the defaults, a run that is rebased for falling behind 9 times in its first 10 s (BEHIND lit) counts NOTHING, and the next Start, a Reset and changes of the selects all leave the grid at 256 x 256 with 4 bands: no drop, no note, nothing in the status line",
+  ok("with ?plain, at the defaults, a run that is rebased for falling behind 9 times in its first 10 s (BEHIND lit) counts NOTHING, and the next Start, a Reset and changes of the selects all leave the grid at 256 x 256 with 4 bands: no drop, no note, nothing in the status line",
      cRun.sel === "standard" && cRun.behind === true && cRun.a.n === 0 && [cRun, cStart, cReset, cSel].every(c => c.a.rung === "standard" && c.a.note === "" && c.a.n === 0 && c.n.join() === "256,256" && c.lit === 4 &&
        !/dropped/.test(c.st) && /^box 6\.28 × 6\.28 on 256 × 256 \(standard\), 4 bands$/.test(c.box)) && realFails(cenv).length === 0, JSON.stringify([cRun.a, cStart.n, cSel.box]));
   ok("  ... and what the Solver holds is still the shipped parameter set, bit for bit (the two rebuilds were the background select's, none of them a change of grid)",
@@ -4704,11 +4809,11 @@ async function legShape(state) {
      dBack.sel === "auto" && dBack.a.rung === "standard" && dBack.a.n === 0 && dBack.n.join() === "256,256" && /on 256 × 256 \(standard, auto\), 4 bands$/.test(dBack.box) &&
      dStart.run === true && dStart.a.rung === "standard" && dStart.n.join() === "256,256" && !/dropped/.test(dStart.st) && realFails(cenv).length === 0, JSON.stringify([dBack.a, dStart.n, dBack.box]));
 
-  // ---- WITH ?stage: square by default; the window's shape on request, and then the picture fills #stage --
+  // ---- ON THE STAGE: square by default; the window's shape on request, and then the picture fills #stage --
   // (2026-11-23: the default box is square with the flag too, and the stage shows whatever box
   // it has WHOLE -- contain -- so a window of another shape than the box has bars, or repeats,
   // and never a crop. The rows about the window-shaped box choose it through the select.)
-  const S = await musicPage("?stage&musicdebug"), senv = S.env;
+  const S = await musicPage("?musicdebug"), senv = S.env;
   const SS = `function(){ const s = solver, c = cards.disp[0], st = c.wrap.style; return JSON.stringify({ p: [s.p.nx, s.p.ny, s.p.Lx, s.p.Ly], b0: s.p.b0, eq: s.p.eqsrc,
     cv: [c.cv.width, c.cv.height], css: [st.left, st.top, st.width, st.height].map(parseFloat), box: el("selBox").value, grid: el("selGrid").value, bg: el("selBg").value,
     opts: el("selBox").options.map(o => o.value), line: el("musicBox").textContent, lit: music.lit.length, plan: music.plan,
@@ -4716,7 +4821,7 @@ async function legShape(state) {
   const ss = () => JSON.parse(senv.run(SS));
   const cssIs = (t, l, tp, w, h) => Math.abs(t.css[0] - l) < 0.006 && Math.abs(t.css[1] - tp) < 0.006 && Math.abs(t.css[2] - w) < 0.006 && Math.abs(t.css[3] - h) < 0.006;
   let t = ss();
-  ok("with ?stage the box select defaults to SQUARE, as without it (grid AUTO -- the default only with the flag -- and background the mean field): the shipped 2 pi x 2 pi on 256 x 256 with 4 bands, and the window's shape is still on offer in the select",
+  ok("on the stage the box select defaults to SQUARE, as with ?plain (grid AUTO -- the default only on the stage -- and background the mean field): the shipped 2 pi x 2 pi on 256 x 256 with 4 bands, and the window's shape is still on offer in the select",
      t.box === "square" && t.grid === "auto" && t.bg === "field" && t.opts.join() === "window,square" && t.p.join() === [256, 256, L, L].join() && t.b0 === true && t.eq === false &&
      t.lit === 4 && JSON.stringify(t.plan) === JSON.stringify(M.musicBandPlan(256, null, null, 32)) && /^box 6\.28 × 6\.28 on 256 × 256 \(standard, auto\), 4 bands$/.test(t.line) &&
      realFails(senv).length === 0, t.box + " " + t.p.join(" ") + " | " + t.line);
@@ -4764,7 +4869,7 @@ async function legShape(state) {
      t.p[2] === 2 * L && t.p[3] === L && senv.run("function(){ const w = musicWindow(); return w.w + 'x' + w.h; }") === "1000x500", t.p.join(" "));
   await S.input("selBg", "sheets");
   t = ss();
-  ok("with ?stage the sheets build the same flags (eqsrc, no b0) on the window's box, and the page logs no failure", t.eq === true && t.b0 === false && t.p[2] === 2 * L && realFails(senv).length === 0,
+  ok("on the stage the sheets build the same flags (eqsrc, no b0) on the window's box, and the page logs no failure", t.eq === true && t.b0 === false && t.p[2] === 2 * L && realFails(senv).length === 0,
      realFails(senv).slice(0, 2).join(" | "));
   await S.input("selBox", "square");
   await S.input("selBg", "field");
@@ -4772,7 +4877,7 @@ async function legShape(state) {
   ok("  ... and box = square there is the shipped square solver", t.p.join() === [256, 256, L, L].join() && t.b0 === true && t.eq === false);
 
   // ---- the traces overlay follows a rebuild (it keys its bins off the live solver) ------------------
-  const T = await musicPage("?traces"), tenv = T.env;
+  const T = await musicPage("?plain&traces"), tenv = T.env;
   tenv.run("function(){ window.innerWidth = 1920; window.innerHeight = 1080; }");
   await T.input("selBox", "window");
   await T.input("selGrid", "sharp");
@@ -4783,7 +4888,7 @@ async function legShape(state) {
   // the side panels' line cuts run along y: ny samples, on a grid where nx is not ny
   await T.input("selGrid", "light");
   tenv.getEl("cbTrSides").checked = true;
-  tenv.getEl("selTrSide").value = "cuts";
+  tenv.getEl("selTrB").value = "cuts";
   tenv.run(`function(){ window.__hold = []; const wrap = sv => { sv.readCutLine = iz => { const ny = sv.p.ny, a = new Float32Array(4 * ny);
       for (let i = 0; i < ny; i++) { a[i] = i; a[ny + i] = -7; a[2 * ny + i] = 1000 + i; a[3 * ny + i] = -9; }
       return window.__held ? new Promise(r => window.__hold.push(() => r(a))) : Promise.resolve(a); }; };
@@ -4825,7 +4930,7 @@ const LEGS = [
   ["12. the fixed colour scale", legScale],
   ["13. the effects: the rules against the offline script, and the page with its defaults", legEffects],
   ["14. the fading traces (traces.js): the pure rules, the canvas, the schedule", legTraces],
-  ["15. the stage (?stage): the rules, the structure, and nothing of it without the flag", legStage],
+  ["15. the stage (the default layout): the rules, the structure, and nothing of it with ?plain", legStage],
   ["16. the window-shaped box and the current sheets: the rectangular rules against the offline script, and the page", legShape]
 ];
 (async () => {

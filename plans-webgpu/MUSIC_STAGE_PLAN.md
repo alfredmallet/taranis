@@ -448,3 +448,13 @@ Left: with `?traces` alone, closing the first of two display cards detaches the 
 in "repeat" mode on a window above the resolution cap the centre picture is the copy's
 resolution; side panels sample even where they cannot be drawn. Unverified by anyone:
 fullscreen, touch and the idle fade on a real phone.
+
+## The stage becomes the page (2026-11-24)
+
+Alfred, after the deploy: the bottom spectrum and the top cut are off by default and the
+side panels on; each strip has its own select (spectra / line cuts / energies in time, any
+pairing); every side spectrum carries the k^(-5/3) guide; and the `?stage` flag is dropped.
+The stage is now what `music.html` serves. The card layout was NOT deleted: it is
+`music.html?plain`, because seven gate legs test the solver wiring through it (and it is
+still the way to see the charts). Decision 3 (the chart cards leave the page) is met for
+the page a visitor gets; removing the card layout's code is not done.

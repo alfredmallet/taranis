@@ -5,12 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>plasma turbulence in your browser &mdash; driven by music</title>
 <link rel="stylesheet" href="style.css">
-<link rel="stylesheet" href="stage.css"><!-- STAGE: inert without ?stage (MUSIC_STAGE_PLAN S1) -->
+<link rel="stylesheet" href="stage.css"><!-- STAGE: the page's layout; inert with ?plain (MUSIC_STAGE_PLAN S1) -->
 <link rel="icon" href="favicon-32.png" sizes="32x32">
 <link rel="icon" href="favicon-16.png" sizes="16x16">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <!-- NO analytics beacon, and no other page links here yet (plans-webgpu/MUSIC_PLAN.md;
-     the stage layout of MUSIC_STAGE_PLAN.md is behind ?stage). The audio never
+     the stage layout of MUSIC_STAGE_PLAN.md is the page; ?plain keeps the card layout). The audio never
      leaves the browser: it is analysed in this page and nothing derived from it is sent
      anywhere. -->
 </head>
@@ -50,7 +50,7 @@
 <script src="physics.js"></script>
 <script src="solver2d.js"></script>
 <script src="music.js"></script>
-<script src="stage.js"></script><!-- STAGE: defines functions only; live with ?stage -->
+<script src="stage.js"></script><!-- STAGE: defines functions only; live unless ?plain -->
 <script src="traces.js"></script>
 <script>
 "use strict";
@@ -225,7 +225,7 @@ controlsBuild({
     ] },
     // the two CFL knobs the shared loop reads (rCflEvery) and the solver takes (rCfl)
     // ... and the box and the grid (MUSIC_STAGE_PLAN S2): square by default with and without
-    // ?stage, the window's shape on offer
+    // ?plain, the window's shape on offer
     { id: "grpSim", summary: "simulation", rows: [CTRL_CFL,
       [{ k: "lab", t: "box", for: "selBox" },
        { k: "sel", id: "selBox", o: [["window", "the window's shape"], ["square", "square"]],
@@ -237,7 +237,7 @@ controlsBuild({
        { k: "lab", t: "grid", for: "selGrid" },
        { k: "sel", id: "selGrid", o: [["auto", "auto"], ["light", "light: 256 × 128"],
                                       ["standard", "standard: 256 × 256"], ["sharp", "sharp: 512 × 256"]],
-         // without ?stage the page is the shipped one, which never changed its grid: standard
+         // the card layout (?plain) is the page as first shipped, which never changed its grid: standard
          v: STAGE_ON ? "auto" : "standard",
          ti: "grid points, long side by short side. auto starts on standard and, if the "
            + "simulation keeps falling behind the audio in the first seconds of a run, drops to "
@@ -254,11 +254,11 @@ controlsBuild({
            + "so the copies join without a seam." }]] : []),
       { k: "hintdiv", id: "musicBox", t: "" }] },
     ctrlGrpDisp()
-    // TRACES: the fading-trace overlays' group, grpTraces ([] without ?traces / ?stage)
+    // TRACES: the fading-trace overlays' group, grpTraces ([] on the card layout without ?traces)
     , ...musicTraces.groups()
   ]
 });
-stageBuild();   // STAGE: with ?stage, the bar and the drawer take the controls just built (else a no-op)
+stageBuild();   // STAGE: the bar and the drawer take the controls just built (a no-op with ?plain)
 
 // ---- what the controls say ----------------------------------------------------
 const musicNum = (id, dflt) => { const v = parseFloat(el(id).value); return isFinite(v) ? v : dflt; };
@@ -397,7 +397,7 @@ function musicCardSize() {
   const r = music.shape.Lx / music.shape.Ly;
   return r >= 1 ? { w: 512, h: Math.max(64, 2 * Math.round(256 / r)) } : { w: Math.max(64, 2 * Math.round(256 * r)), h: 512 };
 }
-function cardAspect() { return stageAspect() || musicCardSize(); }   // STAGE: the window-sized canvas with ?stage (else null)
+function cardAspect() { return stageAspect() || musicCardSize(); }   // STAGE: the window-sized canvas (null with ?plain)
 
 // ---- the page's state -------------------------------------------------------
 const music = {
@@ -1123,7 +1123,7 @@ async function boot() {
   frameHook = async sv => { if (sv === solver) await musicScaleProbe(sv); };
   readoutExtra = musicScaleReadout;
   // TRACES: one synchronous call per frame, ahead of whatever the hook already does (it starts
-  // its own readbacks and awaits none). Without ?traces / ?stage the hook is left as it was.
+  // its own readbacks and awaits none). On the card layout without ?traces the hook is left as it was.
   if (musicTraces.on) { const fh = frameHook; frameHook = async sv => { if (sv === solver) musicTraces.frame(sv, performance.now()); await fh(sv); }; }
   // back from a hidden tab: the next frame re-anchors quietly instead of calling the
   // absence "behind". (An ASSIGNED handler: devtools' stub document has no addEventListener.)
@@ -1158,9 +1158,9 @@ async function boot() {
   // |u| is where a kick shows (7-13x the baseline frame change against 1.5x in vorticity)
   // (... or |b| where the page starts on the current sheets: musicBgField)
   cardsLayout({ disp: [{ sel: musicBgField(music.shape.bg), cmap: MUSIC_CMAP_DEFAULT, arrows: false }], charts: ["energy", "spectrum"] });
-  stageAdopt();   // STAGE: with ?stage, the card just laid out becomes the full-window picture (else a no-op)
+  stageAdopt();   // STAGE: the card just laid out becomes the full-window picture (a no-op with ?plain)
   // TRACES: over #stage where the stage shell has made one, else over the display card
-  // (attach does nothing without ?traces / ?stage)
+  // (attach does nothing on the card layout without ?traces)
   musicTraces.attach(document.querySelector("#stage") || cards.disp[0].wrap);
   // STAGE: the picture need not span the window (black or repeated sides): the cut follows it,
   // and the repeats are copied in the same task as the render, the only time a WebGPU canvas
