@@ -5,6 +5,9 @@
 // no Web Audio and no WebGPU in it. plans-webgpu/MUSIC_PLAN.md, phase M2.
 //
 //   musicBandPlan      blob width and count per frequency band, from the grid
+//   musicWindowAspect / musicBoxFor / musicCutoffK / musicGridFor / musicRungFor /
+//   musicAutoRung      the window-shaped box, its grid and the auto rung (MUSIC_STAGE_PLAN S2)
+//   musicSheet*        the maintained current-sheet equilibrium (MUSIC_STAGE_PLAN S4)
 //   MusicDetector      the causal per-band onset detector, one spectrum per frame
 //   musicShouldPush    the rule that keeps the detector near its nominal frame rate
 //   musicRng           a seeded uniform generator (mulberry32)
@@ -31,6 +34,9 @@
 //   musicKickTypesFor, musicKickBlobs  <->  kick_types_for, kick_blobs   (likewise)
 //   musicPan  <->  onset_pans' formula    musicPulse*  <->  pulse_zoom
 //   musicWalk*  <->  the --field-walk / --ratio-walk rules in run()
+//   musicBoxFor, musicCutoffK  <->  box_for, cutoff_k
+//   musicSheetPsi0, musicSheetEq, musicSheetEnergy  <->  sheet_psi0, sheet_equilibrium,
+//                                                        sheet_energy_eq (the bump profile)
 // devtools/checkmusic.js holds the first two to numbers recorded FROM the python
 // (devtools/fixtures/music_ref.json, written by gen_musicfixture.py), so a change on
 // either side has to be made on both and the fixture regenerated.
@@ -63,9 +69,27 @@ const MUSIC_NBLOB_MAX = 128;
 // spacings, so it shrinks with n); the number of bands defaults to as many widths as fit
 // with a factor MUSIC_SIGMA_STEP between neighbours (4 at 256^2, 5 at 512^2, 6 at 1024^2);
 // the blob count goes as 1/sigma. `nblobMax` is the most one band may ask for.
-function musicBandPlan(n, nbands, sigmaMin, nblobMax) {
-  if (!(Number.isInteger(n) && n > 0)) throw new Error("musicBandPlan: n must be a positive integer, got " + n);
-  const smin = (sigmaMin === undefined || sigmaMin === null) ? MUSIC_SIGMA_MIN_DX * MUSIC_LBOX / n : sigmaMin;
+// `n` is the grid: one number (n x n) or [nx, ny]. In a rectangular box (Lx, Ly; default the
+// square 2 pi box) or on a grid with nx != ny (MUSIC_STAGE_PLAN S2): the narrowest blob is
+// MUSIC_SIGMA_MIN_DX of the LARGER of the two grid spacings (it has to be resolved along
+// both axes); the widest stays MUSIC_SIGMA_MAX, a fraction of the short side, which is
+// always 2 pi; and the counts are multiplied by the box's area over (2 pi)^2 -- exactly 1
+// for the square box -- so a wider box is not sparser. Counts round half to even, as
+// numpy's rint does.
+function musicRint(v) {
+  const f = Math.floor(v), d = v - f;
+  return d < 0.5 ? f : d > 0.5 ? f + 1 : (f % 2 === 0 ? f : f + 1);
+}
+function musicBandPlan(n, nbands, sigmaMin, nblobMax, Lx, Ly) {
+  const pos = v => Number.isInteger(v) && v > 0, pair = Array.isArray(n);
+  if (!(pair ? n.length === 2 && pos(n[0]) && pos(n[1]) : pos(n)))
+    throw new Error("musicBandPlan: n must be a positive integer or [nx, ny], got " + n);
+  const nx = pair ? n[0] : n, ny = pair ? n[1] : n;
+  const lx = (Lx === undefined || Lx === null) ? MUSIC_LBOX : Lx, ly = (Ly === undefined || Ly === null) ? MUSIC_LBOX : Ly;
+  if (!(typeof lx === "number" && typeof ly === "number" && lx > 0 && ly > 0 && isFinite(lx) && isFinite(ly)))
+    throw new Error("musicBandPlan: the box must be two finite positive lengths, got " + Lx + ", " + Ly);
+  const smin = (sigmaMin === undefined || sigmaMin === null)
+    ? Math.max(MUSIC_SIGMA_MIN_DX * lx / nx, MUSIC_SIGMA_MIN_DX * ly / ny) : sigmaMin;
   if (!(typeof smin === "number" && smin > 0 && smin <= MUSIC_SIGMA_MAX))
     throw new Error("musicBandPlan: sigma_min must be in (0, " + MUSIC_SIGMA_MAX + "], got " + smin);
   let nb = nbands;
@@ -73,17 +97,106 @@ function musicBandPlan(n, nbands, sigmaMin, nblobMax) {
     nb = Math.max(1, Math.round(1 + Math.log(MUSIC_SIGMA_MAX / smin) / Math.log(MUSIC_SIGMA_STEP)));
   if (!(Number.isInteger(nb) && nb >= 1)) throw new Error("musicBandPlan: nbands must be an integer >= 1, got " + nbands);
   const cap = (nblobMax === undefined || nblobMax === null) ? MUSIC_NBLOB_MAX : nblobMax;
+  const area = (lx / MUSIC_LBOX) * (ly / MUSIC_LBOX);
   const sigmas = [], nblobs = [];
   for (let i = 0; i < nb; i++) {
     const s = MUSIC_SIGMA_MAX * Math.pow(smin / MUSIC_SIGMA_MAX, i / Math.max(nb - 1, 1));
     sigmas.push(s);
-    nblobs.push(Math.round(MUSIC_NBLOB_BASS * MUSIC_SIGMA_MAX / s));
+    nblobs.push(musicRint(MUSIC_NBLOB_BASS * MUSIC_SIGMA_MAX / s * area));
   }
   const most = Math.max.apply(null, nblobs);
   if (most > cap)
     throw new Error("musicBandPlan: " + most + " blobs per kick in the top band exceeds the limit " + cap
                     + ": raise sigma_min or use fewer bands");
   return { sigmas: sigmas, nblobs: nblobs };
+}
+
+// ---------------------------------------------------------------------------
+// the box takes the window's shape (MUSIC_STAGE_PLAN S2)
+// ---------------------------------------------------------------------------
+// the most elongated box: a window longer than this is not followed (the stage shows the box whole, with sides left over)
+const MUSIC_ASPECT_MAX = 2.4;
+// The picture's aspect (width over height) for a window of w x h CSS pixels: w/h clamped
+// to [1/MUSIC_ASPECT_MAX, MUSIC_ASPECT_MAX]. `mode` "square" -- and a window that is not
+// two finite positive numbers -- is 1, the shipped square box.
+function musicWindowAspect(w, h, mode) {
+  if (mode === "square" || !(w > 0) || !(h > 0) || !isFinite(w) || !isFinite(h)) return 1;
+  return Math.min(MUSIC_ASPECT_MAX, Math.max(1 / MUSIC_ASPECT_MAX, w / h));
+}
+// [Lx, Ly] of the box for a picture of that aspect (box_for in the offline script): the
+// SHORT side is 2 pi and the long side 2 pi * max(aspect, 1/aspect). aspect >= 1 is
+// landscape (long in x), aspect < 1 portrait (long in y); 1 is exactly the square 2 pi box.
+function musicBoxFor(aspect) {
+  if (!(typeof aspect === "number" && aspect > 0 && isFinite(aspect)))
+    throw new Error("musicBoxFor: aspect must be a finite positive number, got " + aspect);
+  return aspect >= 1 ? [MUSIC_LBOX * aspect, MUSIC_LBOX] : [MUSIC_LBOX, MUSIC_LBOX / aspect];
+}
+// The smaller of the two dealiasing cutoffs, in k (cutoff_k): the solver's 2/3 mask is in
+// mode INDEX (n/3 along each axis), so in a rectangular box or grid the two axes stop at
+// different wavenumbers, and the coarser one is the one the dissipation has to resolve.
+// n/3 exactly for the square 2 pi box.
+function musicCutoffK(nx, ny, Lx, Ly) {
+  return Math.min((nx / 3) * (2 * Math.PI / Lx), (ny / 3) * (2 * Math.PI / Ly));
+}
+// The grid ladder, long side x short side: light 256 x 128, standard 256 x 256, sharp
+// 512 x 256. Returns [nx, ny] for a box (Lx, Ly): the long side of the grid lies along the
+// long side of the box (a tall box gets ny > nx). A SQUARE box takes square grids: light
+// 128 x 128, standard 256 x 256, and sharp is standard (512 x 512 is not offered: it is
+// four times the work of the shipped page).
+const MUSIC_RUNGS = ["light", "standard", "sharp"];
+function musicGridFor(rung, Lx, Ly) {
+  if (MUSIC_RUNGS.indexOf(rung) < 0) throw new Error("musicGridFor: unknown rung " + rung);
+  if (Lx === Ly) return rung === "light" ? [128, 128] : [256, 256];
+  const ls = rung === "light" ? [256, 128] : rung === "standard" ? [256, 256] : [512, 256];
+  return Lx > Ly ? ls : [ls[1], ls[0]];
+}
+// The rung the grid select asks for. `sel` is "auto", or a rung by name; `autoRung` is
+// where auto stands (musicAutoRung). Auto is never sharp, whatever it is handed.
+function musicRungFor(sel, autoRung) {
+  if (sel === "auto" || MUSIC_RUNGS.indexOf(sel) < 0) return autoRung === "light" ? "light" : "standard";
+  return sel;
+}
+// Where auto stands for the NEXT build. It starts on standard; if the run it has just
+// watched was rebased for falling behind MORE than `limit` times in its first seconds
+// (`nBehind`: the page counts them, over MUSIC_AUTO_WINDOW seconds of audio from Start) it
+// drops ONE rung. It never climbs, and it is never sharp: light stays light whatever the
+// count, and anything that is not light is treated as standard.
+const MUSIC_AUTO_WINDOW = 10, MUSIC_AUTO_REBASES = 3;
+function musicAutoRung(rung, nBehind, limit) {
+  if (rung === "light") return "light";
+  return nBehind > (limit === undefined ? MUSIC_AUTO_REBASES : limit) ? "light" : "standard";
+}
+
+// ---------------------------------------------------------------------------
+// current sheets as a maintained background (MUSIC_STAGE_PLAN S4; the offline script's
+// sheet_psi0 / sheet_equilibrium / sheet_energy_eq -- the `bump` profile only)
+// ---------------------------------------------------------------------------
+// psi0 of psi_eq = psi0 sech^2((x - Lx/2)/a) whose peak field is strength * amp:
+// |B| = |d psi_eq/dx| = (2 psi0/a) sech^2(u) |tanh(u)| is largest where tanh^2(u) = 1/3,
+// 4 psi0 / (3 sqrt(3) a) there. Hence psi0 = (3 sqrt(3)/4) a strength amp.
+function musicSheetPsi0(strength, amp, a) {
+  return 0.75 * Math.sqrt(3) * a * strength * amp;
+}
+// psi_eq(x), summed over the nearest periodic images so it is smooth across the box edge:
+// ONE current sheet at x = Lx/2 (j = psi'' peaks there at -2 psi0 / a^2; the field reverses
+// across it) with two return lobes of the opposite sign, a third as strong, either side; no
+// net flux
+function musicSheetEq(x, Lx, psi0, a) {
+  let s = 0;
+  for (let m = -1; m <= 1; m++) { const c = Math.cosh((x - 0.5 * Lx + m * Lx) / a); s += 1 / (c * c); }
+  return psi0 * s;
+}
+// ... on the solver's real-space layout (row-major ix*ny + iy, x = ix Lx/nx), independent
+// of y: what Solver.setICFromReal(null, .) takes
+function musicSheetField(nx, ny, Lx, psi0, a) {
+  const r = new Float32Array(nx * ny);
+  for (let i = 0; i < nx; i++) r.fill(musicSheetEq(i * Lx / nx, Lx, psi0, a), i * ny, (i + 1) * ny);
+  return r;
+}
+// volume-averaged energy (1/2)<|grad psi_eq|^2> of the equilibrium:
+// (1/2)(2 psi0/a)^2 (a/Lx) int sech^4 tanh^2 du, the integral being 4/15
+function musicSheetEnergy(psi0, a, Lx) {
+  return 8 * psi0 * psi0 / (15 * a * Lx);
 }
 
 // ---------------------------------------------------------------------------
@@ -276,11 +389,12 @@ function musicRng(seed) {
 }
 // one kick's blobs for ONE channel (blobs_for): `nblob` gaussians of width `sigma` at
 // uniform positions in the box, each of amplitude +-amp with a fair random sign. Three
-// draws per blob, in the order x, y, sign.
-function musicBlobsFor(rng, sigma, nblob, amp, pol) {
-  const out = [];
+// draws per blob, in the order x, y, sign. `box` = [Lx, Ly] (default the square 2 pi box):
+// x is drawn over Lx and y over Ly.
+function musicBlobsFor(rng, sigma, nblob, amp, pol, box) {
+  const out = [], Lx = box ? box[0] : MUSIC_LBOX, Ly = box ? box[1] : MUSIC_LBOX;
   for (let i = 0; i < nblob; i++) {
-    const x = rng() * MUSIC_LBOX, y = rng() * MUSIC_LBOX, sgn = rng() < 0.5 ? -1 : 1;
+    const x = rng() * Lx, y = rng() * Ly, sgn = rng() < 0.5 ? -1 : 1;
     out.push({ x: x, y: y, sigma: sigma, amp: sgn * amp, pol: pol });
   }
   return out;
@@ -292,6 +406,7 @@ function musicBlobsFor(rng, sigma, nblob, amp, pol) {
 //   xc           the x the blobs gather about (stereo placement; null/undefined = uniform)
 //   ratio        a sheet's length over its width (default MUSIC_SHEET_RATIO)
 //   sheetEnergy  multiplies a sheet's energy (its amplitude by the square root)
+//   box          [Lx, Ly] of the box (absent = the square 2 pi box)
 function musicKickList(rng, plan, band, amp, strength, o) {
   const s = plan.sigmas[band], n = plan.nblobs[band], a = amp * strength;
   if (o === undefined || o === null) return musicBlobsFor(rng, s, n, a, 1).concat(musicBlobsFor(rng, s, n, a, -1));
@@ -339,13 +454,13 @@ function musicNormal(rng) {
   const u = 1 - rng(), v = rng();            // u in (0, 1]: the log is finite
   return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
-const musicWrap = x => x - MUSIC_LBOX * Math.floor(x / MUSIC_LBOX);
+const musicWrap = (x, L) => { const l = L === undefined ? MUSIC_LBOX : L; return x - l * Math.floor(x / l); };
 // one channel's set under stereo placement: musicBlobsFor's draws, then x REPLACED by a
-// gaussian about xc (width MUSIC_STEREO_JITTER of the box); y stays uniform
-function musicPlaced(rng, sigma, nblob, amp, pol, xc) {
-  const out = musicBlobsFor(rng, sigma, nblob, amp, pol);
+// gaussian about xc (width MUSIC_STEREO_JITTER of the box's x side); y stays uniform
+function musicPlaced(rng, sigma, nblob, amp, pol, xc, box) {
+  const out = musicBlobsFor(rng, sigma, nblob, amp, pol, box), Lx = box ? box[0] : MUSIC_LBOX;
   if (xc !== undefined && xc !== null)
-    for (const b of out) b.x = musicWrap(xc + MUSIC_STEREO_JITTER * MUSIC_LBOX * musicNormal(rng));
+    for (const b of out) b.x = musicWrap(xc + MUSIC_STEREO_JITTER * Lx * musicNormal(rng), Lx);
   return out;
 }
 // the energy of two opposite-signed gaussian blobs `sep` sigma apart over that of ONE:
@@ -356,26 +471,27 @@ function musicDipoleEnergy(sep) {
 }
 function musicKickBlobs(rng, kind, sigma, nblob, amp, o) {
   o = o || {};
-  const xc = o.xc, flip = l => l.map(b => Object.assign({}, b, { amp: -b.amp, pol: -1 }));
+  const xc = o.xc, box = o.box || null, Lx = box ? box[0] : MUSIC_LBOX, Ly = box ? box[1] : MUSIC_LBOX;
+  const flip = l => l.map(b => Object.assign({}, b, { amp: -b.amp, pol: -1 }));
   const same = l => l.map(b => Object.assign({}, b, { pol: -1 }));
-  if (kind === "elsasser") return musicPlaced(rng, sigma, nblob, amp, 1, xc).concat(musicPlaced(rng, sigma, nblob, amp, -1, xc));
+  if (kind === "elsasser") return musicPlaced(rng, sigma, nblob, amp, 1, xc, box).concat(musicPlaced(rng, sigma, nblob, amp, -1, xc, box));
   if (kind === "sheet" || kind === "sheet-island") {
     const ratio = o.ratio === undefined ? MUSIC_SHEET_RATIO : o.ratio;
     const a = amp * Math.sqrt(o.sheetEnergy === undefined ? 1 : o.sheetEnergy);
-    const one = pol => musicPlaced(rng, sigma, nblob, a, pol, xc)
+    const one = pol => musicPlaced(rng, sigma, nblob, a, pol, xc, box)
       .map(b => Object.assign(b, { ratio: ratio, theta: Math.PI * rng() }));
     if (kind === "sheet") return one(1).concat(one(-1));
     const p = one(1);
     return p.concat(flip(p));
   }
-  let b = musicPlaced(rng, sigma, nblob, amp, 1, xc);
+  let b = musicPlaced(rng, sigma, nblob, amp, 1, xc, box);
   if (kind === "dipole") {
     const pair = [[], []];
     for (const q of b) {
       const th = 2 * Math.PI * rng(), ox = 0.5 * MUSIC_DIPOLE_SEP * sigma * Math.cos(th),
             oy = 0.5 * MUSIC_DIPOLE_SEP * sigma * Math.sin(th);
-      pair[0].push(Object.assign({}, q, { x: musicWrap(q.x + ox), y: musicWrap(q.y + oy) }));
-      pair[1].push(Object.assign({}, q, { x: musicWrap(q.x - ox), y: musicWrap(q.y - oy), amp: -q.amp }));
+      pair[0].push(Object.assign({}, q, { x: musicWrap(q.x + ox, Lx), y: musicWrap(q.y + oy, Ly) }));
+      pair[1].push(Object.assign({}, q, { x: musicWrap(q.x - ox, Lx), y: musicWrap(q.y - oy, Ly), amp: -q.amp }));
     }
     b = pair[0].concat(pair[1]);
   }
@@ -410,10 +526,11 @@ function musicChannelsDiffer(magL, magR, tol) {
   }
   return d > (tol === undefined ? 1e-3 : tol) * pk;
 }
-// where that puts the band's blobs: x = L (0.5 + SPAN * clip(gain * pan)); x runs left to
-// right on the card
-function musicPanX(pan, gain) {
-  return MUSIC_LBOX * (0.5 + MUSIC_STEREO_SPAN * Math.min(1, Math.max(-1, (gain === undefined ? 1 : gain) * pan)));
+// where that puts the band's blobs: x = Lx (0.5 + SPAN * clip(gain * pan)); x runs left to
+// right on the card. `Lx` is the box's x side (default 2 pi): the long side in landscape; in
+// portrait the same map covers the short one.
+function musicPanX(pan, gain, Lx) {
+  return (Lx === undefined ? MUSIC_LBOX : Lx) * (0.5 + MUSIC_STEREO_SPAN * Math.min(1, Math.max(-1, (gain === undefined ? 1 : gain) * pan)));
 }
 
 // ---------------------------------------------------------------------------

@@ -33,6 +33,27 @@
 #                               seconds; at each factor 2 the state is replaced by its own
 #                               2x2 tiling (same velocities, half the size), so old
 #                               structure shrinks toward the dissipation scale
+#
+# The stage (plans-webgpu/MUSIC_STAGE_PLAN.md), also OFF by default:
+#   --aspect A [--grid NXxNY]   S2: the box takes the picture's shape. The SHORT side stays
+#                               2 pi and the long side is 2 pi * max(A, 1/A): A > 1 is
+#                               landscape (long in x, e.g. 1.7778 for 16:9), A < 1 portrait
+#                               (long in y, e.g. 0.5625). --grid sets nx and ny apart (cells
+#                               need not be square; default --n in both). See box_for and
+#                               band_plan for what follows the box: blob widths, blob
+#                               counts, placement, the hyperviscosity. The movie frame has
+#                               the box's shape, with square pixels (frame_shape).
+#   --sheets [1.5]              S4: a maintained current-sheet pair as the background, a
+#     [--sheet-width 2]         function of x alone, its field that multiple of --amp and
+#     [--sheet-profile bump]    a = that many narrowest-blob widths; restored against the
+#                               hyperviscosity and the drag, while the kicks decay as
+#                               before. Excludes --mean-field / --field-walk. Two profiles:
+#                               `bump` (the default), psi0 sech^2((x - Lx/2)/a), whose
+#                               field lives only within ~a of x = Lx/2 (sheet_equilibrium);
+#                               `harris`, a periodic double Harris sheet -- the field is
+#                               +-B0 everywhere and reverses at x = Lx/4 and 3Lx/4, so its
+#                               energy is ~B0^2/2 whatever the width (sheet_harris).
+#   --max-steps N               abort (RuntimeError) once the run has taken N steps
 #   python examples/music_turbulence_check.py   is the gate for all of them (fp64).
 #
 # A kick is a state edit between steps, not a forcing term: `forcing` stays off and the
@@ -425,7 +446,10 @@ class Stepper:
     that the adaptive dt would exceed it (each mode has its own Parameters and kgrid -- a
     kgrid is never reused across Parameters)."""
 
-    def __init__(self, n, dt_cap, diss, hyper, cfl=0.4, b0=None):
+    def __init__(self, n, dt_cap, diss, hyper, cfl=0.4, b0=None, Lx=LBOX, Ly=LBOX, source=False):
+        # n: the grid, one number (n x n) or (nx, ny); Lx, Ly: the box.
+        # source=True: the psi equation gets a constant source, set by set_equilibrium()
+        # before the first advance (the maintained current sheets; not with a mean field)
         # b0: None, (b0_of_t, b0_max) -- the in-plane mean field, see mean_field() -- or
         # "driven": (B0x, B0y) is then an argument of each advance() call, held over it,
         # and the field is in the EXACT linear step, so it costs no timestep
@@ -435,20 +459,55 @@ class Stepper:
             raise ValueError(f"b0 must be None, (b0_of_t, b0_max), 'driven' or 'driven-explicit', got {b0!r}")
         self.exact = b0 == "driven"
         self.b0_max = 0.0 if b0 is None or self.driven else float(b0[1])
-        kw = dict(nx=n, ny=n, Lx=LBOX, Ly=LBOX, cfl_safety=cfl, dims=2, comm_backend="serial",
+        if source and b0 is not None:
+            raise ValueError("the maintained equilibrium (source=True) does not go with a mean field")
+        nx, ny = (n, n) if np.ndim(n) == 0 else n
+        kw = dict(nx=nx, ny=ny, Lx=Lx, Ly=Ly, cfl_safety=cfl, dims=2, comm_backend="serial",
                   eqpars={"diss": (diss, diss), "hyper": hyper})
         self.p = jr.Parameters(adaptive_timestep=True, **kw)
         self.kg = jr.setup_kgrids(self.p)
         p_fix = jr.Parameters(adaptive_timestep=False, dt=dt_cap, **kw)
-        self._adaptive = self._build(self.p, self.kg, b0)
-        self._fixed = self._build(p_fix, jr.setup_kgrids(p_fix), b0)
-        self.dt_cap, self.cfl, self.dx = dt_cap, cfl, LBOX / n
+        self.source, self.src, self.psi_eq = bool(source), None, None
+        self._adaptive = self._build(self.p, self.kg, b0, self.source)
+        self._fixed = self._build(p_fix, jr.setup_kgrids(p_fix), b0, self.source)
+        # the smaller spacing is the one the fixed-dt switch in advance() has to respect
+        self.dt_cap, self.cfl, self.dx = dt_cap, cfl, min(Lx / nx, Ly / ny)
+
+    def set_equilibrium(self, psi_eq):
+        """The maintained equilibrium: `psi_eq` (nx,) complex, the k_y = 0 column of psi's
+        rfft2 (so psi_eq is a function of x alone), taken ONCE -- from the dealiased initial
+        state. The psi equation then carries the constant source -L psi_eq, L the solver's
+        own linear diagonal for psi (-nu k^(2 hyper)), which cancels the hyperviscous decay
+        of the equilibrium exactly and leaves everything else to decay as before. The drag
+        is not in the solver's L (it is the split step in run()), so its half of the source
+        is applied there, in the same split step: see drag()."""
+        if not self.source:
+            raise ValueError("set_equilibrium needs Stepper(source=True)")
+        psi_eq = jnp.asarray(psi_eq)
+        lpsi = self.kg.lin.dense()[1, 1]                    # (1, nx, nky)
+        src = jnp.zeros((2,) + lpsi.shape, dtype=psi_eq.dtype)
+        self.src = src.at[1, 0, :, 0].set(-lpsi[0, :, 0] * psi_eq)
+        self.psi_eq = psi_eq
 
     @staticmethod
-    def _build(params, kgrid, b0=None):
+    def _build(params, kgrid, b0=None, source=False):
         recipe = equation_registry[params.eqtype]
         rhs, set_timestep = construct_rhs(recipe), recipe.set_timestep_func
         stepper, scheme = get_scheme("lsrk33")
+        if source:
+            # the maintained equilibrium: a constant added to the nonlinear term, `src`
+            # (the fields' shape, zero outside psi's k_y = 0 column) an argument of the call
+            rhs0 = rhs
+
+            def to_target(state, target, src):
+                def rhs(state, kgrid, params):
+                    f, grads = rhs0(state, kgrid, params)
+                    return f + src.astype(f.dtype), grads
+
+                def body(c):
+                    return stepper(c[0], kgrid, params, rhs, set_timestep, scheme), c[1] + 1
+                return jax.lax.while_loop(lambda c: c[0].t < target, body, (state, 0))
+            return jax.jit(to_target, donate_argnums=(0,))
         if b0 == "driven":
             # the linear pair below, d_t (phi, psi) = i k.B0 (psi, phi), as the off-diagonal
             # of the solver's own L: the integrating-factor step then carries the field's
@@ -524,6 +583,10 @@ class Stepper:
         b0 = float(np.hypot(*bvec)) if self.driven and not self.exact else self.b0_max
         slow = 0.5 * self.cfl * self.dx / max(umax + 2.0 * b0, 1e-30) > self.dt_cap
         args = (jnp.asarray(bvec, float),) if self.driven else ()
+        if self.source:
+            if self.src is None:
+                raise ValueError("Stepper(source=True): call set_equilibrium() before advance()")
+            args = (self.src,)
         state, nstep = (self._fixed if slow else self._adaptive)(state, target, *args)
         return state, int(nstep)
 
@@ -557,6 +620,8 @@ def regrid(fields, dealias=None):
     with |2 k_x| or 2 k_y at or past n/2, and then `dealias` (the solver's mask) if given.
     Returns a numpy array of the same shape and dtype."""
     f = np.asarray(fields)
+    if f.shape[3] != f.shape[2] // 2 + 1:
+        return _regrid_rect(f, dealias)
     n = f.shape[2]
     out = np.zeros_like(f)
     ix = np.fft.fftfreq(n, 1.0 / n).astype(int)          # the integer k_x of each row
@@ -570,16 +635,144 @@ def regrid(fields, dealias=None):
     return out.astype(f.dtype)
 
 
+def _regrid_rect(f, dealias=None):
+    # regrid on an nx x ny grid with nx != ny: the same map, each axis with its own n (the
+    # box lengths do not enter: k -> 2k and x_c = (n - 1)/2 spacings are in index units)
+    nx, ny = f.shape[2], 2 * (f.shape[3] - 1)
+    out = np.zeros_like(f)
+    ix = np.fft.fftfreq(nx, 1.0 / nx).astype(int)
+    keep_i = np.nonzero(2 * np.abs(ix) < nx // 2)[0]
+    j = np.arange((ny // 2 - 1) // 2 + 1)
+    ph = np.exp(-1j * (0.5 * (nx - 1) * (2.0 * np.pi / nx) * ix[keep_i][:, None]
+                       + 0.5 * (ny - 1) * (2.0 * np.pi / ny) * j[None, :]))
+    out[:, :, ((2 * ix[keep_i]) % nx)[:, None], (2 * j)[None, :]] = 0.5 * ph * f[:, :, keep_i][..., j]
+    if dealias is not None:
+        out = out * np.asarray(dealias)
+    return out.astype(f.dtype)
+
+
+def box_for(aspect=1.0):
+    """(Lx, Ly) of the box for a picture of that aspect (width over height): the SHORT side
+    is 2 pi and the long side 2 pi * max(aspect, 1/aspect). aspect >= 1 is landscape (long
+    in x), aspect < 1 portrait (long in y). aspect 1 is exactly the square 2 pi box."""
+    if not aspect > 0.0:
+        raise ValueError(f"aspect must be positive, got {aspect}")
+    return (LBOX * aspect, LBOX) if aspect >= 1.0 else (LBOX, LBOX / aspect)
+
+
+def cutoff_k(nx, ny, Lx=LBOX, Ly=LBOX):
+    """The smaller of the two dealiasing cutoffs, in k: the solver's 2/3 mask is in mode
+    INDEX (n/3 along each axis), so in a rectangular box or grid the two axes stop at
+    different wavenumbers, and the coarser one is the one that has to be resolved."""
+    return min((nx / 3.0) * (2.0 * np.pi / Lx), (ny / 3.0) * (2.0 * np.pi / Ly))
+
+
+def frame_shape(nx, ny, Lx=LBOX, Ly=LBOX):
+    """(width, height) in pixels of the movie frame: the box's shape with SQUARE pixels, at
+    the pixel size of the finer of the two grid spacings, each side rounded to an even
+    number (the codec needs that). (nx, ny) itself whenever the cells are square."""
+    if Lx * ny == Ly * nx:
+        return nx, ny
+    px = min(Lx / nx, Ly / ny)
+    return 2 * int(round(0.5 * Lx / px)), 2 * int(round(0.5 * Ly / px))
+
+
+def resample_frame(u, shape):
+    """`u` (rows, columns), periodic, resampled bilinearly to shape = (rows, columns): the
+    whole box on the new pixels, pixel centres at (i + 1/2)/n of the box before and after.
+    Returns u itself when the shape is already that."""
+    if u.shape == tuple(shape):
+        return u
+    from scipy.ndimage import map_coordinates
+    i0 = (np.arange(shape[0]) + 0.5) * u.shape[0] / shape[0] - 0.5
+    i1 = (np.arange(shape[1]) + 0.5) * u.shape[1] / shape[1] - 0.5
+    return map_coordinates(u, np.meshgrid(i0, i1, indexing="ij"), order=1, mode="grid-wrap")
+
+
+# the maintained current sheets (S4)
+def sheet_psi0(strength, amp, a):
+    """psi0 of psi_eq = psi0 sech^2((x - Lx/2)/a) whose peak field is strength * amp.
+    B = zhat x grad(psi), so |B| = |d psi_eq/dx| = (2 psi0/a) sech^2(u) |tanh(u)|, which is
+    largest where tanh^2(u) = 1/3: (2 psi0/a) (2/3) / sqrt(3) = 4 psi0 / (3 sqrt(3) a).
+    Hence psi0 = (3 sqrt(3)/4) a strength amp."""
+    return 0.75 * np.sqrt(3.0) * a * strength * amp
+
+
+def sheet_equilibrium(x, Lx, psi0, a):
+    """psi_eq(x) = psi0 sech^2((x - Lx/2)/a), summed over the nearest periodic images so it
+    is smooth across the box edge (the images are below 1e-6 psi0 for a < Lx/16): one
+    current sheet at x = Lx/2 (the field reverses across it) with weaker return currents of
+    the opposite sign either side, no net flux. numpy or jax."""
+    return psi0 * sum(1.0 / jnp.cosh((x - 0.5 * Lx + m * Lx) / a) ** 2 for m in (-1, 0, 1))
+
+
+def log_cosh(u):
+    """ln cosh(u) without the overflow: cosh u = e^|u| (1 + e^-2|u|)/2. numpy or jax."""
+    z = jnp.abs(u)
+    return z + jnp.log1p(jnp.exp(-2.0 * z)) - np.log(2.0)
+
+
+def harris_slope(a, Lx):
+    """The mean of tanh((x - Lx/4)/a) - tanh((x - 3Lx/4)/a) over the box,
+    (2a/Lx) [ln cosh(3Lx/4a) - ln cosh(Lx/4a)]: 1 - O(e^(-Lx/2a)). It is what sheet_harris
+    subtracts in place of the 1 of the ideal profile, so that psi_eq is exactly periodic."""
+    lc = lambda u: u + np.log1p(np.exp(-2.0 * u))           # ln cosh + ln 2, u > 0 (plain numpy:
+    return float(2.0 * a / Lx * (lc(0.75 * Lx / a) - lc(0.25 * Lx / a)))   # this is called under a trace)
+
+
+def sheet_harris(x, Lx, b0, a):
+    """The periodic double Harris sheet. With B = zhat x grad(psi), i.e. B_y = +d psi/dx,
+
+        B_y(x)    = b0 [tanh((x - Lx/4)/a) - tanh((x - 3Lx/4)/a) - c]
+        psi_eq(x) = b0 a [ln cosh((x - Lx/4)/a) - ln cosh((x - 3Lx/4)/a)] - b0 c (x - Lx/2)
+
+    c = harris_slope(a, Lx) = 1 up to e^(-Lx/2a): the field is -b0 outside the two sheets
+    and +b0 between them, reversing over ~a at x = Lx/4 and 3Lx/4 (currents of opposite
+    sign), with no net flux. c instead of 1 makes psi_eq(0) = psi_eq(Lx) exactly; B_y is
+    periodic by symmetry. b0 is the far field AND the peak field. numpy or jax."""
+    c = harris_slope(a, Lx)
+    return b0 * a * (log_cosh((x - 0.25 * Lx) / a) - log_cosh((x - 0.75 * Lx) / a)) - b0 * c * (x - 0.5 * Lx)
+
+
+def harris_energy_eq(b0, a, Lx):
+    """Volume-averaged energy (1/2)<B_y^2> of sheet_harris: B_y^2 = b0^2 except within the
+    two sheets, each of which removes b0^2 int (1 - tanh^2) dx = 2 a b0^2, so
+    (b0^2/2)(1 - 4a/Lx) -- up to e^(-Lx/2a), the sheets' overlap."""
+    return 0.5 * b0 ** 2 * (1.0 - 4.0 * a / Lx)
+
+
+SHEET_PROFILES = ("bump", "harris")
+
+
+def sheet_energy_eq(psi0, a, Lx):
+    """Volume-averaged energy (1/2)<|grad psi_eq|^2> of the equilibrium:
+    (1/2)(2 psi0/a)^2 (a/Lx) int sech^4 tanh^2 du, the integral being 4/15."""
+    return 8.0 * psi0 ** 2 / (15.0 * a * Lx)
+
+
+def drag(fields, decay, psi_eq=None):
+    """The drag over one interval: fields * decay, decay = exp(-dt/(2 memory)). With a
+    maintained equilibrium `psi_eq` (see Stepper.set_equilibrium) the drag's half of the
+    source -L psi_eq is integrated exactly with it: psi's k_y = 0 column relaxes TO psi_eq
+    instead of to zero, psi -> psi_eq + (psi - psi_eq) decay. Everything else, kicks
+    included, decays as without it."""
+    fields = fields * decay
+    if psi_eq is not None:
+        fields = fields.at[1, 0, :, 0].add(((1.0 - decay) * psi_eq).astype(fields.dtype))
+    return fields
+
+
 def make_kick(params, kgrid):
-    x = jnp.linspace(0.0, LBOX, params.nx, endpoint=False).reshape(-1, 1)
-    y = jnp.linspace(0.0, LBOX, params.ny, endpoint=False).reshape(1, -1)
+    Lx, Ly = float(params.Lx), float(params.Ly)
+    x = jnp.linspace(0.0, Lx, params.nx, endpoint=False).reshape(-1, 1)
+    y = jnp.linspace(0.0, Ly, params.ny, endpoint=False).reshape(1, -1)
 
     def potential(blobs):
         # blobs (NBLOB_MAX, 4): x0, y0, sigma, peak |grad| (signed; 0 = unused slot).
         # gaussian A exp(-r^2/2 sigma^2) has peak |grad| = A e^{-1/2}/sigma at r = sigma.
         def one(b):
-            ddx = (x - b[0] + 0.5 * LBOX) % LBOX - 0.5 * LBOX   # minimum image
-            ddy = (y - b[1] + 0.5 * LBOX) % LBOX - 0.5 * LBOX
+            ddx = (x - b[0] + 0.5 * Lx) % Lx - 0.5 * Lx   # minimum image
+            ddy = (y - b[1] + 0.5 * Ly) % Ly - 0.5 * Ly
             return b[3] * b[2] * np.exp(0.5) * jnp.exp(-(ddx**2 + ddy**2) / (2.0 * b[2]**2))
         return jnp.sum(jax.vmap(one)(blobs), axis=0)
 
@@ -597,7 +790,7 @@ def make_kick(params, kgrid):
             c, s = jnp.cos(b[5]), jnp.sin(b[5])
             ka, kb = -s * kx + c * ky, c * kx + s * ky
             sa, sb = b[2], b[2] * b[4]
-            w = b[3] * sa * np.exp(0.5) * 2.0 * np.pi * sa * sb * params.nx * params.ny / LBOX**2
+            w = b[3] * sa * np.exp(0.5) * 2.0 * np.pi * sa * sb * params.nx * params.ny / (Lx * Ly)
             return w * jnp.exp(-0.5 * ((sa * ka)**2 + (sb * kb)**2) - 1j * (kx * b[0] + ky * b[1]))
         return jnp.sum(jax.vmap(one)(blobs), axis=0)
 
@@ -645,38 +838,48 @@ SIGMA_STEP = 1.8         # neighbouring blob widths closer than this look the sa
 NBLOB_BASS = 3           # blobs per kick per channel in the bass band; others scale as 1/sigma
 
 
-def band_plan(n, nbands=None, sigma_min=None):
-    """(sigmas, nblobs) per band, bass first.
+def band_plan(n, nbands=None, sigma_min=None, Lx=LBOX, Ly=LBOX):
+    """(sigmas, nblobs) per band, bass first. n: the grid, one number or (nx, ny).
 
     Widths are log-spaced from SIGMA_MAX down to sigma_min (default SIGMA_MIN_DX grid
     spacings, so it shrinks with n). The number of bands defaults to as many widths as fit
     with a factor SIGMA_STEP between neighbours: 4 at 256^2, 5 at 512^2, 6 at 1024^2. The
     blob count goes as 1/sigma, which makes the energy per kick fall only as sigma (it is
     nblob sigma^2) instead of sigma^2.
+
+    In a rectangular box (Lx, Ly) or on a grid with nx != ny: the narrowest blob is
+    SIGMA_MIN_DX of the LARGER of the two grid spacings (it has to be resolved along both
+    axes); the widest stays SIGMA_MAX, a fraction of the short side, which is always 2 pi;
+    and the blob counts are multiplied by the box's area over (2 pi)^2 -- exactly 1 for the
+    square box -- so a wider box is not sparser.
     """
+    nx, ny = (n, n) if np.ndim(n) == 0 else n
     if sigma_min is None:
-        sigma_min = SIGMA_MIN_DX * LBOX / n
+        sigma_min = max(SIGMA_MIN_DX * Lx / nx, SIGMA_MIN_DX * Ly / ny)
     if not 0.0 < sigma_min <= SIGMA_MAX:
         raise ValueError(f"sigma_min must be in (0, {SIGMA_MAX}], got {sigma_min}")
     if nbands is None:
         nbands = max(1, int(round(1.0 + np.log(SIGMA_MAX / sigma_min) / np.log(SIGMA_STEP))))
     sigmas = SIGMA_MAX * (sigma_min / SIGMA_MAX) ** (np.arange(nbands) / max(nbands - 1, 1))
-    nblobs = np.rint(NBLOB_BASS * SIGMA_MAX / sigmas).astype(int)
+    nblobs = np.rint(NBLOB_BASS * SIGMA_MAX / sigmas * ((Lx / LBOX) * (Ly / LBOX))).astype(int)
     if nblobs.max() > NBLOB_MAX:
         raise ValueError(f"{nblobs.max()} blobs per kick in the top band exceeds NBLOB_MAX = "
                          f"{NBLOB_MAX}: raise it or sigma_min")
     return sigmas, nblobs
 
 
-def blobs_for(rng, sigma, nblob, amp, xc=None):
+def blobs_for(rng, sigma, nblob, amp, xc=None, box=None):
     # one kick's blobs for ONE channel: positions uniform, signs random. Called once per
     # channel, which is what makes the z+ and z- sets independent. With `xc` (stereo
     # placement) x is instead gaussian about xc, width STEREO_JITTER of the box; y stays
     # uniform. xc=None draws exactly what it always drew.
+    # box = (Lx, Ly), default the square 2 pi box: x is drawn over Lx and y over Ly, from
+    # the same stream (one uniform per coordinate), and the stereo scatter is in units of Lx.
+    Lx, Ly = (LBOX, LBOX) if box is None else box
     out = np.zeros((nblob, 4))
-    out[:, 0:2] = rng.uniform(0.0, LBOX, size=(nblob, 2))
+    out[:, 0:2] = rng.uniform(0.0, (Lx, Ly), size=(nblob, 2))
     if xc is not None:
-        out[:, 0] = (xc + STEREO_JITTER * LBOX * rng.standard_normal(nblob)) % LBOX
+        out[:, 0] = (xc + STEREO_JITTER * Lx * rng.standard_normal(nblob)) % Lx
     out[:, 2] = sigma
     out[:, 3] = amp * rng.choice([-1.0, 1.0], size=nblob)
     return out
@@ -708,7 +911,7 @@ def kick_types_for(spec, nbands):
     return tuple(names)
 
 
-def kick_blobs(rng, kind, sigma, nblob, amp, xc=None, ratio=SHEET_RATIO, sheet_energy=1.0):
+def kick_blobs(rng, kind, sigma, nblob, amp, xc=None, ratio=SHEET_RATIO, sheet_energy=1.0, box=None):
     """One kick's (z+ list, z- list). Every entry has peak |grad z| = `amp` in its channel,
     and phi += (z+ + z-)/2, psi += (z+ - z-)/2, so:
 
@@ -725,12 +928,14 @@ def kick_blobs(rng, kind, sigma, nblob, amp, xc=None, ratio=SHEET_RATIO, sheet_e
                 times `sheet_energy` (the amplitude is scaled by its square root).
       sheet-island  one set of sheets, sign flipped in z-: psi only, magnetic sheets. The
                 same energy per kick as `sheet`.
+
+    box = (Lx, Ly) as in blobs_for (default: the square 2 pi box).
     """
     if kind == "elsasser":
-        return blobs_for(rng, sigma, nblob, amp, xc), blobs_for(rng, sigma, nblob, amp, xc)
+        return blobs_for(rng, sigma, nblob, amp, xc, box), blobs_for(rng, sigma, nblob, amp, xc, box)
     if kind in ("sheet", "sheet-island"):
         def one():
-            b = blobs_for(rng, sigma, nblob, amp * np.sqrt(sheet_energy), xc)
+            b = blobs_for(rng, sigma, nblob, amp * np.sqrt(sheet_energy), xc, box)
             return np.column_stack([b, np.full(nblob, ratio), rng.uniform(0.0, np.pi, nblob)])
         if kind == "sheet":
             return one(), one()
@@ -738,7 +943,7 @@ def kick_blobs(rng, kind, sigma, nblob, amp, xc=None, ratio=SHEET_RATIO, sheet_e
         m = b.copy()
         m[:, 3] *= -1.0
         return b, m
-    b = blobs_for(rng, sigma, nblob, amp, xc)
+    b = blobs_for(rng, sigma, nblob, amp, xc, box)
     if kind == "dipole":
         th = rng.uniform(0.0, 2.0 * np.pi, nblob)
         off = 0.5 * DIPOLE_SEP * sigma * np.column_stack([np.cos(th), np.sin(th)])
@@ -746,7 +951,7 @@ def kick_blobs(rng, kind, sigma, nblob, amp, xc=None, ratio=SHEET_RATIO, sheet_e
         b[:nblob, 0:2] += off
         b[nblob:, 0:2] -= off
         b[nblob:, 3] *= -1.0
-        b[:, 0:2] %= LBOX
+        b[:, 0:2] %= LBOX if box is None else np.asarray(box)
     m = b.copy()
     if kind == "island":
         m[:, 3] *= -1.0
@@ -781,7 +986,24 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         duration=None, audio_path=None, quiet=False, kick_types=None, sheet_ratio=SHEET_RATIO,
         stereo=None, stereo_gain=1.0, stereo_bands=None, sheet_energy=1.0,
         pulse=0.0, pulse_tau=0.25, pulse_band=0, mean_field_b0=0.0, section_every=None,
-        section_kw=None, turn_s=2.0, field_walk=None, ratio_walk=0.0, walk_tau=0.1, zoom_out=0.0):
+        section_kw=None, turn_s=2.0, field_walk=None, ratio_walk=0.0, walk_tau=0.1, zoom_out=0.0,
+        aspect=1.0, grid=None, sheets=0.0, sheets_width=2.0, sheets_source=True, sheets_profile="bump",
+        max_steps=None):
+    # max_steps: abort with a RuntimeError once the run has taken that many steps.
+    # sheets_profile: "bump" (the default) is the
+    # sech^2 profile described below, `sheets` its peak field in units of amp; "harris" is
+    # the periodic double Harris sheet (sheet_harris), `sheets` its far field B0 in units
+    # of amp. Width, maintenance and the exclusions are the same for both.
+    # aspect, grid: the box (box_for(aspect): short side 2 pi) and the grid (nx, ny), default
+    # (n, n). The defaults are the square 2 pi box on n x n, and then nothing below differs
+    # from what it was before either existed.
+    # sheets: the maintained current-sheet equilibrium psi_eq = psi0 sech^2((x - Lx/2)/a)
+    # as the initial condition and background, its peak field `sheets` * amp (0 = off) and
+    # a = sheets_width * the narrowest blob width. It is restored against the hyperviscosity
+    # (a source in the psi equation, Stepper.set_equilibrium) and the drag (drag()); the
+    # kicks are not part of it and decay as before. Not with a mean field of either kind.
+    # sheets_source=False keeps the initial condition and drops the restoring source: the
+    # control the gate uses (the sheets then decay at the drag rate).
     # zoom_out: seconds of audio per factor 2 of the zoom-out (0 = off). The picture shows
     # a window of the tiling that grows as 2^(t/zoom_out); every zoom_out seconds the state
     # is re-gridded (regrid) and the window is the box again.
@@ -805,7 +1027,17 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         audio = audio[:int(duration * sr)]
         stereo = None if stereo is None else stereo[:int(duration * sr)]
     T = len(audio) / sr
-    sigmas, nblobs = band_plan(n, nbands, sigma_min)
+    if sheets and (mean_field_b0 or field_walk is not None or ratio_walk):
+        raise ValueError("sheets and a mean field (mean_field_b0, field_walk, ratio_walk) are "
+                         "two backgrounds: choose one")
+    if sheets_profile not in SHEET_PROFILES:
+        raise ValueError(f"sheets_profile must be one of {SHEET_PROFILES}, got {sheets_profile!r}")
+    if sheets < 0.0 or (sheets and not sheets_width > 0.0):
+        raise ValueError(f"sheets must be >= 0 and sheets_width > 0, got {sheets}, {sheets_width}")
+    Lx, Ly = box_for(aspect)
+    nx, ny = (n, n) if grid is None else grid
+    box = None if (Lx, Ly) == (LBOX, LBOX) else (Lx, Ly)
+    sigmas, nblobs = band_plan((nx, ny), nbands, sigma_min, Lx, Ly)
     nbands = len(sigmas)
     kinds = kick_types_for(kick_types, nbands)
     if causal:
@@ -825,7 +1057,8 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
             raise ValueError(f"stereo_bands must be band indices 0..{nbands - 1}, got {list(stereo_bands)}")
         pans = onset_pans(sr, stereo, t_on, b_on, edges)
         # x runs left to right in the movie (frame = img.T[::-1])
-        xcs = LBOX * (0.5 + STEREO_SPAN * np.clip(stereo_gain * pans, -1.0, 1.0))
+        # (and x is the long side in landscape; in portrait the same map covers the short one)
+        xcs = Lx * (0.5 + STEREO_SPAN * np.clip(stereo_gain * pans, -1.0, 1.0))
         xcs = [float(x) if b in stereo_bands else None for x, b in zip(xcs, b_on)]
     if not quiet:
         for b in range(nbands):
@@ -849,7 +1082,9 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         # 3 amp at k = n/4.2 where k^4 reached it at n/6, ~1.4x more undamped range, with
         # the same bass energy jump per kick (256^2 click track: E(40)/E(10) 6.8e-2 against
         # 2.3e-2, E(60)/E(10) 1.1e-2 against 1.0e-3, tail still falling to 2e-4 at k = 84).
-        diss = 48.0 * amp / (n / 3.0) ** (2 * hyper)
+        # In a rectangular box or grid the cutoff is the SMALLER of the two axes' (cutoff_k,
+        # which is n/3 for the square 2 pi box).
+        diss = 48.0 * amp / cutoff_k(nx, ny, Lx, Ly) ** (2 * hyper)
 
     b0, sections = None, None
     walk = None
@@ -879,9 +1114,41 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         if not quiet:
             print(f"  mean field {mean_field_b0 * amp:.2f}, direction redrawn at "
                   + (" ".join(f"{t:.0f}" for t in sections) or "no time") + " s", flush=True)
-    step = Stepper(n, rate / (4.0 * fps), diss, hyper, cfl, b0)
+    step = Stepper((nx, ny), rate / (4.0 * fps), diss, hyper, cfl, b0, Lx, Ly, source=bool(sheets) and sheets_source)
     kick, observe = make_kick(step.p, step.kg)
-    state = jr.initialize(lambda x, y: jnp.zeros((2, 1, n, n)), step.p)
+    psi_eq, sheet_info = None, None
+    if sheets:
+        a_eq = sheets_width * float(sigmas[-1])
+        harris = sheets_profile == "harris"
+        psi0 = None if harris else sheet_psi0(sheets, amp, a_eq)
+        if harris and not a_eq < Lx / 8.0:
+            raise ValueError(f"harris sheets of width a = {a_eq:.3f} do not fit: need a < Lx/8 = {Lx / 8.0:.3f}")
+
+        def sheet_ic(x, y):
+            psi = (sheet_harris(x, Lx, sheets * amp, a_eq) if harris
+                   else sheet_equilibrium(x, Lx, psi0, a_eq)) + 0.0 * y
+            return jnp.stack([jnp.zeros_like(psi), psi])
+        state = jr.initialize(sheet_ic, step.p)
+        # the equilibrium the source maintains IS the dealiased initial state's k_y = 0
+        # column, taken once: nothing a kick adds to that column later is part of it
+        col = state.fields[1, 0, :, 0] + 0.0
+        if sheets_source:
+            step.set_equilibrium(col)
+            psi_eq = step.psi_eq
+        sheet_info = dict(psi0=psi0, a=a_eq, psi_eq=np.asarray(col), profile=sheets_profile, b0=sheets * amp,
+                          energy=harris_energy_eq(sheets * amp, a_eq, Lx) if harris else sheet_energy_eq(psi0, a_eq, Lx))
+        if not quiet:
+            print(f"  current sheets ({sheets_profile}): "
+                  + ("" if harris else f"psi0 = {psi0:.4f}, ")
+                  + f"a = {a_eq:.4f} ({sheets_width:g} x the narrowest blob), "
+                  f"{'field +-' if harris else 'peak field '}{sheets * amp:.2f}, energy {sheet_info['energy']:.4f}"
+                  + ("" if sheets_source else " (NOT maintained)"), flush=True)
+    else:
+        state = jr.initialize(lambda x, y: jnp.zeros((2, 1, nx, ny)), step.p)
+    fw, fh = frame_shape(nx, ny, Lx, Ly)
+    if not quiet and (box is not None or nx != ny):
+        print(f"  box {Lx:.4f} x {Ly:.4f} on {nx} x {ny} (cells {Lx / nx:.4f} x {Ly / ny:.4f}), "
+              f"frame {fw} x {fh}, cutoff k = {cutoff_k(nx, ny, Lx, Ly):.1f}", flush=True)
 
     # events in audio seconds: (time, kind, payload); kind 0 = kick, 1 = frame, so a kick
     # that coincides with a frame is in that frame
@@ -906,6 +1173,10 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
                                 macro_block_size=None, pixelformat="yuv420p")
     vmax, energy, umaxs, late, jumps = None, [], [], [], [[] for _ in range(nbands)]
     umax, t_prev, nsteps, e, t_walk, regrids = 0.0, 0.0, 0, 0.0, 0.0, []
+    if sheets:
+        # the run does not start from rest: the first advance needs the equilibrium's speed
+        _, umax, e = observe(state.fields)
+        umax, e = float(umax), float(e)
     t0 = time.perf_counter()
     for t_ev, kind, payload in events:
         if walk is None:
@@ -921,10 +1192,13 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
             walk["bvec"] = (bmag * np.cos(walk["th"]), bmag * np.sin(walk["th"]))
             state, k = step.advance(state, rate * t_ev, umax, walk["bvec"])
         nsteps += k
+        if max_steps is not None and nsteps > max_steps:
+            writer.close()
+            raise RuntimeError(f"more than max_steps = {max_steps} steps by t = {t_ev:.2f} s ({nsteps})")
         t_now = float(state.t)
         late.append((t_now - rate * t_ev) / rate)
         if memory is not None and t_now > t_prev:
-            state = state._replace(fields=state.fields * float(np.exp(-(t_now - t_prev) / (2.0 * memory * rate))))
+            state = state._replace(fields=drag(state.fields, float(np.exp(-(t_now - t_prev) / (2.0 * memory * rate))), psi_eq))
         t_prev = t_now
         if kind == -1:
             e_before = float(observe(state.fields)[2])
@@ -943,7 +1217,7 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
                     walk["r_to"] = x if x <= mean_field_b0 else 2.0 * mean_field_b0 - x
             e_before = float(observe(state.fields)[2])
             bp, bm = kick_blobs(rng, kinds[band], sigmas[band], nblobs[band], amp * strength,
-                                xc, sheet_ratio, sheet_energy)
+                                xc, sheet_ratio, sheet_energy, *(() if box is None else (box,)))
             state = state._replace(fields=kick(state.fields, pad(bp), pad(bm)))
             _, umax, e = observe(state.fields)
             umax, e = float(umax), float(e)
@@ -962,7 +1236,9 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         # as a brightening rather than being normalised away frame by frame
         cur = max(np.percentile(np.abs(img), 99.5), 1e-12)
         vmax = cur if vmax is None else max(vmax + (cur - vmax) / (4.0 * fps), 0.5 * cur)
-        u = img.T[::-1] / vmax
+        # x runs left to right and y bottom to top; resampled to the box's shape with square
+        # pixels when the cells are not square (a no-op otherwise)
+        u = resample_frame(img.T[::-1] / vmax, (fh, fw))
         zz = 1.0 if zooms is None else zooms[payload]
         if zoom_out:
             zz *= zoom_out_scale(t_ev, zoom_out, len(regrids))
@@ -983,7 +1259,7 @@ def run(sr, audio, out, *, n=256, fps=30, rate=1.0, amp=1.0, memory=1.0, nbands=
         os.remove(video)
 
     return dict(energy=np.array(energy), umax=np.array(umaxs), late=np.array(late), jumps=jumps,
-                onsets=(t_on, b_on, s_on), kick_types=kinds, pans=pans, zooms=zooms, sections=sections, regrids=regrids, walk=None if walk is None else np.array(walk["trace"]), edges=edges, sigmas=sigmas, nblobs=nblobs, fps=fps, diss=diss, nsteps=nsteps, fields=np.asarray(state.fields),
+                onsets=(t_on, b_on, s_on), kick_types=kinds, pans=pans, zooms=zooms, sections=sections, regrids=regrids, sheets=sheet_info, box=(Lx, Ly), grid=(nx, ny), frame=(fw, fh), walk=None if walk is None else np.array(walk["trace"]), edges=edges, sigmas=sigmas, nblobs=nblobs, fps=fps, diss=diss, nsteps=nsteps, fields=np.asarray(state.fields),
                 duration=T, wall=time.perf_counter() - t0)
 
 
@@ -1013,8 +1289,8 @@ def pulse_zoom(t_frames, t_on, s_on, a=0.08, tau=0.25):
 
 
 def zoom_image(img, s, blur=True):
-    """`img` (square, PERIODIC) magnified by s about its centre, same shape: output pixel i
-    shows the input at c + (i - c)/s, c = (n - 1)/2, bilinear, wrapping. The box is
+    """`img` (PERIODIC, any shape, square pixels) magnified by s about its centre, same shape: output pixel i
+    shows the input at c + (i - c)/s, c = (n - 1)/2 along each axis, bilinear, wrapping. The box is
     periodic, so s < 1 shows the tiling (after a blur matched to the coarser sampling, unless
     blur=False); s == 1 returns img itself."""
     if s == 1.0:
@@ -1061,6 +1337,25 @@ def main():
     ap.add_argument("wav", nargs="?", help="PCM WAV file; omit for the built-in click track")
     ap.add_argument("--out", default="music_turbulence.mp4")
     ap.add_argument("--n", type=int, default=256)
+    ap.add_argument("--aspect", type=float, default=1.0,
+                    help="S2: the picture's width over height. The box's short side stays 2 pi and "
+                         "its long side is 2 pi * max(A, 1/A): A > 1 landscape (1.7778 = 16:9), "
+                         "A < 1 portrait (0.5625 = 9:16)")
+    ap.add_argument("--grid", default=None, metavar="NXxNY",
+                    help="S2: the grid, x by y, e.g. 512x256 (default: --n in both; the cells need "
+                         "not be square)")
+    ap.add_argument("--sheets", type=float, nargs="?", const=1.5, default=0.0,
+                    help="S4: a maintained current-sheet pair psi0 sech^2((x - Lx/2)/a) as the "
+                         "background, peak field in units of --amp (1.5 if no value); not with "
+                         "--mean-field / --field-walk / --ratio-walk")
+    ap.add_argument("--sheet-profile", choices=SHEET_PROFILES, default="bump",
+                    help="with --sheets: bump (default) = psi0 sech^2((x - Lx/2)/a), --sheets = its "
+                         "peak field/amp; harris = periodic double Harris sheet, field +-B0 "
+                         "everywhere, reversing at x = Lx/4 and 3Lx/4, --sheets = B0/amp")
+    ap.add_argument("--max-steps", type=int, default=None,
+                    help="abort once the run has taken this many steps")
+    ap.add_argument("--sheet-width", type=float, default=2.0,
+                    help="with --sheets: a in units of the narrowest blob width")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--rate", type=float, default=1.0, help="simulation time units per second of audio")
     ap.add_argument("--amp", type=float, default=1.0, help="kick: peak |grad z| of a full-strength blob")
@@ -1141,6 +1436,13 @@ def main():
     if a.stereo and lr is None:
         print("  --stereo: one-channel input -- uniform placement")
     stereo_bands = None if a.stereo_bands is None else [int(b) for b in a.stereo_bands.split(",")]
+    grid = None
+    if a.grid is not None:
+        try:
+            grid = tuple(int(v) for v in a.grid.lower().split("x"))
+            assert len(grid) == 2 and min(grid) > 0
+        except (ValueError, AssertionError):
+            ap.error(f"--grid: need NXxNY, e.g. 512x256, got {a.grid!r}")
     res = run(sr, audio, a.out, n=a.n, fps=a.fps, rate=a.rate, amp=a.amp, memory=a.memory or None, nbands=a.bands, sigma_min=a.sigma_min, diss=a.diss, hyper=a.hyper, cfl=a.cfl, threshold=a.threshold, causal=a.causal,
               field=a.field, cmap=a.cmap, seed=a.seed, duration=duration, audio_path=audio_path,
               kick_types=a.kick_types, sheet_ratio=a.sheet_ratio, stereo=lr if a.stereo else None,
@@ -1148,9 +1450,12 @@ def main():
               pulse=a.pulse, pulse_tau=a.pulse_tau, pulse_band=a.pulse_band,
               mean_field_b0=a.mean_field, section_every=a.section_every,
               section_kw=None if a.section_threshold is None else dict(threshold=a.section_threshold),
-              field_walk=a.field_walk, ratio_walk=a.ratio_walk, zoom_out=a.zoom_out)
+              field_walk=a.field_walk, ratio_walk=a.ratio_walk, zoom_out=a.zoom_out,
+              aspect=a.aspect, grid=grid, sheets=a.sheets, sheets_width=a.sheet_width,
+              sheets_profile=a.sheet_profile, max_steps=a.max_steps)
     t_on, b_on, _ = res["onsets"]
-    print(f"wrote {a.out}  ({res['wall']:.0f} s wall, {res['nsteps']} steps, diss = {res['diss']:.2e}, "
+    print(f"wrote {a.out}  ({res['wall']:.0f} s wall, {res['nsteps']} steps = "
+          f"{res['nsteps'] / res['duration']:.1f} per second of audio, diss = {res['diss']:.2e}, "
           f"events late by {1e3 * res['late'].mean():.1f} ms mean / {1e3 * res['late'].max():.1f} ms max)")
     if res["regrids"]:
         print("  re-grids at " + " ".join(f"{t:g}" for t, _ in res["regrids"]) + " s; energy kept: "

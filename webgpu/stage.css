@@ -1,0 +1,92 @@
+/* The music page as a stage (plans-webgpu/MUSIC_STAGE_PLAN.md, S1; built by stage.js).
+   Linked from music.html ONLY, and every rule is scoped under `html.stage` or `#stage`,
+   both of which exist only when the URL carries ?stage -- so without the flag this file
+   matches nothing and the page is the shipped one.
+
+   Stacking inside #stage, low to high: the picture (.cvwrap), canvas.traces (traces.js),
+   the controls (#stageUi: the bar and the drawer), a page-stopping error (#stageFatal). */
+
+html.stage, html.stage body { margin: 0; padding: 0; height: 100%; overflow: hidden;
+                              background: #000; overscroll-behavior: none; }
+/* nothing of the card layout is left on screen: the title, the chart column, the footer */
+html.stage body > :not(#stage) { display: none !important; }
+
+/* the whole window. `inset: 0` pins it; the explicit height then wins over `bottom`, and
+   100dvh (the VISIBLE viewport on a phone, address bar included or not) is used where the
+   browser has it, 100vh where it does not. */
+#stage { position: fixed; inset: 0; height: 100vh; height: 100dvh; overflow: hidden;
+         background: #000; touch-action: manipulation; }
+
+/* ---- the picture: the display card's own wrap, shown whole and centred ----
+   left / top / width / height are written inline by stage.js (stageFit). */
+#stage > .cvwrap { position: absolute; z-index: 0; border: 0; margin: 0; max-width: none;
+                   max-height: none; aspect-ratio: auto; overflow: hidden; }
+/* the arrow overlay is not on this page */
+#stage > .cvwrap > .cvvec { display: none; }
+/* the trace overlay sits over the picture and under the controls; it positions itself */
+#stage > canvas.traces { z-index: 2; }
+/* the repeated picture (sides: repeat): over the picture, which it shows too, under the traces */
+#stageTile { position: absolute; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; }
+
+/* ---- the controls: one column, the bar on top and the drawer under it ----
+   The column itself takes no pointer events, so the picture under its empty part does. */
+#stageUi { position: absolute; z-index: 3; box-sizing: border-box;
+           left: 0; top: 0; max-width: 100%; max-height: 100%;
+           padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right))
+                    max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+           display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+           pointer-events: none; opacity: 1; transition: opacity 0.35s ease; }
+#stageBar, #stageDrawer { pointer-events: auto; box-sizing: border-box; max-width: 100%;
+                          background: rgba(20, 22, 26, 0.78); border: 1px solid rgba(255, 255, 255, 0.10);
+                          border-radius: 8px;
+                          -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
+#stageBar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
+            padding: 6px 8px; }
+/* the page's own top bar rides inside as if its children were the bar's */
+#stageBar #topbar { display: contents; }
+#stageBar label { color: #9aa5b4; }
+#stageBar select { max-width: 46vw; }
+#stageBtnMenu.on { background: #2b3340; border-color: #4a5566; }
+
+#stageDrawer { display: none; flex: 0 1 auto; min-height: 0; overflow-y: auto;
+               width: 440px; padding: 4px 12px 10px; overscroll-behavior: contain;
+               -webkit-overflow-scrolling: touch; }
+#stageDrawer.open { display: block; }
+#stageDrawer .stagesec { border-top: 1px solid rgba(255, 255, 255, 0.08); padding: 6px 0; }
+#stageDrawer .stagesec:first-child, #stageDrawer .stagesec:empty { border-top: none; }
+#stageDrawer #stageStatus { padding: 0; border-top: none; }
+#stageStatus #status { margin: 6px 0 2px; }
+#stageDrawer .stagehd { color: #9fb3c8; font-size: 12px; margin-bottom: 4px; }
+/* #controls keeps its own rules for the groups (style.css) and loses its panel box */
+#stageDrawer #controls { background: none; border: 0; border-radius: 0; padding: 0; margin: 0; }
+#stageDrawer .cardhead { margin-bottom: 4px; }
+#stageDrawer #steps { display: block; margin: 0; }
+#stageDrawer #readout { margin-top: 4px; }
+#stageDrawer #buildline { display: block; }
+/* one picture, no charts: nothing to add, and "rec all" needs two displays. !important
+   because the shared code rewrites that button's inline display on every card sync. */
+html.stage #btnAddDisp, html.stage #btnAddChart, html.stage #btnRecAll { display: none !important; }
+
+/* ---- idle: both fade, and while faded (or while the press that woke them is still
+   down: .waking) nothing in them can be pressed ---- */
+#stage.idle #stageUi { opacity: 0; }
+#stage.idle #stageBar, #stage.idle #stageDrawer,
+#stage.waking #stageBar, #stage.waking #stageDrawer { pointer-events: none; }
+#stage.idle { cursor: none; }
+
+/* ---- an error that stops the page: centred, over everything ---- */
+#stageFatal { position: absolute; z-index: 4; inset: 0; display: none; box-sizing: border-box;
+              align-items: center; justify-content: center; padding: 24px;
+              background: rgba(0, 0, 0, 0.55); }
+#stage.fatal #stageFatal { display: flex; }
+#stageFatal #status { display: block; margin: 0; max-width: 560px; padding: 14px 16px;
+                      font-size: 14px; line-height: 1.5; }
+
+/* a phone: the bar and the drawer take the width, the source's label gives way */
+@media (max-width: 520px) {
+  #stageUi { align-items: stretch; }
+  #stageDrawer { width: auto; }
+  #stageBar label { display: none; }
+  #stageBar select { max-width: 38vw; }
+}
+@media (prefers-reduced-motion: reduce) { #stageUi { transition: none; } }

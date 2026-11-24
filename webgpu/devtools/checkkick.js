@@ -29,9 +29,11 @@
 //       examples/music_turbulence.py, run unmodified at fp64: real-space gaussians, taranis'
 //       own rfft2 and taranis' own dealias mask. That is the code the offline movies were
 //       made with, so (b) is "the live kick is the offline kick" and not a re-derivation.
-// (a) is here as well as (b) because the offline script only knows a square 2*pi box: the
-// rectangular-box leg, which is the only thing that separates nx/Lx from ny/Ly in the
-// weight, has to be built here.
+// (a) is here as well as (b) because the offline script's boxes all have a short side of
+// 2*pi (it was square-only until MUSIC_STAGE_PLAN S2): the 32x16, Ly = Lx/2 leg has to be
+// built here. Since S2 the fixture also carries make_kick in box_for(aspect) on rectangular
+// grids (key `rect`, landscape 16:9 on 64x32 and portrait 9:16 on 32x64), and leg 3 holds
+// the kernel to those too -- (c) there.
 //
 // EXECUTED on the interpreter: `blobKick` (every factor, the phase, the two early returns,
 // the two-half write) and `stage` (the LSRK33 integrating-factor update, which is where the
@@ -543,6 +545,47 @@ function legCross(state) {
     }
     ok("  ... and the two agree on WHICH modes a kick touches (mask and k = 0)", dis === 0 && touched > 0,
        dis + " modes zero in one and not the other; " + touched + " touched");
+  }
+
+  // ---- (c) the offline kick in a RECTANGULAR box (MUSIC_STAGE_PLAN S2) --------
+  // make_kick again, unmodified, in box_for(aspect) -- the short side 2 pi, the long side
+  // 2 pi * aspect -- on a rectangular grid, landscape and portrait: the box the music page
+  // builds from the window. The blob kick (real-space gaussians, taranis' rfft2) and the
+  // sheet kick (potential_k) each against the production kernel on that grid. The grids are
+  // 64 x 32 and 32 x 64, so NM / 64 is 17 and 16.5: the portrait one needs the ceil.
+  ok("the fixture carries the offline rectangular rows: a landscape and a portrait box, short side 2 pi",
+     Array.isArray(F.rect) && F.rect.length >= 2 && F.rect.some(R => R.Lx > R.Ly && R.nx > R.ny) && F.rect.some(R => R.Ly > R.Lx && R.ny > R.nx) &&
+     F.rect.every(R => Math.abs(Math.min(R.Lx, R.Ly) - 2 * Math.PI) < 1e-15 &&
+                       Math.abs(Math.max(R.Lx, R.Ly) / (2 * Math.PI) - Math.max(R.aspect, 1 / R.aspect)) < 1e-15));
+  for (const R of (F.rect || [])) {
+    const P = { nx: R.nx, ny: R.ny, Lx: R.Lx, Ly: R.Ly, diss: 1e-13, hyper: 4, fshell: [1, 3] }, GR = gridOf(env, P);
+    const zeros = (prod, ref) => {
+      let dis = 0, touched = 0;
+      for (let i = 0; i < ref.length; i += 2) {
+        const zr = ref[i] === 0 && ref[i + 1] === 0, zp = prod[i] === 0 && prod[i + 1] === 0;
+        if (zr !== zp) dis++;
+        if (!zp) touched++;
+      }
+      return { dis: dis, touched: touched };
+    };
+    const far = R.blobs.list.filter(b => b.x > 2 * Math.PI || b.y > 2 * Math.PI).length;
+    const ref = Float64Array.from(R.blobs.fields), prod = runKick(M, GR, pack(env, P, GR, R.blobs.list).a);
+    const r = compare(prod, ref, GR.nm), z = zeros(prod, ref);
+    ok("offline make_kick, " + R.tag + ": " + R.blobs.tag + " (" + far + " blobs beyond 2 pi on the long side)",
+       ref.length === 4 * GR.nm && GR.nm === R.nx * (R.ny / 2 + 1) && far >= 2 && r.abs < ABS_TOL && r.rel < REL_SUM && r.phi.peak > 0 && r.psi.peak > 0, r.note);
+    ok("  ... the same modes touched (each axis's own n/3 cut, and k = 0)", z.dis === 0 && z.touched > 0, z.dis + " differ; " + z.touched + " touched");
+    // ... and the gate's own real-space DFT in that box agrees with both
+    const own = compare(prod, refKick(P, GR.nkx, GR.nky, GR.kmax, R.blobs.list), GR.nm);
+    ok("  ... and against this file's own real-space DFT in the same box", own.abs < ABS_TOL && own.rel < REL_SUM, own.note);
+    const refS = Float64Array.from(R.sheets.fields), prodS = runSheet(M, GR, packSheets(env, P, GR, R.sheets.list).a);
+    const rs = compare(prodS, refS, GR.nm), zs = zeros(prodS, refS);
+    ok("offline make_kick (potential_k), " + R.tag + ": " + R.sheets.tag,
+       refS.length === 4 * GR.nm && rs.abs < ABS_TOL && rs.rel < REL_SUM && rs.phi.peak > 0 && rs.psi.peak > 0 && zs.dis === 0, rs.note);
+    // what separates the box from the square one: the same list packed for a 2 pi x 2 pi box
+    // of the same grid is a different kick (the weight carries 1 / (Lx Ly), the phase k.x0)
+    const sq = runKick(M, GR, pack(env, Object.assign({}, P, { Lx: 2 * Math.PI, Ly: 2 * Math.PI }), GR, R.blobs.list).a);
+    ok("  ... and it is the BOX's kick: the list packed for a square 2 pi box misses the offline fields by O(1)", compare(sq, ref, GR.nm).abs > 0.1,
+       "max|d|/peak " + e2(compare(sq, ref, GR.nm).abs));
   }
 }
 
@@ -1086,6 +1129,18 @@ function legDrag(state) {
     ok("  ... while Pm = 2 and eqsrc with mu = 0 still build (the refusal is the combination)",
        ctor(Object.assign({}, DP, { pm: 2 })) === "" && ctor(Object.assign({}, DP, { eqsrc: true })) === "" &&
        ctor(Object.assign({}, DP, { pm: 2, mu: 0 })) === "");
+    // MUSIC_STAGE_PLAN S4: the music page WANTS the source to hold its sheets up against the
+    // drag, and says so. The opt-in lifts that one refusal and nothing else, and it adds no
+    // shader: the source is already -gridB.y * eqk, and gridB.y is the column checked above.
+    ok("  ... and `eqsrcDrag: true` lifts the eqsrc refusal (mu != 0, eqsrc, eqsrcDrag builds)",
+       ctor(Object.assign({}, DP, { mu: MU, eqsrc: true, eqsrcDrag: true })) === "");
+    ok("  ... but not the Pm one (eqsrcDrag with Pm = 2 and mu != 0 still throws), and alone it is inert",
+       /Pm/.test(ctor(Object.assign({}, DP, { mu: MU, pm: 2, eqsrc: true, eqsrcDrag: true }))) &&
+       /eqsrcDrag/.test(ctor(Object.assign({}, DP, { mu: MU, eqsrc: true, eqsrcDrag: false }))) &&
+       ctor(Object.assign({}, DP, { eqsrcDrag: true })) === "");
+    const sdg = build(Object.assign({}, DP, { mu: MU, eqsrc: true, eqsrcDrag: true }));
+    ok("  ... and the column it builds is the mu != 0 one: -mu/2 on every mode, so the source carries the drag",
+       sameBits(sdg.gridB, build(Object.assign({}, DP, { mu: MU })).gridB) === -1);
     // a refused setDrag leaves the solver as it was: p.mu, the CPU column and the GPU copy
     const keep = build(Object.assign({}, DP, { mu: MU }));
     const colBefore = Float32Array.from(keep.gridB);

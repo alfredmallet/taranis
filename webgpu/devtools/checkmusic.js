@@ -37,6 +37,15 @@
 //      the audio; falling behind rebases; Stop stops.
 //   9  the loop hook is null on the other two pages, whose loop then steps `stepsPerFrame`
 //      as it always did, and the state mark there is the string it always was.
+//  16  (MUSIC_STAGE_PLAN S2 / S4, step 3) the window-shaped box and the current sheets: the
+//      rectangular rules (box, band plan, cutoff and dissipation, stereo and blob placement,
+//      the sheet profile) against the fixture's `stage` key, written from the offline script;
+//      window -> box -> grid and the auto rung as pure rules; then the page -- at its
+//      defaults the shipped parameter set bit for bit, no rebuild on a resize, what the
+//      box / grid / background selects build (never b0 with eqsrc), the sheets' initial
+//      condition and its Reset, the memory slider with the source on, auto dropping one rung.
+//      Mutation-tested by the implementer (2026-11-23, .scratch-port/mutate.py: one-line
+//      mutants of music.js and the page glue against legs 1, 2 and 16 on a scratch copy).
 //
 // What a stub cannot say (and this file therefore does not claim): that a real
 // AnalyserNode returns these spectra, that audio is audible, how late a real frame is, or
@@ -1025,8 +1034,11 @@ async function legBoot(state) {
      realFails(env).slice(0, 3).join(" | ") || env.fails.length + " tolerated control lookups");
   const html = fs.readFileSync(path.join(dir, "music.html"), "utf8");
   const srcs = Array.from(html.matchAll(/<script src="([^"]+)"><\/script>/g)).map(m => m[1]);
-  ok("it loads common.js, physics.js, solver2d.js, music.js -- in that order, and nothing else",
-     srcs.join(",") === "common.js,physics.js,solver2d.js,music.js", srcs.join(","));
+  // MUSIC_STAGE_PLAN (2026-11-23): the phase-3 files follow the four, and only these may
+  const PHASE3 = ["stage.js", "traces.js"];
+  ok("it loads common.js, physics.js, solver2d.js, music.js -- in that order -- then only the phase-3 files (" + PHASE3.join(", ") + ")",
+     srcs.slice(0, 4).join(",") === "common.js,physics.js,solver2d.js,music.js" &&
+     srcs.slice(4).every((f, i, a) => PHASE3.indexOf(f) >= 0 && a.indexOf(f) === i), srcs.join(","));
   ok("  ... carries no analytics beacon, and no other page links to it",
      !/goatcounter|gc\.zgo\.at/.test(html.replace(/<!--[\s\S]*?-->/g, "")) &&
      ["rmhd2d.html", "rmhd3d.html", "index.html", "docs.html", "reading.html", "common.js", "physics.js", "solver2d.js"]
@@ -2133,8 +2145,11 @@ async function legScale() {
   ok("  ... and the frame loop's next render writes the new value, with no rebuild and no step",
      lw.length >= 1 && lw[lw.length - 1] === f32(4) && env.run("function(){ return window.__sv === solver; }") &&
      env.run("function(){ return solver.nsteps; }") === built, JSON.stringify(lw));
-  ok("  ... the readout and musicDebug name it", /fixed at 4\.00/.test(env.run("function(){ return musicScaleReadout(); }")) &&
-     env.run("function(){ const r = musicScaleRecord(); return r.fixed === true && r.max === 4 && r.m === 2 && r.amp === 2; }"));
+  ok("  ... the readout and musicDebug name it, and on this background (the mean field) the scale's reference IS amp: \"fixed at 4.00 (2.00 × amp)\"",
+     /^colour scale fixed at 4\.00 \(2\.00 × amp\)/.test(env.run("function(){ return musicScaleReadout(); }")) &&
+     env.run("function(){ const u = musicUi(); return musicScaleRef(u) === u.amp && u.amp === 2 && el('vScale').textContent === '2.00 → 4.00'; }") === true &&
+     env.run("function(){ const r = musicScaleRecord(); return r.fixed === true && r.max === 4 && r.m === 2 && r.amp === 2; }"),
+     env.run("function(){ return musicScaleReadout(); }"));
 
   // a signed field: +-max on the bar
   env.run("function(){ solver.disp[0].mode = 0; musicScaleChanged(); }");
@@ -2497,6 +2512,2301 @@ async function legEffects(state) {
      && dq.every(k => k.pan === null && k.xc === null && k.type === want[k.band]), dq.length + " kicks");
 }
 
+// ===========================================================================
+// 14. the fading traces (MUSIC_STAGE_PLAN S3): traces.js
+// ===========================================================================
+// What a stub cannot say: how any of it LOOKS (the halo's legibility, the colours against
+// the picture, whether the fixed vertical range frames a real spectrum), and how long a
+// real readback takes. Checked here: the pure rules, and the structure and schedule.
+async function legTraces() {
+  const src = fs.readFileSync(path.join(dir, "traces.js"), "utf8");
+  const close = (a, b, tol) => Math.abs(a - b) <= (tol || 1e-12) * Math.max(1, Math.abs(b));
+  // ---- pure, in a bare context ----------------------------------------------------------
+  const ctx = vm.createContext({});
+  const msg = throws(() => vm.runInContext(src, ctx, { filename: "traces.js" }));
+  ok("traces.js evaluates in a bare context: no DOM, no GPU, none of the shared scripts", msg === "", msg);
+  const T = vm.runInContext(`({ tracesWeight, tracesDue, tracesPush, tracesExpire, tracesBinRange, tracesSpecRange,
+    tracesLogMap, tracesGuide, tracesKLabels, tracesBrightEnd, tracesColourT, tracesCss, tracesFit, tracesLayout,
+    tracesSpecRuns, tracesCutMap, tracesDecades, tracesPow10, tracesLenText, tracesXLabels, tracesMidRow, tracesRowCopies,
+    tracesCutRange, tracesCutLabels, tracesPlot, tracesLabelCol, TRACES_EVERY, TRACES_TAU, TRACES_FLOOR, TRACES_TOP, TRACES_DECADES,
+    TRACES_SPEC_FRAC, TRACES_CUT_FRAC, TRACES_CUT_TAU_FRAC, musicTraces })`, ctx);
+  ok("  ... with nothing left of the first layout: no Elsasser families, no component pairs, no dash anywhere in the file (and ONE call of the solver's readCutLine: the side panels' line cuts, off by default)",
+     vm.runInContext("typeof TRACES_FAMILIES + typeof TRACES_CUT_PAIRS + typeof TRACES_FRAC", ctx) === "undefinedundefinedundefined" &&
+     !/cbTrEls|selTrCut/.test(src.replace(/\/\/[^\n]*/g, "")) && (src.replace(/\/\/[^\n]*/g, "").match(/readCutLine\(/g) || []).length === 1 &&
+     /sv\.readCutLine\(0\)/.test(src) && (src.match(/setLineDash\(/g) || []).length === 1 && /setLineDash\(\[\]\)/.test(src));
+  ok("  ... and there it is OFF: no group, attach() refuses, frame() does nothing",
+     T.musicTraces.on === false && T.musicTraces.groups().length === 0 && T.musicTraces.attach({}) === null &&
+     throws(() => T.musicTraces.frame(null, 0)) === "" && T.musicTraces.frames === 0);
+  const flagOf = q => { const c = vm.createContext({ location: { search: q } }); vm.runInContext(src, c); return vm.runInContext("TRACES_ON", c); };
+  ok("the flag: ?traces and ?stage (alone, first or later, with a value) switch it on; nothing else does",
+     ["?traces", "?stage", "?musicdebug&traces", "?musicdebug&stage", "?traces=1", "?stage&musicdebug"].every(q => flagOf(q) === true) &&
+     ["", "?musicdebug", "?tracesx", "?stagecraft", "?notraces", "?x=traces", "?backstage"].every(q => flagOf(q) === false));
+  ok("the defaults are the plan's: every 6th frame, tau 2 s, dropped below 2%",
+     T.TRACES_EVERY === 6 && T.TRACES_TAU === 2 && T.TRACES_FLOOR === 0.02);
+  ok("fade weight = exp(-age / tau): 1 at age 0, 1/e at tau, 1/e^2 at 2 tau; a negative age is new",
+     T.tracesWeight(0, 2) === 1 && close(T.tracesWeight(2, 2), Math.exp(-1)) && close(T.tracesWeight(4, 2), Math.exp(-2)) &&
+     close(T.tracesWeight(2, 1), Math.exp(-2)) && T.tracesWeight(-3, 2) === 1);
+  // 2% at tau = 2 s is an age of 2 ln 50 = 7.824 s
+  const h = [{ t: 0, id: "a" }, { t: 1000 - 7850, id: "old" }, { t: 1000 - 7800, id: "kept" }, { t: 1000, id: "new" }];
+  const nd = T.tracesExpire(h, 1000, 2);
+  ok("expiry at 2%: with tau 2 s a line 7.80 s old (2.02%) stays and one 7.85 s old (1.97%) goes; order kept",
+     nd === 1 && h.map(e => e.id).join() === "a,kept,new", "dropped " + nd + ", left " + h.map(e => e.id).join());
+  const h2 = [{ t: 0 }, { t: 3000 }];
+  ok("  ... and the fade time is an argument: the same line survives tau 2 s and not tau 0.5 s; so is the floor",
+     T.tracesExpire(h2.slice(), 4000, 2) === 0 && T.tracesExpire(h2.slice(), 4000, 0.5) === 1 && T.tracesExpire(h2.slice(), 4000, 2, 0.5) === 1);
+  const h3 = [];
+  for (let i = 0; i < 5; i++) T.tracesPush(h3, { t: i }, 3);
+  ok("push appends and keeps the newest `max`", h3.map(e => e.t).join() === "2,3,4" && T.tracesPush([], { t: 1 }).length === 1);
+  const due = [];
+  for (let f = 0; f <= 24; f++) if (T.tracesDue(f, 6)) due.push(f);
+  ok("a sample is due on frames 6, 12, 18, 24 and on no other", due.join() === "6,12,18,24", due.join());
+  const R = { k0: 1, k1: 100, e0: 1e-6, e1: 1 }, B = { x: 10, y: 20, w: 200, h: 300 };
+  const m1 = T.tracesLogMap(1, 1, R, B), m2 = T.tracesLogMap(100, 1e-6, R, B), m3 = T.tracesLogMap(10, 1e-3, R, B);
+  ok("log-log mapping: (k0, e1) is the box's top-left, (k1, e0) its bottom-right, the geometric middle its centre",
+     close(m1[0], 10) && close(m1[1], 20) && close(m2[0], 210) && close(m2[1], 320) && close(m3[0], 110) && close(m3[1], 170),
+     [m1, m2, m3].map(p => p.map(v => v.toFixed(2)).join(",")).join(" | "));
+  const g = T.tracesGuide(R, B), g2 = T.tracesGuide(R, B, -1.5);
+  // one decade of k is w/2 = 100 px, one of E is h/6 = 50 px: -5/3 falls 250/3 px per 100 px
+  ok("the guide is -5/3 in the data and (5/3)(h / 6 decades)/(w / 2 decades) = 0.8333 px down per px across; inside the box",
+     close(Math.log(g.eb / g.ea) / Math.log(g.kb / g.ka), -5 / 3) && close((g.y1 - g.y0) / (g.x1 - g.x0), 5 / 6, 1e-12) &&
+     close((g2.y1 - g2.y0) / (g2.x1 - g2.x0), 0.75, 1e-12) &&
+     g.x0 >= B.x && g.x1 <= B.x + B.w && g.y0 >= B.y && g.y1 <= B.y + B.h && g.x1 > g.x0,
+     ((g.y1 - g.y0) / (g.x1 - g.x0)).toFixed(4));
+  const sq = T.tracesBinRange(256, 256, 2 * Math.PI, 2 * Math.PI), r21 = T.tracesBinRange(512, 256, 4 * Math.PI, 2 * Math.PI),
+        r12 = T.tracesBinRange(256, 512, 2 * Math.PI, 4 * Math.PI);
+  ok("first complete bin: 1 in a square box (bins 1..84 at 256^2, kunit 1)",
+     sq.first === 1 && sq.last === 84 && sq.nb === 85 && close(sq.kunit, 1), JSON.stringify(sq));
+  ok("  ... 2 in a 2:1 box, landscape or portrait (kunit 1/2: bin 1 holds long-direction modes only), up to bin 169 at 512 x 256",
+     r21.first === 2 && r21.last === 169 && close(r21.kunit, 0.5) && r12.first === 2 && r12.last === 169 && close(r12.kunit, 0.5),
+     JSON.stringify(r21));
+  const fb = a => T.tracesBinRange(256, 256, 2 * Math.PI * a, 2 * Math.PI).first;
+  ok("  ... and round(Lmax / Lmin) in between: 1 at 1.4, 2 at 1.5, 16:9 and 2.4, 3 at 2.5; 256^2 at 16:9 keeps bins up to 84",
+     fb(1.4) === 1 && fb(1.5) === 2 && fb(16 / 9) === 2 && fb(2.4) === 2 && fb(2.5) === 3 &&
+     T.tracesBinRange(256, 256, 2 * Math.PI * 16 / 9, 2 * Math.PI).last === 84);
+  const sr = T.tracesSpecRange(2, sq);
+  ok("the vertical range is fixed against amp: top " + T.TRACES_TOP + " amp^2, " + T.TRACES_DECADES + " decades; the horizontal one is the drawn bins",
+     close(sr.e1, T.TRACES_TOP * 4) && close(sr.e0, T.TRACES_TOP * 4 * Math.pow(10, -T.TRACES_DECADES)) && sr.k0 === 1 && sr.k1 === 84 &&
+     close(T.tracesSpecRange(1, r21).k0, 1) && close(T.tracesSpecRange(1, r21).k1, 84.5));
+  ok("  ... FOUR decades under 0.3 amp^2 (six was too flat in a band a fifth of the screen high), and the cut's fade is a quarter of the slider's",
+     T.TRACES_DECADES === 4 && T.TRACES_TOP === 0.3 && close(T.tracesSpecRange(1, sq).e0, 3e-5) && T.TRACES_CUT_TAU_FRAC === 0.25);
+  const kl = T.tracesKLabels(1, 84), kl2 = T.tracesKLabels(1, 4);
+  ok("two or three wavenumber labels, from 1-2-5, inside the range", kl.join() === "1,10,50" && kl2.join() === "1,2", kl.join() + " | " + kl2.join());
+  ok("colour by age: the bright end when new, the middle when old, 1/e of the way left at tau -- from either end",
+     T.tracesColourT(0, 2, 1) === 1 && close(T.tracesColourT(1e6, 2, 1), 0.5) && close(T.tracesColourT(2, 2, 1), 0.5 + 0.5 / Math.E) &&
+     T.tracesColourT(0, 2, 0) === 0 && close(T.tracesColourT(1e6, 2, 0), 0.5) && close(T.tracesColourT(2, 2, 0), 0.5 - 0.5 / Math.E));
+  ok("  ... the bright end is the lighter one, and a colour is written as rgba()",
+     T.tracesBrightEnd([0, 0, 0], [1, 1, 1]) === 1 && T.tracesBrightEnd([1, 1, 0.9], [0.1, 0, 0.2]) === 0 &&
+     T.tracesCss([1, 0.5, 0], 0.5) === "rgba(255,128,0,0.500)" && T.tracesCss([2, -1, 0.2], 3) === "rgba(255,0,51,1.000)");
+  const f1 = T.tracesFit(512, 512, 2), f2 = T.tracesFit(300.4, 200, 1.5), f3 = T.tracesFit(0, 0, 1);
+  ok("the backing size is the host's client size times devicePixelRatio, never 0",
+     f1.w === 1024 && f1.h === 1024 && f2.w === 451 && f2.h === 300 && f3.w === 1 && f3.h === 1);
+  const L1 = T.tracesLayout(1920, 1080), L2 = T.tracesLayout(1080, 1920), rs0 = () => T.tracesCutRange("signed", 2);
+  ok("placement: the spectrum is a band across the FULL width along the bottom, a fifth of the SHORT side high",
+     T.TRACES_SPEC_FRAC === 0.2 && L1.spec.x === 0 && L1.spec.w === 1920 && close(L1.spec.h, 216) && close(L1.spec.y + L1.spec.h, 1080) &&
+     L2.spec.x === 0 && L2.spec.w === 1080 && close(L2.spec.h, 216) && close(L2.spec.y + L2.spec.h, 1920), JSON.stringify(L1.spec));
+  ok("  ... and the cut a band across the FULL width along the top, edge to edge (its x is the picture's), a fifth of the short side high",
+     T.TRACES_CUT_FRAC === 0.2 && L1.cut.x === 0 && L1.cut.y === 0 && L1.cut.w === 1920 && close(L1.cut.h, 216) &&
+     L2.cut.x === 0 && L2.cut.y === 0 && L2.cut.w === 1080 && close(L2.cut.h, 216) && L1.cut.y + L1.cut.h < L1.spec.y, JSON.stringify(L1.cut));
+  // the plot areas inside the bands: edge to edge without tick labels; with them, clear of a
+  // label column on the left (and, the spectrum, of the k row along its bottom)
+  const P0 = T.tracesPlot(L1, false, 40, 14), P1 = T.tracesPlot(L1, true, 40, 14);
+  ok("with the tick labels OFF both bands plot edge to edge: the plot boxes ARE the bands, whatever the column would be",
+     JSON.stringify(P0.spec) === JSON.stringify(L1.spec) && JSON.stringify(P0.cut) === JSON.stringify(L1.cut) && JSON.stringify(P0.cutClip) === JSON.stringify(L1.cut));
+  ok("  ... ON, the spectrum is squeezed into what is left of the label column and above the k row",
+     P1.spec.x === 40 && P1.spec.w === 1880 && P1.spec.y === L1.spec.y && close(P1.spec.h, 216 - 14) && close(P1.spec.x + P1.spec.w, 1920));
+  ok("  ... while the cut's MAPPING box is untouched (sample ix stays at (ix + 0.5) / nx of the host's width) and only its clip starts after the column",
+     JSON.stringify(P1.cut) === JSON.stringify(L1.cut) && P1.cutClip.x === 40 && P1.cutClip.w === 1880 && P1.cutClip.y === 0 && close(P1.cutClip.h, 216) &&
+     close(T.tracesCutMap(0, 256, 0, rs0(), P1.cut)[0], 1920 * 0.5 / 256) && close(T.tracesCutMap(255, 256, 0, rs0(), P1.cut)[0], 1920 * 255.5 / 256));
+  ok("  ... the column is the widest label plus a pad either side, and nothing when there is no label",
+     T.tracesLabelCol([10, 24.8, 12.4], 4) === 32.8 && T.tracesLabelCol([], 4) === 0 && T.tracesLabelCol([37.2], 4) === 45.2);
+  // [E_u | E_b | H_c], nb = 4
+  const perp = [9, 1, 0, 3, 9, 1, 0, 1, 0, 0.5, 0, -1], bn = { first: 1, last: 3, kunit: 2 };
+  const rt = T.tracesSpecRuns(perp, 4, bn);
+  ok("ONE spectrum line, the total energy E_u + E_b off [E_u | E_b | H_c]: k = bin * kunit, bin 0 never drawn, an empty bin breaks the line",
+     JSON.stringify(rt) === "[[2,2],[6,4]]" && T.tracesSpecRuns.length === 3, JSON.stringify(rt));
+  ok("  ... and it starts at the first complete bin", JSON.stringify(T.tracesSpecRuns(perp, 4, { first: 3, last: 3, kunit: 2 })) === "[[6,4]]");
+  // the cut: one row of a row-major (ix * ny + iy) buffer
+  const rc = T.tracesRowCopies(4, 8, T.tracesMidRow(8)), rc2 = T.tracesRowCopies(512, 256, T.tracesMidRow(256));
+  ok("the cut's row: the middle row iy = ny/2, gathered at byte offsets 4 (ix ny + ny/2) -- a stride of 4 ny -- into nx floats plus one for the scale",
+     T.tracesMidRow(8) === 4 && T.tracesMidRow(256) === 128 && rc.src.join() === "16,48,80,112" && rc.scaleAt === 16 && rc.size === 20 &&
+     rc2.src.length === 512 && rc2.src[0] === 4 * 128 && rc2.src[1] - rc2.src[0] === 4 * 256 && rc2.src[511] === 4 * (511 * 256 + 128) &&
+     rc2.scaleAt === 2048 && rc2.size === 2052, rc.src.join() + " | " + rc.size);
+  const rs = T.tracesCutRange("signed", 2), rm = T.tracesCutRange("mag", 2), rg = T.tracesCutRange("sigma", 7), r0 = T.tracesCutRange("signed", 0);
+  ok("the cut's range IS the colour scale: a signed field on -max..+max, a magnitude on 0..max, the sigma modes on -1..+1 whatever the scale says",
+     rs.lo === -2 && rs.hi === 2 && rs.signed === true && rm.lo === 0 && rm.hi === 2 && rm.signed === false &&
+     rg.lo === -1 && rg.hi === 1 && rg.signed === true && r0.hi > 0 && r0.lo === -r0.hi && isFinite(T.tracesCutMap(0, 4, 0, r0, B)[1]) &&
+     T.tracesCutRange("mag", NaN).hi > 0);
+  const c1 = T.tracesCutMap(0, 4, 2, rs, B), c2 = T.tracesCutMap(3, 4, -2, rs, B), c3 = T.tracesCutMap(1, 4, 0, rs, B),
+        c4 = T.tracesCutMap(1, 4, 0, rm, B), c5 = T.tracesCutMap(1, 4, 2, rm, B), c6 = T.tracesCutMap(2, 4, 1, rm, B);
+  // box x 10, w 200: texel centres at 35, 85, 135, 185
+  ok("  ... sample ix sits over the CENTRE of the picture's texel ix; a signed field has its zero mid-band, a magnitude at the band's bottom",
+     close(c1[0], 35) && close(c1[1], 20) && close(c2[0], 185) && close(c2[1], 320) && close(c3[0], 85) && close(c3[1], 170) &&
+     close(c4[1], 320) && close(c5[1], 20) && close(c6[0], 135) && close(c6[1], 170),
+     [c1, c2, c3, c4, c5, c6].map(q => q.map(v => v.toFixed(1)).join(",")).join(" | "));
+  const lab = a => a.map(e => e.f + ":" + e.t).join(" ");
+  ok("tick labels, the cut's scale: +max / 0 / -max top, middle, bottom for a signed field; max / 0 for a magnitude; +-1 for sigma",
+     lab(T.tracesCutLabels(rs)) === "1:+2 0.5:0 0:−2" && lab(T.tracesCutLabels(rm)) === "1:2 0:0" && lab(T.tracesCutLabels(rg)) === "1:+1 0.5:0 0:−1" &&
+     lab(T.tracesCutLabels(T.tracesCutRange("mag", 0.14567))) === "1:0.15 0:0", lab(T.tracesCutLabels(rs)) + " | " + lab(T.tracesCutLabels(rm)));
+  ok("  ... its x: 0, Lx/2, Lx -- in units of pi where that is clean (2pi, 4pi, pi boxes), plain numbers otherwise (a 16:9 box)",
+     lab(T.tracesXLabels(2 * Math.PI)) === "0:0 0.5:π 1:2π" && lab(T.tracesXLabels(4 * Math.PI)) === "0:0 0.5:2π 1:4π" &&
+     lab(T.tracesXLabels(Math.PI)) === "0:0 0.5:π/2 1:π" && lab(T.tracesXLabels(3 * Math.PI)) === "0:0 0.5:3π/2 1:3π" &&
+     lab(T.tracesXLabels(2 * Math.PI * 16 / 9)) === "0:0 0.5:5.59 1:11.2" && T.tracesLenText(10) === "10",
+     lab(T.tracesXLabels(2 * Math.PI)) + " | " + lab(T.tracesXLabels(2 * Math.PI * 16 / 9)));
+  ok("  ... and the spectrum's E: whole decades strictly inside the range, thinned to three at most, written 10 to a superscript",
+     T.tracesDecades(3e-7, 0.3).join() === "-1,-3,-5" && T.tracesDecades(1e-6, 1).join() === "-1,-3,-5" && T.tracesDecades(3e-5, 0.3).join() === "-1,-3" && T.tracesDecades(1e-3, 1).join() === "-1,-2" &&
+     T.tracesDecades(3e-7, 0.3, 6).join() === "-1,-2,-3,-4,-5,-6" && T.tracesDecades(1.2e-6, 1.2).join() === "0,-2,-4" &&
+     T.tracesPow10(-3) === "10⁻³" && T.tracesPow10(0) === "10⁰" && T.tracesPow10(12) === "10¹²",
+     T.tracesDecades(3e-7, 0.3).join() + " | " + T.tracesPow10(-3));
+
+  // ---- without the flag: the shipped page -------------------------------------------------
+  const Z = await musicPage("?musicdebug");
+  const grp = env => env.descendants(env.getEl("controls"), "details").map(d => d.id);
+  for (let f = 0; f < 8; f++) { Z.env.run("function(){ stateBumped(); }"); await Z.frame(); }
+  ok("without ?traces / ?stage nothing exists: no canvas.traces anywhere, no grpTraces, no frame counted, no readback started",
+     Z.env.allEls.every(e => e.className !== "traces") && grp(Z.env).indexOf("grpTraces") < 0 && grp(Z.env).length === 4 &&
+     Z.env.run("function(){ return musicTraces.on === false && musicTraces.canvas === null && musicTraces.frames === 0 && musicTraces.reads.spec === 0 && musicTraces.reads.cut === 0; }") &&
+     realFails(Z.env).length === 0, grp(Z.env).join());
+  ok("  ... and the frame hook is the page's own, unwrapped",
+     Z.env.run("function(){ return String(frameHook).indexOf('musicTraces') < 0 && String(frameHook).indexOf('musicScaleProbe') >= 0; }") === true);
+  ok("  ... and common.js's nbins() agrees with the bin range used here, square and 2:1 (same formula, two files)",
+     Z.env.run("function(){ return nbins(256, 256, 2 * Math.PI, 2 * Math.PI) === tracesBinRange(256, 256, 2 * Math.PI, 2 * Math.PI).nb && nbins(512, 256, 4 * Math.PI, 2 * Math.PI) === tracesBinRange(512, 256, 4 * Math.PI, 2 * Math.PI).nb && nbins(256, 256, 2 * Math.PI * 16 / 9, 2 * Math.PI) === tracesBinRange(256, 256, 2 * Math.PI * 16 / 9, 2 * Math.PI).nb && solver.g.kunit === tracesBinRange(256, 256, solver.p.Lx, solver.p.Ly).kunit; }") === true);
+
+  // ---- ?traces ------------------------------------------------------------------------------
+  const P = await musicPage("?traces"), env = P.env;
+  ok("with ?traces the page boots with no failure of its own, and the frame hook is the wrapper",
+     realFails(env).length === 0 && env.run("function(){ return String(frameHook).indexOf('musicTraces.frame') >= 0; }") === true, realFails(env).slice(0, 3).join(" | "));
+  const q = JSON.parse(env.run(`function(){ const c = musicTraces.canvas, w = cards.disp[0].wrap;
+    return JSON.stringify({ on: musicTraces.on, child: w.children.indexOf(c), last: w.children[w.children.length - 1] === c,
+      n: w.children.filter(e => e.className === "traces").length, kind: c.kind, cls: c.className, st: c.style, w: c.width, h: c.height,
+      spec: el("cbTrSpec").checked, cut: el("cbTrCut").checked, ticks: el("cbTrTicks").checked, sides: el("cbTrSides").checked, side2: el("selTrSide").value,
+      side2o: el("selTrSide").options.map(o => o.value),
+      tau: el("rTrTau").value, vTau: el("vTrTau").textContent, o: musicTraces.opts(),
+      ids: (function ids(e){ return (e.id ? [e.id] : []).concat(...(e.children || []).map(ids)); })(el("grpTraces")) }); }`));
+  ok("  ... ONE <canvas class=\"traces\"> is attached to the display card's wrap, after (so over) the picture",
+     q.on === true && q.child >= 0 && q.last === true && q.n === 1 && q.kind === "canvas" && q.cls === "traces" &&
+     env.allEls.filter(e => e.className === "traces").length === 1);
+  ok("  ... absolutely positioned to fill it, taking no pointer events, and sized from it (the stub's 512 x 512 at ratio 1)",
+     q.st.position === "absolute" && q.st.left === "0" && q.st.top === "0" && q.st.width === "100%" && q.st.height === "100%" &&
+     q.st.pointerEvents === "none" && q.w === 512 && q.h === 512, q.w + " x " + q.h);
+  ok("  ... the group grpTraces is there, with exactly these controls: spectrum ON, cut OFF, tick labels ON, fade 2 s, and -- on a second row -- side panels OFF with their second side on \"time\" (the other choice: \"cuts\")",
+     grp(env).indexOf("grpTraces") === grp(env).length - 1 && grp(env).length === 5 && q.spec === true && q.cut === false && q.ticks === true &&
+     q.tau === "2" && q.vTau === "2.0" && q.o.spec === true && q.o.cut === false && q.o.ticks === true && q.o.tau === 2 &&
+     q.sides === false && q.side2 === "time" && q.side2o.join() === "time,cuts" && q.o.sides === false && q.o.side2 === "time" &&
+     q.ids.join() === "grpTraces,cbTrSpec,cbTrCut,cbTrTicks,rTrTau,vTrTau,cbTrSides,selTrSide", q.ids.join());
+  // a resize: the stub has no ResizeObserver, so the canvas looks at its host every frame
+  env.run("function(){ const w = cards.disp[0].wrap; w.clientWidth = 300; w.clientHeight = 200; window.devicePixelRatio = 2; }");
+  await P.frame();
+  const sz = JSON.parse(env.run("function(){ return JSON.stringify([musicTraces.canvas.width, musicTraces.canvas.height]); }"));
+  ok("  ... and re-fitted when the host changes: 300 x 200 at devicePixelRatio 2 is a 600 x 400 backing store", sz.join() === "600,400", sz.join("x"));
+  env.run("function(){ const w = cards.disp[0].wrap; w.clientWidth = 512; w.clientHeight = 512; window.devicePixelRatio = 1; }");
+
+  // the schedule: every push is recorded with the frame it was taken on, every spectrum
+  // readback of the solver is counted (whoever asked)
+  // ... and so is every copyBufferToBuffer out of the display chain's dispR / maxVal (the
+  // cut's row gather: `cut` counts the encoders that took one), and every readCutLine
+  env.run(`function(){ const push = tracesPush; window.__pushes = []; window.__sp = 0; window.__cut = 0; window.__cutline = 0; window.__copies = [];
+    tracesPush = function(h, e, m){ window.__pushes.push({ f: musicTraces.frames, t: e.t, kind: e.kind, mode: e.mode, max: e.max, n: e.row ? e.row.length : -1,
+      which: h === musicTraces.spec ? "spec" : h === musicTraces.cut ? "cut" : h === musicTraces.ener ? "ener" : h === musicTraces.rows4 ? "rows4" : "?" }); return push(h, e, m); };
+    window.__wrap = sv => { const rs = sv.readSpectrum.bind(sv), rc = sv.readCutLine.bind(sv);
+      sv.readSpectrum = () => { window.__sp++; return rs(); }; sv.readCutLine = iz => { window.__cutline++; return rc(iz); }; };
+    window.__wrap(solver);
+    const dev = solver.device, mk = dev.createCommandEncoder;
+    dev.createCommandEncoder = () => { const e = mk(), cp = e.copyBufferToBuffer; let seen = false;
+      e.copyBufferToBuffer = (a, ao, b, bo, n) => { const D = solver && solver.disp[0];
+        if (D && a === D.buf.dispR && !seen) { seen = true; window.__cut++; }
+        if (D && seen && (a === D.buf.dispR || a === D.buf.maxVal)) {
+          window.__copies.push({ src: a === D.buf.dispR ? "dispR" : "maxVal", ao: ao, bo: bo, n: n, size: b.size, usage: b.usage, dst: b }); }
+        return cp(a, ao, b, bo, n); };
+      return e; }; }`);
+  const st = () => JSON.parse(env.run("function(){ return JSON.stringify({ f: musicTraces.frames, p: window.__pushes, sp: window.__sp, cut: window.__cut, cutline: window.__cutline, r: musicTraces.reads, card: musicTraces.hasSpecCard() }); }"));
+  const reset = () => env.run("function(){ musicTraces.frames = 0; window.__pushes = []; window.__sp = 0; window.__cut = 0; window.__cutline = 0; window.__copies = []; musicTraces.reads = { spec: 0, cut: 0 }; }");
+  const run = async (n, bump) => { for (let f = 0; f < n; f++) { if (bump) env.run("function(){ stateBumped(); }"); await P.frame(); } };
+  // (a) the spectrum chart card is on the page: its readback is the one used
+  reset();
+  await run(24, true);
+  const a = st();
+  ok("with the spectrum CARD on the page a line is pushed on frames 6, 12, 18, 24 only, from the card's own readback: traces.js starts none",
+     a.card === true && a.f === 24 && a.p.map(e => e.f).join() === "6,12,18,24" && a.p.every(e => e.which === "spec") &&
+     a.r.spec === 0 && a.r.cut === 0 && a.sp >= 4 && a.cut === 0, "pushes on " + a.p.map(e => e.f).join() + "; " + a.sp + " card readbacks, " + a.r.spec + " own");
+  // frame 24's own card readback landed after that frame's sample: it is the state the page
+  // stopped on, and it is taken on the next due frame -- once
+  reset();
+  await run(24, false);
+  ok("  ... and once the state stands still, the card's last readback is pushed ONCE and then nothing (there is nothing new to push)",
+     st().p.map(e => e.f).join() === "6" && st().f === 24, "pushes on " + st().p.map(e => e.f).join());
+  // (b) no spectrum card (the stage): traces.js reads for itself
+  env.run("function(){ cardsLayout({ disp: [{ sel: 4, cmap: MUSIC_CMAP_DEFAULT, arrows: false }], charts: ['energy'] }); musicTraces.attach(cards.disp[0].wrap); }");
+  await turn();
+  ok("attach() again (the cards were rebuilt) leaves ONE canvas, on the new host",
+     env.allEls.filter(e => e.className === "traces" && e.parentNode).length === 1 &&
+     env.run("function(){ return musicTraces.canvas.parentNode === cards.disp[0].wrap && musicTraces.hasSpecCard() === false; }"));
+  reset();
+  await run(24, true);
+  const b = st();
+  ok("with NO spectrum card it reads for itself: one readSpectrum on each of frames 6, 12, 18, 24 and on no other, each pushed on its frame",
+     b.card === false && b.sp === 4 && b.r.spec === 4 && b.p.map(e => e.f).join() === "6,12,18,24" && b.cut === 0 && b.r.cut === 0,
+     b.sp + " readbacks, pushes on " + b.p.map(e => e.f).join());
+  reset();
+  await run(18, false);
+  ok("  ... none on a state that has not moved", st().sp === 0 && st().p.length === 0 && st().f === 18, st().sp + " readbacks in 18 still frames");
+  // a readback that does not come back: the frames go on, and no second one is started
+  env.run(`function(){ window.__hold = []; solver.readSpectrum = () => { window.__sp++; return new Promise(r => window.__hold.push(r)); }; }`);
+  reset();
+  await run(30, true);
+  const c0 = st();
+  ok("a slow readback never stalls the frame: 30 frames pass with it in flight, and ONE is in flight, not five",
+     c0.f === 30 && c0.sp === 1 && c0.p.length === 0 && env.run("function(){ return window.__hold.length; }") === 1, c0.sp + " started, " + c0.f + " frames");
+  env.run("function(){ window.__hold.shift()({ perp: new Float32Array(3 * solver.nb) }); }");
+  await turn();
+  const c1p = st();
+  await run(6, true);
+  const c1s = st();
+  ok("  ... when it lands it is pushed, and the next due frame starts the next",
+     c1p.p.length === 1 && c1s.p.length === 1 && c1s.sp === 2 && env.run("function(){ return window.__hold.length; }") === 1, c1s.p.length + " pushed, " + c1s.sp + " started");
+  // ... and one that lands after its solver was replaced is not pushed
+  env.run("function(){ window.__old = window.__hold.shift(); window.__nb = solver.nb; rebuild(); window.__wrap(solver); }");
+  await turn();
+  env.run("function(){ window.__old({ perp: new Float32Array(3 * window.__nb) }); }");
+  await turn();
+  ok("  ... one that lands after its solver was replaced is dropped", st().p.length === 1, st().p.length + " pushes");
+  // (c) the cut
+  reset();
+  await run(12, true);
+  const d0 = st();
+  env.getEl("cbTrCut").checked = true;
+  reset();
+  await run(12, true);
+  const d1 = st();
+  ok("the line cut is OFF by default (nothing is copied out of the display chain) and, switched on, gathers on the same due frames",
+     d0.cut === 0 && d0.p.length === 2 && d0.p.every(e => e.which === "spec") && d1.cut === 2 && d1.r.cut === 2 &&
+     d1.p.filter(e => e.which === "cut").map(e => e.f).join() === "6,12", d0.cut + " then " + d1.cut + " row gathers");
+  // what one gather is: the page shows |u| at 256^2
+  const cps = JSON.parse(env.run(`function(){ const c = window.__copies, half = c.length / 2;
+    return JSON.stringify({ n: c.length, one: c.slice(0, half).map(e => [e.src, e.ao, e.bo, e.n]), sizes: c.map(e => e.size), usage: c[0].usage,
+      want: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, oneDst: c.every(e => e.dst === c[0].dst), nx: solver.p.nx, ny: solver.p.ny,
+      mode: solver.modeOf(cards.disp[0].ci), same: JSON.stringify(c.slice(0, half).map(e => [e.src, e.ao, e.bo])) === JSON.stringify(c.slice(half).map(e => [e.src, e.ao, e.bo])) }); }`));
+  ok("  ... one gather is nx = 256 four-byte copies out of dispR at 4 (ix ny + ny/2), the middle row, to 4 ix -- and the 4 bytes of maxVal after them",
+     cps.n === 2 * 257 && cps.same && cps.one.length === 257 &&
+     cps.one.slice(0, 256).every((e, ix) => e[0] === "dispR" && e[1] === 4 * (ix * 256 + 128) && e[2] === 4 * ix && e[3] === 4) &&
+     cps.one[256].join() === "maxVal,0,1024,4", cps.n + " copies; the first " + cps.one[0].join() + ", the last " + cps.one[256].join());
+  ok("  ... into ONE staging buffer of (nx + 1) floats, map-readable, used again by the next gather; readCutLine (the other cut) is never called",
+     cps.sizes.every(z => z === 1028) && cps.usage === cps.want && cps.oneDst === true && d1.cutline === 0 && d0.cutline === 0, cps.sizes[0] + " bytes");
+  ok("  ... each line carries the row, the scale and the kind of field the picture shows: |u| here, a magnitude",
+     cps.mode === 4 && d1.p.filter(e => e.which === "cut").every(e => e.kind === "mag" && e.mode === 4 && e.n === 256 && e.max === 0));
+  reset();
+  await run(18, false);
+  ok("  ... and nothing is gathered on a state that has not moved", st().cut === 0 && st().r.cut === 0 && st().f === 18, st().cut + " gathers in 18 still frames");
+  // the kind follows the display's field, and a change of field starts the history again
+  // (sample() driven by hand, with its own times: no draw, so nothing expires in between)
+  const kinds = JSON.parse(env.run(`function(){ const out = [], go = t => { stateBumped(); musicTraces.sample(solver, t); };
+    musicTraces.cut.length = 0; musicTraces.mark.cut = null; window.__go = go; return "[]"; }`));
+  void kinds;
+  const sampleAt = async t => { env.run("function(t){ window.__go(t); }", t); await turn(); return JSON.parse(env.run("function(){ return JSON.stringify(musicTraces.cut.map(e => [e.t, e.kind, e.mode])); }")); };
+  const k1 = await sampleAt(1000), k2 = await sampleAt(1100);
+  env.run("function(){ window.__modeOf = solver.modeOf; solver.modeOf = () => 0; }");
+  const k3 = await sampleAt(1200);
+  env.run("function(){ solver.modeOf = () => 8; }");
+  const k4 = await sampleAt(1300);
+  env.run("function(){ solver.modeOf = () => 9; }");
+  const k5 = await sampleAt(1400);
+  env.run("function(){ solver.modeOf = () => 7; }");
+  const k6 = await sampleAt(1500);
+  env.run("function(){ solver.modeOf = () => 11; }");
+  const k7 = await sampleAt(1600);
+  env.run("function(){ solver.modeOf = window.__modeOf; musicTraces.cut.length = 0; }");
+  ok("  ... lines of one field accumulate; another field starts the history again, with its own range rule (vorticity signed, sigma_c / sigma_r fixed, |z-| a magnitude, omega- signed)",
+     JSON.stringify(k1) === "[[1000,\"mag\",4]]" && JSON.stringify(k2) === "[[1000,\"mag\",4],[1100,\"mag\",4]]" &&
+     JSON.stringify(k3) === "[[1200,\"signed\",0]]" && JSON.stringify(k4) === "[[1300,\"sigma\",8]]" && JSON.stringify(k5) === "[[1400,\"sigma\",9]]" &&
+     JSON.stringify(k6) === "[[1500,\"mag\",7]]" && JSON.stringify(k7) === "[[1600,\"signed\",11]]", JSON.stringify([k2, k3, k4, k5, k6, k7]));
+  // a chain that was never rendered has no dispR: nothing is read, and nothing throws
+  ok("  ... and where the display chain does not exist yet nothing is gathered", env.run(`function(){ const r0 = musicTraces.reads.cut, d = solver.disp;
+    solver.disp = []; stateBumped(); let threw = ""; try { musicTraces.sample(solver, 5); } catch (e) { threw = String(e); }
+    solver.disp = d; return threw === "" && musicTraces.reads.cut === r0 && musicTraces.busy.cut === false && solver.disp.length >= 1; }`) === true);
+  await turn();                                // (that sample's spectrum readback lands)
+  env.getEl("cbTrCut").checked = false;
+  env.getEl("cbTrSpec").checked = false;
+  reset();
+  await run(12, true);
+  const d2 = st();
+  ok("  ... and with both off nothing is read and both histories are emptied",
+     d2.sp === 0 && d2.cut === 0 && d2.p.length === 0 && env.run("function(){ return musicTraces.spec.length === 0 && musicTraces.cut.length === 0; }"));
+  env.getEl("cbTrSpec").checked = true;
+
+  // ---- the drawing: what is stroked, in what order, in what colour ---------------------
+  // (a k^-5/3 spectrum, H_c = E_tot / 2)
+  const cx = env.run("function(){ return musicTraces.ctx; }");
+  const log = [];
+  const stroke0 = cx.stroke, dash0 = cx.setLineDash;
+  let dash = [];
+  const cur = [], move0 = cx.moveTo, line0 = cx.lineTo;
+  cx.moveTo = (x, y) => { cur.length = 0; cur.push([x, y]); return move0(x, y); };
+  cx.lineTo = (x, y) => { cur.push([x, y]); return line0(x, y); };
+  cx.setLineDash = d => { dash = Array.from(d); return dash0(d); };
+  // ... and the clip in force: the last rect() that was clip()ped, until the restore()
+  let rectIn = null, clipIn = null;
+  const rect0 = cx.rect, clip0 = cx.clip, rest0 = cx.restore;
+  cx.rect = (x, y, w, h) => { rectIn = [x, y, w, h]; return rect0(x, y, w, h); };
+  cx.clip = () => { clipIn = rectIn; return clip0(); };
+  cx.restore = () => { clipIn = null; return rest0(); };
+  cx.stroke = () => { log.push({ s: cx.strokeStyle, w: cx.lineWidth, dash: dash.length, shadow: cx.shadowBlur || 0, pts: cur.map(q => q.slice()), clip: clipIn && clipIn.slice() }); return stroke0(); };
+  const inject = () => env.run(`function(){ const nb = solver.nb, p = new Float32Array(3 * nb);
+    for (let b = 1; b < nb; b++) { const e = 0.01 * Math.pow(b, -5 / 3); p[b] = 0.5 * e; p[nb + b] = 0.5 * e; p[2 * nb + b] = 0.5 * e; }
+    const bins = tracesBinRange(256, 256, 2 * Math.PI, 2 * Math.PI);
+    musicTraces.spec = [{ t: 100000 - 2000, perp: p, nb: nb, bins: bins }, { t: 100000, perp: p, nb: nb, bins: bins }];
+    musicTraces.cut = []; }`);
+  inject();
+  const css = (rgb, al) => "rgba(" + rgb.map(v => Math.round(255 * Math.max(0, Math.min(1, v)))).join(",") + "," + al.toFixed(3) + ")";
+  const cm = t => JSON.parse(env.run("function(t){ return JSON.stringify(cmapRGB(cards.disp[0].cmap(), t)); }", t));
+  const draw = now => { log.length = 0; cx.__texts.length = 0; env.run("function(t){ musicTraces.draw(t); }", now); return log.slice(); };
+  const s1 = draw(100000);
+  ok("two lines and the guide are six strokes: each a dark halo first (wider, low opacity), then the line itself, oldest line first",
+     s1.length === 6 && [0, 2, 4].every(i => /^rgba\(0,0,0,/.test(s1[i].s) && s1[i].w > 2 * s1[i + 1].w && !/^rgba\(0,0,0,/.test(s1[i + 1].s)) &&
+     s1[2].s === "rgba(0,0,0," + (0.35 * Math.exp(-1)).toFixed(3) + ")" && s1[4].s === "rgba(0,0,0,0.350)" && s1.every(e => e.dash === 0),
+     s1.map(e => e.s + "@" + e.w).join("  "));
+  ok("  ... the newest in the colormap's BRIGHT end at full opacity, the one a fade time old 1/e of the way from the middle at opacity 1/e",
+     s1.length === 6 && s1[5].s === css(cm(1), 1) && s1[3].s === css(cm(0.5 + 0.5 / Math.E), Math.exp(-1)) && s1[5].s !== s1[3].s, s1[3] && s1[5] && s1[3].s + " then " + s1[5].s);
+  // the band: full width, the bottom fifth of the 512 x 512 host; E runs 3e-5 .. 0.3 (amp 1).
+  // With the tick labels on (the default) the plot keeps clear of the label column -- the
+  // widest label, 10^-1 at the stub's 6.2 px a character, plus 4 px either side = 32.8 --
+  // and of the 14 px k row along the bottom.
+  const SBAND = { x: 0, y: 512 - 102.4, w: 512, h: 102.4 }, SB = { x: 32.8, y: 512 - 102.4, w: 512 - 32.8, h: 102.4 - 14 }, SR = { k0: 1, k1: 84, e0: 3e-5, e1: 0.3 };
+  const newest = s1[5].pts, pFirst = T.tracesLogMap(1, 0.01, SR, SB), pLast = T.tracesLogMap(84, 0.01 * Math.pow(84, -5 / 3), SR, SB);
+  const sameBox = (a, b) => !!a && close(a[0], b.x, 1e-9) && close(a[1], b.y, 1e-9) && close(a[2], b.w, 1e-9) && close(a[3], b.h, 1e-9);
+  ok("  ... the spectrum runs along the bottom from the label column to the right edge: bin 1 at the column, bin 84 at the edge, 84 points, the guide at -5/3",
+     newest.length === 84 && close(newest[0][0], 32.8, 1e-9) && close(newest[83][0], 512, 1e-9) && close(newest[0][1], pFirst[1], 1e-6) && close(newest[83][1], pLast[1], 1e-5) &&
+     close((s1[1].pts[1][1] - s1[1].pts[0][1]) / (s1[1].pts[1][0] - s1[1].pts[0][0]), (5 / 3) * (88.4 / 4) / (479.2 / Math.log10(84)), 1e-9),
+     newest.length + " points, x " + newest[0][0].toFixed(1) + " .. " + newest[83][0].toFixed(1) + ", y " + newest[0][1].toFixed(1) + " .. " + newest[83][1].toFixed(1));
+  ok("  ... over FOUR decades, so this spectrum's tail falls below the plot -- and is CLIPPED at its edge: every stroke is inside a clip that is exactly the plot box, above the k row",
+     newest[83][1] > SB.y + SB.h && newest[0][1] < SB.y + SB.h && newest[0][1] > SB.y && s1.every(e => sameBox(e.clip, SB)) && SB.y + SB.h < 512 - 13,
+     "last point y " + newest[83][1].toFixed(1) + ", plot bottom " + (SB.y + SB.h).toFixed(1) + ", clip " + JSON.stringify(s1[5].clip));
+  const txt = () => cx.__texts.map(t => t.t + "@" + t.align);
+  const yDec = d => T.tracesLogMap(1, Math.pow(10, d), SR, SB)[1];
+  ok("  ... tick labels, as text only: k in the row under the plot (the ends aligned inward), the decades of E in the column to its left, at their own heights",
+     txt().join(" ") === "k = 1@left 10@center 50@right 10⁻¹@left 10⁻³@left" &&
+     cx.__texts.slice(0, 3).every(t => close(t.y, 512 - 4)) && close(cx.__texts[0].x, 32.8 + 4, 1e-9) && close(cx.__texts[1].x, T.tracesLogMap(10, 1, SR, SB)[0], 1e-9) &&
+     close(cx.__texts[2].x, T.tracesLogMap(50, 1, SR, SB)[0] - 4, 1e-9) &&
+     [-1, -3].every((d, i) => close(cx.__texts[3 + i].y, yDec(d), 1e-9) && cx.__texts[3 + i].x === 4 && cx.__texts[3 + i].base === "middle" &&
+                              cx.__texts[3 + i].x + 0.62 * 10 * 4 <= 32.8 - 4 + 1e-9),
+     txt().join(" "));
+  ok("  ... each over a dark shadow of its own, which is off again before anything is stroked; and nothing is ever dashed",
+     cx.shadowBlur === 0 && s1.every(e => e.shadow === 0 && e.dash === 0) && /rgba\(0,0,0,0\.9/.test(String(env.run("function(){ let seen = ''; const c = musicTraces.ctx, f = c.fillText; c.fillText = (...a) => { seen = c.shadowColor + '|' + c.shadowBlur; return f(...a); }; musicTraces.draw(100000); c.fillText = f; return seen; }"))));
+  env.getEl("cbTrTicks").checked = false;
+  const s1b = draw(100000), nb1 = s1b.length === 6 ? s1b[5].pts : [[NaN, NaN]];
+  ok("  ... and all of them go with the one toggle (cbTrTicks), which takes nothing else away",
+     cx.__texts.length === 0 && s1b.length === 6 && JSON.stringify(s1b.map(e => e.s)) === JSON.stringify(s1.map(e => e.s)));
+  ok("  ... without them there is no margin: the spectrum runs edge to edge over the whole band, bin 1 at x = 0, clipped to the band",
+     nb1.length === 84 && close(nb1[0][0], 0) && close(nb1[83][0], 512, 1e-9) && close(nb1[0][1], T.tracesLogMap(1, 0.01, SR, SBAND)[1], 1e-6) &&
+     s1b.every(e => sameBox(e.clip, SBAND)), "x " + nb1[0][0].toFixed(1) + " .. " + nb1[nb1.length - 1][0].toFixed(1) + ", clip " + JSON.stringify(s1b[5] && s1b[5].clip));
+  env.getEl("cbTrTicks").checked = true;
+  const s2 = draw(100000 + 5900);
+  ok("5.9 s later the older line (7.9 s, under 2%) is gone from the history and the picture; the other is fainter and nearer the middle",
+     s2.length === 4 && env.run("function(){ return musicTraces.spec.length; }") === 1 &&
+     s2[3].s === css(cm(0.5 + 0.5 * Math.exp(-2.95)), Math.exp(-2.95)), s2.length + " strokes, " + (s2[3] && s2[3].s));
+  env.run("function(){ cards.disp[0].selCmap.value = '1'; }");
+  const s3 = draw(100000 + 5900);
+  ok("the colour follows the display's colormap when it changes (viridis here)", s3.length === 4 && s2.length === 4 && s3[3].s === css(cm(0.5 + 0.5 * Math.exp(-2.95)), Math.exp(-2.95)) && s3[3].s !== s2[3].s, s3[3] && s3[3].s);
+  inject();
+  await P.input("rTrTau", 0.5);
+  draw(100000);
+  const s5 = draw(100000 + 1900);
+  ok("the fade slider is live: at 0.5 s a line 1.9 s old (2.2%) is still drawn, 2 s old is not; its label follows",
+     s5.length === 4 && draw(100000 + 2000).length === 2 && env.getEl("vTrTau").textContent === "0.5", s5.length + " strokes");
+  await P.input("rTrTau", 2);
+  // the cut, drawn: ONE line per sample over its halo, in the band along the top, each on
+  // the scale its own picture was coloured with
+  env.getEl("cbTrCut").checked = true;
+  const cutIn = (list) => env.run(`function(L){ musicTraces.spec = []; musicTraces.cut = L.map(e => { const r = new Float32Array(256); r.fill(e.fill); (e.head || []).forEach((v, i) => { r[i] = v; });
+    return { t: e.t, row: r, max: e.max, kind: e.kind, mode: e.mode }; }); }`, list);
+  cutIn([{ t: 200000, fill: 0, head: [2, 0, -2], max: 2, kind: "signed", mode: 0 }]);
+  const s6 = draw(200000), cp6 = s6.length === 4 ? s6[3].pts : [];
+  ok("the cut is ONE line over its halo (beside the spectrum's guide), across the FULL width along the top: sample ix over the centre of texel ix",
+     s6.length === 4 && /^rgba\(0,0,0,/.test(s6[2].s) && s6[2].w > 2 * s6[3].w && s6[3].s === css(cm(1), 1) && s6.every(e => e.dash === 0) &&
+     cp6.length === 256 && close(cp6[0][0], 1) && close(cp6[1][0], 3) && close(cp6[255][0], 511), cp6.length + " points, x " + (cp6[0] && cp6[0][0]) + " .. " + (cp6[255] && cp6[255][0]));
+  const CB = { x: 0, y: 0, w: 512, h: 102.4 }, CCLIP = { x: 32.8, y: 0, w: 512 - 32.8, h: 102.4 };
+  env.getEl("cbTrTicks").checked = false;
+  const s6b = draw(200000), cp6b = s6b.length === 4 ? s6b[3].pts : [];
+  env.getEl("cbTrTicks").checked = true;
+  draw(200000);
+  ok("  ... with the tick labels on it is CLIPPED out of the label column, not squeezed: the same 256 points at the same x and y as with them off, where the clip is the whole band",
+     s6.length === 4 && sameBox(s6[3].clip, CCLIP) && sameBox(s6[2].clip, CCLIP) && sameBox(s6b[3].clip, CB) && cp6b.length === 256 &&
+     JSON.stringify(cp6) === JSON.stringify(cp6b) && cp6.every((q, ix) => close(q[0], 512 * (ix + 0.5) / 256, 1e-12)),
+     "clip " + JSON.stringify(s6[3] && s6[3].clip) + " against " + JSON.stringify(s6b[3] && s6b[3].clip));
+  ok("  ... a signed field on -max..+max of the picture's scale: +max at the band's top, 0 mid-band, -max at its bottom (a fifth of the host down)",
+     cp6.length === 256 && close(cp6[0][1], 0) && close(cp6[1][1], 51.2) && close(cp6[2][1], 102.4) && close(cp6[100][1], 51.2), cp6.slice(0, 3).map(q => q[1].toFixed(1)).join(" "));
+  ok("  ... labelled with that scale up the left edge and x along the bottom of the band (2pi box)",
+     txt().slice(-5).join(" ") === "+2@left 0@left −2@left x = π@center 2π@right" && close(cx.__texts[cx.__texts.length - 5].y, 0) && close(cx.__texts[cx.__texts.length - 4].y, 51.2) &&
+     close(cx.__texts[cx.__texts.length - 3].y, 102.4) && close(cx.__texts[cx.__texts.length - 2].x, 256) && close(cx.__texts[cx.__texts.length - 1].x, 512 - 4) &&
+     close(cx.__texts[cx.__texts.length - 1].y, 102.4 - 4), txt().slice(-5).join(" "));
+  // ... where the page says where the picture is (musicTraces.picture: the stage, whose
+  // picture need not span its host), the cut is mapped over THAT extent and not the host's.
+  // (the stub records every stroke's points; this host is 512 CSS px wide at one backing
+  // pixel each, so the numbers below are both)
+  ok("musicTraces.picture is null unless a page sets it (this one, ?traces alone, does not): the cut spans its host", env.run("function(){ return musicTraces.picture; }") === null);
+  const setPic = v => env.run("function(v){ musicTraces.picture = v === null ? null : () => v; }", v);
+  setPic({ x: 100, w: 256, tile: false });
+  const sp1 = draw(200000), pp1 = sp1.length === 4 ? sp1[3].pts : [];
+  ok("with picture() = { x: 100, w: 256 } the cut is mapped over those 256 px: sample ix at 100 + (ix + 0.5), the same y as before, still one line over its halo and still clipped out of the label column only",
+     sp1.length === 4 && pp1.length === 256 && pp1.every((q, ix) => close(q[0], 100 + 256 * (ix + 0.5) / 256, 1e-12) && q[1] === cp6[ix][1]) &&
+     sameBox(sp1[3].clip, CCLIP) && sameBox(sp1[2].clip, CCLIP), pp1.length + " points, x " + (pp1[0] && pp1[0][0]) + " .. " + (pp1[255] && pp1[255][0]));
+  ok("  ... its x labels follow the picture (pi at its middle, 228; 2 pi at its right edge, 356 less the pad) while the scale's labels stay at the HOST's left edge (x = 4)",
+     txt().slice(-5).join(" ") === "+2@left 0@left −2@left x = π@center 2π@right" && cx.__texts.slice(-5, -2).every(t => t.x === 4) &&
+     close(cx.__texts[cx.__texts.length - 2].x, 228) && close(cx.__texts[cx.__texts.length - 1].x, 356 - 4) && close(cx.__texts[cx.__texts.length - 5].y, 0) &&
+     close(cx.__texts[cx.__texts.length - 3].y, 102.4), cx.__texts.slice(-5).map(t => t.t + "@" + t.x).join(" "));
+  setPic({ x: 100, w: 256, tile: true });
+  const sp2 = draw(200000), xs2 = sp2.slice(2).filter((e, i) => i % 2 === 1).map(e => e.pts[0][0]).sort((a, b) => a - b);
+  ok("  ... and with tile: true the line is repeated every picture-width across the host, as the picture is: three copies here, starting at x = -156, 100 and 356 (the first from left of the host, the last running past its right edge at 512), each its own halo and line with identical y",
+     sp2.length === 8 && xs2.length === 3 && close(xs2[0], -156 + 0.5) && close(xs2[1], 100.5) && close(xs2[2], 356.5) &&
+     sp2.slice(2).every(e => e.pts.length === 256 && e.pts.every((q, ix) => q[1] === cp6[ix][1] && close(q[0] - e.pts[0][0], ix, 1e-9)) && sameBox(e.clip, CCLIP)) &&
+     [2, 4, 6].every(i => /^rgba\(0,0,0,/.test(sp2[i].s) && sp2[i + 1].s === css(cm(1), 1)), sp2.length + " strokes, first x " + xs2.join(" "));
+  setPic({ x: 0, w: 512, tile: true });
+  const sp3 = draw(200000);
+  ok("  ... a picture that spans the host repeats nothing (one line, at the full-width x), and a picture() that answers null or a zero width falls back to the host's whole width",
+     sp3.length === 4 && JSON.stringify(sp3[3].pts) === JSON.stringify(cp6) &&
+     (setPic(null), env.run("function(){ musicTraces.picture = () => null; }"), JSON.stringify((draw(200000)[3] || {}).pts) === JSON.stringify(cp6)) &&
+     (setPic({ x: 50, w: 0, tile: true }), (d => d.length === 4 && JSON.stringify(d[3].pts) === JSON.stringify(cp6))(draw(200000))));
+  setPic(null);
+  cutIn([{ t: 200000, fill: 0, head: [2, 1], max: 2, kind: "mag", mode: 4 }]);
+  const s7 = draw(200000), cp7 = s7.length === 4 ? s7[3].pts : [];
+  ok("  ... a magnitude on 0..max: 0 at the band's bottom, max at its top; labelled max and 0",
+     cp7.length === 256 && close(cp7[0][1], 0) && close(cp7[1][1], 51.2) && close(cp7[2][1], 102.4) && txt().slice(-4).join(" ") === "2@left 0@left x = π@center 2π@right", txt().slice(-4).join(" "));
+  cutIn([{ t: 200000, fill: 0, head: [1, -1, 0.5], max: 123, kind: "sigma", mode: 8 }]);
+  const cp8 = draw(200000)[3].pts;
+  ok("  ... sigma on its fixed -1..+1, whatever the scale buffer holds", close(cp8[0][1], 0) && close(cp8[1][1], 102.4) && close(cp8[2][1], 25.6) && txt().slice(-5, -2).join(" ") === "+1@left 0@left −1@left");
+  // the column is ONE column for both bands, as wide as the longest label in either: with
+  // the spectrum off and a small scale on the cut it is the cut's "0.0012" (6 characters)
+  env.getEl("cbTrSpec").checked = false;
+  cutIn([{ t: 200000, fill: 0, max: 0.0012345, kind: "mag", mode: 4 }]);
+  const s8 = draw(200000);
+  ok("  ... the label column follows the longest label shown (here the cut's own 0.0012: 6 characters and two pads, 45.2 px)",
+     s8.length === 2 && sameBox(s8[1].clip, { x: 45.2, y: 0, w: 512 - 45.2, h: 102.4 }) && txt()[0] === "0.0012@left", JSON.stringify(s8[1] && s8[1].clip) + " " + txt()[0]);
+  env.getEl("cbTrSpec").checked = true;
+  // two lines taken under different scales (the autoscale moved): each drawn on its own.
+  // The cut's fade is a QUARTER of the slider's 2 s: a line 0.5 s old is one fade time old.
+  cutIn([{ t: 200000 - 500, fill: 1, max: 1, kind: "signed", mode: 0 }, { t: 200000, fill: 1, max: 4, kind: "signed", mode: 0 }]);
+  const s9 = draw(200000);
+  ok("  ... each line on the scale ITS picture was coloured with (the same value is full scale under max 1 and 5/8 of the way up under max 4); the labels are the newest's",
+     s9.length === 6 && s9[3].pts.every(q => close(q[1], 0)) && s9[5].pts.every(q => close(q[1], 102.4 * (1 - 5 / 8))) && txt().slice(-5, -4).join() === "+4@left", s9.length + " strokes");
+  ok("the cut fades FOUR TIMES faster than the spectrum: at the slider's 2 s a cut line 0.5 s old is at opacity 1/e, 1/e of the way from the middle (halo 0.35/e)",
+     s9.length === 6 && s9[3].s === css(cm(0.5 + 0.5 / Math.E), Math.exp(-1)) && s9[2].s === "rgba(0,0,0," + (0.35 * Math.exp(-1)).toFixed(3) + ")" && s9[5].s === css(cm(1), 1),
+     s9[3] && s9[3].s);
+  // ... and the two histories expire on their own clocks: 2% is 7.82 s for the spectrum and 1.96 s for the cut
+  const both = age => { inject(); env.run("function(a){ const r = new Float32Array(256); r.fill(1); musicTraces.cut = [{ t: 100000 - a, row: r, max: 2, kind: 'signed', mode: 0 }]; }", age);
+    const n = draw(100000).length; return [n, env.run("function(){ return musicTraces.spec.length; }"), env.run("function(){ return musicTraces.cut.length; }")]; };
+  const b19 = both(1900), b20 = both(2000);
+  ok("  ... a cut line 1.9 s old (2.2%) is still drawn and one 2.0 s old (1.8%) is dropped, while the spectrum's line 2 s old (37%) stays; the slider scales both",
+     b19.join() === "8,2,1" && b20.join() === "6,2,0" && (() => { env.getEl("rTrTau").value = "4"; const b = both(3900).join(), c = both(4000).join(); env.getEl("rTrTau").value = "2"; return b === "8,2,1" && c === "6,2,0"; })(),
+     b19.join() + " | " + b20.join());
+  env.run("function(){ musicTraces.spec = []; }");
+  cutIn([{ t: 200000 - 500, fill: 1, max: 1, kind: "signed", mode: 0 }, { t: 200000, fill: 1, max: 4, kind: "signed", mode: 0 }]);
+  env.getEl("cbTrTicks").checked = false;
+  ok("  ... and the cut's labels go with the same toggle", draw(200000).length === 6 && cx.__texts.length === 0);
+  env.getEl("cbTrTicks").checked = true;
+  env.getEl("cbTrCut").checked = false;
+  env.getEl("cbTrSpec").checked = false;
+  ok("with both overlays off nothing is stroked or written", draw(200000).length === 0 && cx.__texts.length === 0);
+  ok("nothing non-finite reached the canvas, and the page logged no failure of its own through all of it", realFails(env).length === 0, realFails(env).slice(0, 3).join(" | "));
+  { // ---- the side panels (cbTrSides, off by default) ----------------------------------------------
+  // Where the page says where the picture is (musicTraces.picture, the stage's) and it leaves
+  // two strips of the host free, eight panels take the place of the bottom spectrum: four
+  // spectra (E_u, E_b, E+, E-) in the first strip and, in the second, the same four
+  // energies against time or four SIGNED line cuts (u_x, b_x, z+_x, z-_x along the solver's
+  // own cut line, x = Lx/2). What the stub cannot say: what any of it looks like, or that the numbers a
+  // GPU hands back are these (every stub readback is zeros; the rows that need values put
+  // them in by hand, and say so).
+  const TS = vm.runInContext("({ tracesLane, tracesLaneRuns, tracesSidePanels, tracesLineFields, TRACES_LANES, TRACES_CUT_NAMES, TRACES_SIDE_MIN })", ctx);
+  ok("tracesLane: 0 is E_u, 1 is E_b, 2 is E+ = E_u + E_b + H_c, 3 is E- = E_u + E_b - H_c -- (3, 2, 1) -> 3, 2, 6, 4 -- which is common.js's SPEC_SETS convention, named E_u, E_b, E+, E−",
+     [0, 1, 2, 3].map(i => TS.tracesLane(i, 3, 2, 1)).join() === "3,2,6,4" && [0, 1, 2, 3].map(i => TS.tracesLane(i, 3, 2, -1)).join() === "3,2,4,6" &&
+     Array.from(TS.TRACES_LANES).join() === "E_u,E_b,E+,E\u2212" &&
+     /pm: \[\["E\+", COL\.zp, \(u, b, h\) => u \+ b \+ h\], \["E-", COL\.zm, \(u, b, h\) => u \+ b - h\]\]/.test(fs.readFileSync(path.join(dir, "common.js"), "utf8")));
+  // eight bins: E_u = b, E_b = 2b, H_c = b, but H_c = 10 at bin 3 (E- < 0 there) and E_u = NaN at bin 5
+  const lp = new Float32Array(24);
+  for (let b = 0; b < 8; b++) { lp[b] = b; lp[8 + b] = 2 * b; lp[16 + b] = b; }
+  lp[16 + 3] = 10; lp[5] = NaN;
+  const lb = { first: 1, last: 6, kunit: 0.5 }, lr = i => JSON.stringify(Array.from(TS.tracesLaneRuns(lp, 8, lb, i)).map(r => Array.from(r)));
+  ok("tracesLaneRuns: one lane's (k, E) over bins first..last, BROKEN where the lane is not positive and finite -- E- breaks alone at the bin where H_c exceeds E_u + E_b, and a NaN in E_u breaks every lane that reads it (E_b, which does not, runs through); it stops at the last bin the readback has",
+     lr(0) === "[[0.5,1,1,2,1.5,3,2,4],[3,6]]" && lr(1) === "[[0.5,2,1,4,1.5,6,2,8,2.5,10,3,12]]" && lr(2) === "[[0.5,4,1,8,1.5,19,2,16],[3,24]]" &&
+     lr(3) === "[[0.5,2,1,4],[2,8],[3,12]]" && JSON.stringify(Array.from(TS.tracesLaneRuns(lp, 4, lb, 0)).map(r => Array.from(r))) === "[[0.5,1,1,2,1.5,3]]", lr(3));
+  // the panels: by this file's own arithmetic, a strip cut into four and each box inset by the gap
+  const boxEq = (b, x, y, w, h) => close(b.x, x, 1e-9) && close(b.y, y, 1e-9) && close(b.w, w, 1e-9) && close(b.h, h, 1e-9);
+  const lrWant = (W, H, x, w, g, i, second) => [(second ? x + w : 0) + g, H * i / 4 + g, (second ? W - x - w : x) - 2 * g, H / 4 - 2 * g];
+  const tbWant = (W, H, y, h, g, i, second) => [W * i / 4 + g, (second ? y + h : 0) + g, W / 4 - 2 * g, (second ? H - y - h : y) - 2 * g];
+  const sp1 = TS.tracesSidePanels(1280, 800, 240, 0, 800, 800, 90, 10), sp2p = TS.tracesSidePanels(390, 844, 0, 227, 390, 390, 90, 10);
+  ok("tracesSidePanels, the square picture in a 1280 x 800 window: the strips are LEFT and RIGHT of it, each cut into four ROWS -- a: x 10..230, b: x 1050..1270, rows 200 high less the 10 px gap all round (y 10..190, 210..390, ...)",
+     !!sp1 && sp1.a.length === 4 && sp1.b.length === 4 && sp1.a.every((b, i) => boxEq(b, 10, 200 * i + 10, 220, 180)) && sp1.b.every((b, i) => boxEq(b, 1050, 200 * i + 10, 220, 180)),
+     JSON.stringify(sp1 && sp1.a[1]));
+  ok("  ... in the portrait phone (390 x 844, the picture at y 227..617) the strips are ABOVE and BELOW, each cut into four COLUMNS: 97.5 wide less the gap, a: y 10..217, b: y 627..834",
+     !!sp2p && sp2p.a.every((b, i) => boxEq(b, 97.5 * i + 10, 10, 77.5, 207)) && sp2p.b.every((b, i) => boxEq(b, 97.5 * i + 10, 627, 77.5, 207)), JSON.stringify(sp2p && sp2p.b[3]));
+  ok("  ... no room, no panels: null where neither pair of strips is at least `min` across (TRACES_SIDE_MIN = 90 CSS px) -- 89 either side is null and 90 is not; a picture that fills the host; a picture with room on ONE side only",
+     TS.TRACES_SIDE_MIN === 90 && TS.tracesSidePanels(1000, 800, 89, 0, 822, 800, 90, 10) === null && TS.tracesSidePanels(1000, 800, 90, 0, 820, 800, 90, 10) !== null &&
+     TS.tracesSidePanels(1280, 800, 0, 0, 1280, 800, 90, 10) === null && TS.tracesSidePanels(1280, 800, 400, 0, 800, 800, 90, 10) === null &&
+     TS.tracesSidePanels(800, 1000, 0, 89, 800, 822, 90, 10) === null && TS.tracesSidePanels(800, 1000, 0, 90, 800, 820, 90, 10) !== null);
+  let spn = 0, spBad = 0, spNull = 0;
+  for (const W of [390, 800, 1280, 1920, 3000]) for (const H of [480, 800, 844, 1080]) for (const asp of [0.5, 1, 16 / 9, 2.4]) for (const g of [0, 4, 10]) for (const min of [60, 90]) {
+    // (the picture as the stage lays it out: whole, centred)
+    const wide = W / H < asp, w = wide ? W : H * asp, h = wide ? W / asp : H, x = (W - w) / 2, y = (H - h) / 2;
+    const s = TS.tracesSidePanels(W, H, x, y, w, h, min, g);
+    spn++;
+    const wantLR = x >= min, wantTB = !wantLR && y >= min;
+    if (!wantLR && !wantTB) { spNull++; if (s !== null) spBad++; continue; }
+    const want = wantLR ? (i, sec) => lrWant(W, H, x, w, g, i, sec) : (i, sec) => tbWant(W, H, y, h, g, i, sec);
+    const all = s ? Array.from(s.a).concat(Array.from(s.b)) : [];
+    const hit = (p, q) => p.x < q.x + q.w - 1e-9 && q.x < p.x + p.w - 1e-9 && p.y < q.y + q.h - 1e-9 && q.y < p.y + p.h - 1e-9;
+    const good = !!s && s.a.length === 4 && s.b.length === 4 && s.a.every((b, i) => boxEq(b, ...want(i, false))) && s.b.every((b, i) => boxEq(b, ...want(i, true))) &&
+      all.every(b => b.w > 0 && b.h > 0 && b.x >= g - 1e-9 && b.y >= g - 1e-9 && b.x + b.w <= W - g + 1e-9 && b.y + b.h <= H - g + 1e-9 && !hit(b, { x: x, y: y, w: w, h: h })) &&
+      all.every((b, i) => all.every((c, j) => i === j || !hit(b, c)));
+    if (!good) spBad++;
+  }
+  ok("  ... over " + spn + " hosts, box shapes, gaps and minimum widths (" + spNull + " of them with no room: null): four boxes per strip, `a` in the first strip (left, or top) and `b` in the second, each its quarter of the strip inset by the gap, inside the host, clear of the picture and of each other",
+     spn === 480 && spNull > 50 && spNull < spn - 50 && spBad === 0, spBad + " bad");
+  ok("  ... and left / right wins where a picture leaves room both ways (200 x 300 at (300, 400) in 1000 x 1000: rows 250 high in strips 300 and 500 wide)",
+     (s => !!s && s.a.every((b, i) => boxEq(b, 0, 250 * i, 300, 250)) && s.b.every((b, i) => boxEq(b, 500, 250 * i, 500, 250)))(TS.tracesSidePanels(1000, 1000, 300, 400, 200, 300, 90)));
+  // the line cuts: 4 n floats (u_x | u_y | b_x | b_y) -> u_x, b_x, z+_x = u_x + b_x, z-_x = u_x - b_x, SIGNED
+  const la = [3, 0, 1, -1,  4, 1, 0, 0,  0, 1, 1, 1,  0, -1, 0, 0], lm = TS.tracesLineFields(new Float32Array(la), 4);
+  const lmY = TS.tracesLineFields(new Float32Array(la.map((v, k) => ((k >> 2) & 1 ? 99 - v : v))), 4);
+  ok("tracesLineFields, by hand: u_x = (3, 0, 1, -1), b_x = (0, 1, 1, 1) give z+_x = u_x + b_x = (3, 1, 2, 0) and z-_x = u_x - b_x = (3, -1, 0, -2), signs kept; the y components are not read; four Float32Arrays of n, named u_x, b_x, z+_x, z−_x (and the withdrawn tracesLineMags is gone)",
+     lm.length === 4 && Array.from(lm).every(r => r.length === 4 && r.constructor.name === "Float32Array") &&
+     Array.from(lm[0]).join() === "3,0,1,-1" && Array.from(lm[1]).join() === "0,1,1,1" && Array.from(lm[2]).join() === "3,1,2,0" && Array.from(lm[3]).join() === "3,-1,0,-2" &&
+     JSON.stringify(Array.from(lmY).map(r => Array.from(r))) === JSON.stringify(Array.from(lm).map(r => Array.from(r))) &&
+     Array.from(TS.TRACES_CUT_NAMES).join() === "u_x,b_x,z+_x,z−_x" && vm.runInContext("typeof tracesLineMags", ctx) === "undefined", Array.from(lm).map(r => Array.from(r).join("/")).join("  "));
+
+  // ---- on the page: OFF, the overlay is what it was ------------------------------------------------
+  const sq = () => JSON.parse(env.run(`function(){ return JSON.stringify({ ener: musicTraces.ener.map(e => e.v), rows4: musicTraces.rows4.map(e => e.rows.map(r => r.length)),
+    spec: musicTraces.spec.length, line: musicTraces.reads.line || 0, o: musicTraces.opts(), old: typeof musicTraces.readPlane + typeof musicTraces.stage4 + typeof tracesSideRow }); }`));
+  const sq0 = sq();
+  ok("side panels OFF (the default), through every frame and readback above: no energy history, no line cuts, the solver's readCutLine never called (reads.line never counted), and nothing of the withdrawn plane read exists (readPlane, stage4, tracesSideRow)",
+     sq0.o.sides === false && sq0.o.side2 === "time" && sq0.ener.length === 0 && sq0.rows4.length === 0 && sq0.line === 0 && st().cutline === 0 && sq0.old === "undefinedundefinedundefined", JSON.stringify(sq0));
+  const LRPIC = { x: 156, y: 0, w: 200, h: 512, tile: false }, TBPIC = { x: 0, y: 150, w: 512, h: 212, tile: false };
+  const panelsOf = (pic, i, second) => pic === LRPIC ? { x: (second ? 356 : 0) + 10, y: 128 * i + 10, w: 136, h: 108 } : { x: 128 * i + 10, y: (second ? 362 : 0) + 10, w: 108, h: 130 };
+  const enerIn = () => env.run(`function(){ musicTraces.ener = [4, 3, 2, 1, 0].map((age, j) => ({ t: 100000 - 1000 * age, v: [1, 2, 3, 4].map(m => m * (j + 1)) })); }`);
+  const tx = () => cx.__texts.map(t => [t.t, t.x, t.y, t.align, t.base]);
+  env.getEl("cbTrSpec").checked = true;
+  inject();
+  const base = draw(100000), baseT = JSON.stringify(tx());
+  setPic(LRPIC);
+  enerIn();
+  const offPic = draw(100000);
+  ok("  ... and with them off a picture hook changes nothing of the spectrum: the same six strokes (guide and two lines, in the band along the bottom) and the same labels, with or without one",
+     base.length === 6 && base.every(e => sameBox(e.clip, SB)) && JSON.stringify(offPic) === JSON.stringify(base) && JSON.stringify(tx()) === baseT);
+
+  // ---- ON, with a picture that leaves two strips ---------------------------------------------------
+  // (the host is the card's 512 x 512 wrap at one backing pixel per CSS pixel; the picture is
+  // put at x 156..356, so the strips are 156 wide: rows 128 high, boxes 136 x 108 after the gap)
+  env.getEl("cbTrSides").checked = true;
+  inject();
+  enerIn();
+  const on1 = draw(100000), on1T = tx();
+  const clipIs = (e, b) => sameBox(e.clip, b);
+  ok("side panels ON: the spectrum along the bottom is GONE (no guide, nothing clipped to its band, no k or decade labels) and every stroke is clipped to one of eight boxes -- per row, four strokes in the left box (two spectrum lines, halo and line) then four in the right (the energy's history in two pieces)",
+     on1.length === 32 && !on1.some(e => e.s === "rgba(0,0,0,0.3)" || sameBox(e.clip, SB) || sameBox(e.clip, SBAND)) &&
+     on1.every((e, k) => clipIs(e, panelsOf(LRPIC, k >> 3, (k & 7) >= 4))) && on1.every(e => e.dash === 0) &&
+     !on1T.some(t => /^k = |^10/.test(t[0])), on1.length + " strokes; clips " + Array.from(new Set(on1.map(e => e.clip && e.clip.join()))).length);
+  const lane = (i, e) => [0.5 * e, 0.5 * e, 1.5 * e, 0.5 * e][i];         // inject(): E_u = E_b = H_c = e / 2
+  ok("  ... the left boxes are the four SPECTRA, log-log on the bottom spectrum's own axes (k 1..84, four decades under 0.3 amp^2): E_u, E_b, E+ = 3 x and E- = 1 x the kinetic one for the injected E_u = E_b = H_c, the older line at 1/e",
+     [0, 1, 2, 3].every(i => { const A = panelsOf(LRPIC, i, false), ln = on1[8 * i + 3], old = on1[8 * i + 1], p0 = T.tracesLogMap(1, lane(i, 0.01), SR, A), p9 = T.tracesLogMap(10, lane(i, 0.01 * Math.pow(10, -5 / 3)), SR, A);
+       return ln.pts.length === 84 && close(ln.pts[0][0], A.x, 1e-9) && close(ln.pts[0][1], p0[1], 1e-6) && close(ln.pts[9][0], p9[0], 1e-9) && close(ln.pts[9][1], p9[1], 1e-6) &&
+              ln.s === css(cm(1), 1) && old.s === css(cm(0.5 + 0.5 / Math.E), Math.exp(-1)) && on1[8 * i + 2].s === "rgba(0,0,0,0.350)"; }),
+     on1[3] && on1[3].pts.length + " points; E_u at k = 1: y " + on1[3].pts[0][1]);
+  ok("  ... the right boxes are the same four energies against TIME: 4 x the fade time across (8 s), now at the right edge, zero at the bottom and the largest value on show 0.92 of the way up, in pieces of up to four samples each faded by its own age (samples 4, 3, 2, 1, 0 s old: a piece of four, 1 s old, and a piece of two, new)",
+     [0, 1, 2, 3].every(i => { const B = panelsOf(LRPIC, i, true), a = on1[8 * i + 5], b = on1[8 * i + 7];
+       return a.pts.length === 4 && b.pts.length === 2 && [4, 3, 2, 1].every((age, j) => close(a.pts[j][0], B.x + B.w * (1 - age / 8), 1e-9) && close(a.pts[j][1], B.y + B.h * (1 - 0.92 * (j + 1) / 5), 1e-9)) &&
+              close(b.pts[0][0], a.pts[3][0], 1e-12) && close(b.pts[1][0], B.x + B.w, 1e-9) && close(b.pts[1][1], B.y + B.h * 0.08, 1e-9) &&
+              on1[8 * i + 4].s === "rgba(0,0,0," + (0.35 * Math.exp(-0.5)).toFixed(3) + ")" && on1[8 * i + 6].s === "rgba(0,0,0,0.350)" && b.s === css(cm(1), 1); }),
+     JSON.stringify(on1[7] && on1[7].pts));
+  ok("  ... with the tick labels on each box has a title and nothing else: \"E_u(k)\" ... at the left boxes' top right, \"E_u(t)  max 5\" ... (the largest value on show: 5, 10, 15, 20) at the right boxes' top left",
+     on1T.length === 8 && [0, 1, 2, 3].every(i => { const A = panelsOf(LRPIC, i, false), B = panelsOf(LRPIC, i, true), nm = ["E_u", "E_b", "E+", "E\u2212"][i];
+       return JSON.stringify(on1T[2 * i]) === JSON.stringify([nm + "(k)", A.x + A.w - 4, A.y + 4, "right", "top"]) &&
+              JSON.stringify(on1T[2 * i + 1]) === JSON.stringify([nm + "(t)  max " + 5 * (i + 1), B.x + 4, B.y + 4, "left", "top"]); }), on1T.map(t => t[0]).join(" | "));
+  env.getEl("cbTrSpec").checked = false;
+  const on2 = draw(100000);
+  env.getEl("cbTrTicks").checked = false;
+  const on3 = draw(100000), on3T = tx().length;
+  env.getEl("cbTrTicks").checked = true;
+  ok("  ... the panels do not need the `spectrum` box (unticked: the same 32 strokes), and without tick labels they are the same strokes with no text at all",
+     JSON.stringify(on2) === JSON.stringify(on1) && JSON.stringify(on3) === JSON.stringify(on1) && on3T === 0);
+  setPic(TBPIC);
+  const on4 = draw(100000);
+  ok("  ... a picture that spans the host's WIDTH (y 150..362) puts the panels above and below it, four columns each: the same 32 strokes, clipped to boxes 108 x 130 at x = 10, 138, 266, 394, the spectra on top",
+     on4.length === 32 && on4.every((e, k) => clipIs(e, panelsOf(TBPIC, k >> 3, (k & 7) >= 4))) && close(on4[3].pts[0][0], 10, 1e-9) && close(on4[7].pts[1][0], 10 + 108, 1e-9),
+     Array.from(new Set(on4.map(e => e.clip && e.clip.join()))).join(" | "));
+  // second side = line cuts (values put in by hand: lane i's row is i + 1 at sample 0, MINUS half that at sample 1, zero after)
+  env.getEl("selTrSide").value = "cuts";
+  setPic(LRPIC);
+  env.run(`function(){ musicTraces.rows4 = [500, 0].map(age => ({ t: 100000 - age, rows: [1, 2, 3, 4].map(m => { const r = new Float32Array(256); r[0] = m; r[1] = -m / 2; return r; }) })); }`);
+  const cu = draw(100000), cuT = tx();
+  ok("second side = line cuts: the right boxes show u_x, b_x, z+_x, z−_x along the line instead of the histories, SIGNED -- sample i at (i + 0.5) / n of the box, zero at its mid-height, the largest |value| on show 0.92 of the way from there to its top (and minus half of it 0.23 of the box below the middle), fading as the line cut does (0.5 s old: 1/e)",
+     cu.length === 32 && [0, 1, 2, 3].every(i => { const B = panelsOf(LRPIC, i, true), old = cu[8 * i + 4], ln = cu[8 * i + 7];
+       return [4, 5, 6, 7].every(k => clipIs(cu[8 * i + k], B)) && ln.pts.length === 256 && close(ln.pts[0][0], B.x + B.w * 0.5 / 256, 1e-9) && close(ln.pts[255][0], B.x + B.w * 255.5 / 256, 1e-9) &&
+              close(ln.pts[0][1], B.y + B.h * 0.04, 1e-9) && close(ln.pts[1][1], B.y + B.h * 0.73, 1e-9) && close(ln.pts[2][1], B.y + B.h * 0.5, 1e-9) && close(ln.pts[255][1], B.y + B.h * 0.5, 1e-9) &&
+              old.s === "rgba(0,0,0," + (0.35 * Math.exp(-1)).toFixed(3) + ")" && ln.s === css(cm(1), 1); }) &&
+     JSON.stringify(cu.slice(0, 4)) === JSON.stringify(on1.slice(0, 4)), cu.length + " strokes; " + JSON.stringify(cu[7] && cu[7].pts.slice(0, 3)));
+  ok("  ... titled \"u_x(y)  ±1\", \"b_x(y)  ±2\", \"z+_x(y)  ±3\", \"z−_x(y)  ±4\" (cbTrSpec is off: the left boxes keep their spectra and titles)",
+     cuT.length === 8 && [0, 1, 2, 3].every(i => cuT[2 * i + 1][0] === ["u_x", "b_x", "z+_x", "z\u2212_x"][i] + "(y)  \u00b1" + (i + 1) && cuT[2 * i + 1][3] === "left") && cuT[0][0] === "E_u(k)",
+     cuT.map(t => t[0]).join(" | "));
+  env.getEl("selTrSide").value = "time";
+  env.run("function(){ musicTraces.rows4 = []; }");
+
+  // ---- ON, but nowhere to put them: no panels, and the bottom band is back ---------------------------
+  env.getEl("cbTrSpec").checked = true;
+  const noPanel = [];
+  for (const [tag, pic] of [["tiled", Object.assign({}, LRPIC, { tile: true })], ["narrow", { x: 56, y: 0, w: 400, h: 512, tile: false }],
+                            ["fills", { x: 0, y: 0, w: 512, h: 512, tile: false }], ["no height", { x: 156, y: 0, w: 200, h: 0, tile: false }]]) {
+    setPic(pic); inject(); enerIn();
+    const d = draw(100000);
+    if (!(JSON.stringify(d) === JSON.stringify(base) && JSON.stringify(tx()) === baseT)) noPanel.push(tag);
+  }
+  env.run("function(){ musicTraces.picture = () => null; }"); inject(); enerIn();
+  if (JSON.stringify(draw(100000)) !== JSON.stringify(base)) noPanel.push("hook answers null");
+  setPic(null); inject(); enerIn();
+  const noHook = draw(100000), noHookT = JSON.stringify(tx());
+  ok("side panels ON but no room for them -- the sides repeat the picture (tile), the strips are under 90 px (56 here), the picture fills the host, has no height, or the hook answers null: NO panel is drawn and the bottom spectrum is back, stroke for stroke and label for label",
+     noPanel.length === 0, noPanel.join(", "));
+  ok("  ... and on a page with no picture hook at all -- this one, ?traces without ?stage -- the option draws no panels either: the bottom spectrum as before",
+     env.run("function(){ return musicTraces.picture; }") === null && JSON.stringify(noHook) === JSON.stringify(base) && noHookT === baseT);
+  env.getEl("cbTrSpec").checked = false;
+  setPic(Object.assign({}, LRPIC, { tile: true }));
+  ok("  ... with the `spectrum` box unticked as well there is then nothing to draw", draw(100000).length === 0 && cx.__texts.length === 0);
+
+  // ---- ON: what is sampled, frame by frame -----------------------------------------------------------
+  // (the loop's stats readback is zeros under the stub: it is replaced by E_u = 3, E_b = 2,
+  // H_c = 1 -- floats 2, 3 and 8 -- and counted; the spectrum box stays unticked. The stub's
+  // clock jumps seconds per frame, so the histories EXPIRE between frames here: what was
+  // sampled is read off the push log, not off how much of it is still held)
+  setPic(LRPIC);
+  env.run(`function(){ window.__stats = 0; solver.readStats = async () => { window.__stats++; const s = new Float32Array(12); s[2] = 3; s[3] = 2; s[8] = 1; return s; };
+    musicTraces.spec = []; musicTraces.ener = []; musicTraces.mark.spec = null; }`);
+  env.getEl("cbTrSides").checked = false;
+  reset();
+  await run(24, true);
+  const e0 = st(), e0s = env.run("function(){ const n = window.__stats; window.__stats = 0; return n; }"), e0q = sq();
+  env.getEl("cbTrSides").checked = true;
+  reset();
+  await run(24, true);
+  const e1 = st(), e1s = env.run("function(){ const n = window.__stats; window.__stats = 0; return n; }"), e1q = sq();
+  ok("side panels ON, 24 frames of a moving state: the energies' history is sampled by TIME, at most every 33 ms -- under the stub, whose clock steps 250 ms a call, that is every one of the 24 frames -- each (E_u, E_b, E+, E-) = (3, 2, 6, 4) off the loop's own stats readback, which is read no more often than with the panels off (" + e0s + " times either way)",
+     e1.p.filter(e => e.which === "ener").map(e => e.f).join() === Array.from({ length: 24 }, (_, i) => i + 1).join() && e1q.ener.length >= 1 && e1q.ener.every(v => v.join() === "3,2,6,4") &&
+     e1s === e0s && e0s > 0 && e0q.ener.length === 0 && e0.p.length === 0, e1.p.filter(e => e.which === "ener").map(e => e.f).join() + "; stats " + e0s + " / " + e1s);
+  ok("  ... the SPECTRUM is sampled for the panels although its own box is unticked (one readSpectrum on frames 6, 12, 18, 24; with both off, above, none), and nothing else is read: no row gather, no readCutLine",
+     e0.sp === 0 && e1.sp === 4 && e1.r.spec === 4 && e1.p.filter(e => e.which === "spec").map(e => e.f).join() === "6,12,18,24" && e1.cut === 0 && e1.r.cut === 0 && e1.cutline === 0 && e1q.line === 0 &&
+     e1q.rows4.length === 0 && e1.p.every(e => e.which === "spec" || e.which === "ener"), e1.sp + " spectrum readbacks, pushes " + e1.p.map(e => e.which[0] + e.f).join(" "));
+  reset();
+  await run(12, false);
+  const e2 = st();
+  ok("  ... a state that stands still adds nothing: no energy sample, no spectrum", e2.p.length === 0 && e2.sp === 0 && e2.f === 12, e2.p.length + " pushes");
+  // second side = cuts: the solver's own readCutLine, here answering u = (3, 4), b = (i, 9) at sample i
+  env.run(`function(){ window.__iz = []; solver.readCutLine = iz => { window.__cutline++; window.__iz.push(iz); const ny = solver.p.ny, a = new Float32Array(4 * ny);
+    for (let i = 0; i < ny; i++) { a[i] = 3; a[ny + i] = 4; a[2 * ny + i] = i; a[3 * ny + i] = 9; } return Promise.resolve(a); }; }`);
+  env.getEl("selTrSide").value = "cuts";
+  reset();
+  await run(12, true);
+  const c1 = st(), c1q = sq();
+  const c1v = JSON.parse(env.run("function(){ const e = musicTraces.rows4[musicTraces.rows4.length - 1]; return JSON.stringify({ v: e.rows.map(r => [r[0], r[7], r[255]]), iz: window.__iz, keys: Object.keys(e).sort() }); }"));
+  ok("second side = cuts, 12 frames: ONE readCutLine(0) on each due frame (6 and 12), counted in reads.line, and no other readback of its own beyond the spectrum's two -- no row gather out of the display chain",
+     c1.cutline === 2 && c1q.line === 2 && c1v.iz.join() === "0,0" && c1.p.filter(e => e.which === "rows4").map(e => e.f).join() === "6,12" && c1.cut === 0 && c1.r.cut === 0 && c1.sp === 2,
+     c1.cutline + " line reads, pushes " + c1.p.map(e => e.which[0] + e.f).join(" "));
+  ok("  ... each pushed as four rows of ny = 256 -- u_x = 3, b_x = i, z+_x = 3 + i, z-_x = 3 - i of what the solver answered -- with a time and nothing else (no mode, no kind)",
+     c1q.rows4.length >= 1 && c1q.rows4.every(r => r.join() === "256,256,256,256") && c1v.keys.join() === "rows,t" &&
+     JSON.stringify(c1v.v) === JSON.stringify([[3, 3, 3], [0, 7, 255], [3, 10, 258], [3, -4, -252]]), JSON.stringify(c1v.v));
+  // (sample() by hand, with no draw in between, so nothing expires: one line on |u|'s mode, one on another)
+  env.run("function(){ musicTraces.rows4 = []; stateBumped(); musicTraces.sample(solver, 1000); }");
+  await turn();
+  env.run("function(){ window.__modeOf2 = solver.modeOf; solver.modeOf = () => 0; stateBumped(); musicTraces.sample(solver, 1100); }");
+  await turn();
+  const c2q = sq(), c2t = env.run("function(){ return musicTraces.rows4.map(e => e.t).join(); }");
+  env.run("function(){ solver.modeOf = window.__modeOf2; }");
+  reset();
+  await run(12, false);
+  const c3 = st();
+  ok("  ... another displayed field does NOT start that history again (these cuts are not the picture's field: both lines are held), and a state that stands still reads no line",
+     c2q.rows4.length === 2 && c2t === "1000,1100" && c2q.line === 4 && c3.cutline === 0 && c3.p.every(e => e.which !== "rows4") && c3.sp === 0, c2q.rows4.length + " lines; " + c3.cutline + " reads in 12 still frames");
+  env.getEl("selTrSide").value = "time";
+  reset();
+  await run(6, true);
+  const c4 = st(), c4q = sq();
+  ok("  ... back on \"time\" the next sample empties the line cuts and reads no more of them", c4q.rows4.length === 0 && c4.cutline === 0 && c4.p.every(e => e.which !== "rows4") && c4q.ener.length > 0);
+  env.getEl("selTrSide").value = "cuts";
+  env.run("function(){ window.__rcl = solver.readCutLine; solver.readCutLine = undefined; }");
+  reset();
+  await run(12, true);
+  const c5 = st(), c5q = sq();
+  env.run("function(){ solver.readCutLine = window.__rcl; }");
+  ok("  ... and a solver with no readCutLine is tolerated: frames pass, nothing is counted or pushed for the cuts, nothing is logged as a failure",
+     c5.f === 12 && c5q.rows4.length === 0 && c5q.line === 0 && c5.p.every(e => e.which !== "rows4") && c5.sp === 2 && realFails(env).length === 0, realFails(env).slice(0, 2).join(" | "));
+  env.getEl("selTrSide").value = "time";
+  env.getEl("cbTrSides").checked = false;
+  reset();
+  await run(6, true);
+  ok("side panels OFF again: the next frames empty the energies' history (and, the spectrum box being unticked too, read nothing at all)",
+     sq().ener.length === 0 && sq().rows4.length === 0 && st().sp === 0 && st().p.length === 0 && st().cutline === 0, JSON.stringify(st().p));
+  // the energies' clock, with times of this file's own (frame() by hand, the state moved before each)
+  const TE = vm.runInContext("({ tracesEnerDue, TRACES_ENER_MS, TRACES_ENER_MAX })", ctx);
+  ok("tracesEnerDue: due when there is no sample yet, and then once 32 ms have passed since the last (TRACES_ENER_MS = 33, less one for a 60 Hz frame's jitter): 31 ms is not, 32 is; a clock that stepped back is not",
+     TE.TRACES_ENER_MS === 33 && TE.tracesEnerDue(0, 5) === true && TE.tracesEnerDue(undefined, 5) === true && TE.tracesEnerDue(1000, 1016) === false && TE.tracesEnerDue(1000, 1031) === false &&
+     TE.tracesEnerDue(1000, 1032) === true && TE.tracesEnerDue(1000, 1033) === true && TE.tracesEnerDue(1000, 990) === false);
+  ok("  ... and the history holds 768 of them (TRACES_ENER_MAX, handed to tracesPush): more than 4 x the fade slider's longest 6 s at 30 a second (720), where the other histories' cap of 256 would cut the panel short",
+     TE.TRACES_ENER_MAX === 768 && TE.TRACES_ENER_MAX >= 4 * 6 * 1000 / TE.TRACES_ENER_MS && 4 * 6 * 1000 / TE.TRACES_ENER_MS > 256 && +env.getEl("rTrTau").max === 6 &&
+     /tracesPush\(this\.ener, \{[^\n]*\}, TRACES_ENER_MAX\);/.test(src) && T.tracesPush(Array.from({ length: 768 }, (_, i) => ({ t: i })), { t: 768 }, 768).length === 768);
+  env.getEl("cbTrSides").checked = true;
+  env.run("function(){ musicTraces.ener = []; musicTraces.enerAt = 0; musicTraces.mark.ener = null; }");
+  const enerAt = ts => JSON.parse(env.run(`function(ts){ const out = []; for (const [t, bump] of ts) { if (bump) stateBumped(); const n = musicTraces.ener.length; statsCache.s = new Float32Array([0, 0, 3, 2, 0, 0, 0, 0, 1, 0, 0, 0]);
+    musicTraces.frame(solver, t); if (musicTraces.ener.length > n) out.push(t); } return JSON.stringify(out); }`, ts));
+  const et = enerAt([[5000000, true], [5000016, true], [5000031, true], [5000032, true], [5000048, true], [5000063, true], [5000064, true], [5000100, false], [5000200, false], [5000216, true]]);
+  ok("  ... on the page, frames at +0, 16, 31, 32, 48, 63, 64 ms of a moving state sample at +0, +32 and +64 only; a state that has not moved is not sampled however long it waits (+100, +200), and is once it has (+216)",
+     et.join() === "5000000,5000032,5000064,5000216" && env.run("function(){ return musicTraces.enerAt; }") === 5000216, et.map(t => "+" + (t - 5000000)).join(" "));
+  env.getEl("cbTrSides").checked = false;
+  env.run("function(){ musicTraces.frame(solver, 5000300); }");
+
+  // a handler that THROWS must not leave its readback marked busy for ever (each chain ends
+  // .catch(console.error).then(busy = false)): tracesPush is made to throw for the next three pushes
+  await turn();                                    // (whatever the frames above started has landed)
+  env.getEl("cbTrSpec").checked = true; env.getEl("cbTrCut").checked = true; env.getEl("cbTrSides").checked = true; env.getEl("selTrSide").value = "cuts";
+  env.run(`function(){ musicTraces.spec = []; musicTraces.cut = []; musicTraces.rows4 = []; musicTraces.reads = { spec: 0, cut: 0, line: 0 };
+    window.__errs = []; window.__cerr = console.error; console.error = e => { window.__errs.push(String(e && e.message || e)); };
+    const tp = tracesPush; let k = 3; window.__tp = tp; tracesPush = function(h, e, m){ if (k > 0) { k--; throw new Error("boom in the handler"); } return tp(h, e, m); };
+    stateBumped(); musicTraces.sample(solver, 6000000); }`);
+  await turn();
+  const th1 = JSON.parse(env.run("function(){ return JSON.stringify({ busy: [musicTraces.busy.spec, musicTraces.busy.cut, musicTraces.busy4], r: musicTraces.reads, n: [musicTraces.spec.length, musicTraces.cut.length, musicTraces.rows4.length], errs: window.__errs }); }"));
+  env.run("function(){ stateBumped(); musicTraces.sample(solver, 6000100); }");
+  await turn();
+  const th2 = JSON.parse(env.run(`function(){ const o = { busy: [musicTraces.busy.spec, musicTraces.busy.cut, musicTraces.busy4], r: musicTraces.reads, n: [musicTraces.spec.length, musicTraces.cut.length, musicTraces.rows4.length] };
+    console.error = window.__cerr; tracesPush = window.__tp; return JSON.stringify(o); }`));
+  ok("a throw INSIDE a readback's own handler -- the spectrum's, the line cut's and the side cuts', one each -- is reported (console.error) and leaves none of the three marked busy, with nothing pushed",
+     th1.busy.join() === "false,false,false" && th1.r.spec === 1 && th1.r.cut === 1 && th1.r.line === 1 && th1.n.join() === "0,0,0" && th1.errs.length === 3 && th1.errs.every(e => /boom in the handler/.test(e)),
+     JSON.stringify(th1));
+  ok("  ... so the next sample of a moved state starts each of the three again, and those land", th2.busy.join() === "false,false,false" && th2.r.spec === 2 && th2.r.cut === 2 && th2.r.line === 2 && th2.n.join() === "1,1,1", JSON.stringify(th2));
+  env.getEl("cbTrCut").checked = false; env.getEl("cbTrSpec").checked = false;
+
+  // a side cut older than the CUT's fade (a quarter of the slider's) is gone, though a spectrum line that old stays
+  setPic(LRPIC);
+  const oldCut = age => { env.run(`function(age){ musicTraces.rows4 = [{ t: 7000000 - age, rows: [1, 2, 3, 4].map(m => { const r = new Float32Array(256); r[0] = m; return r; }) }];
+      const nb = solver.nb, p = new Float32Array(3 * nb); for (let b = 1; b < nb; b++) { p[b] = p[nb + b] = 0.005 * Math.pow(b, -5 / 3); }
+      musicTraces.spec = [{ t: 7000000 - age, perp: p, nb: nb, bins: tracesBinRange(256, 256, 2 * Math.PI, 2 * Math.PI) }]; musicTraces.ener = []; }`, age);
+    const d = draw(7000000); return [d.length, env.run("function(){ return musicTraces.rows4.length; }"), env.run("function(){ return musicTraces.spec.length; }")].join(); };
+  const oc19 = oldCut(1900), oc20 = oldCut(2000);
+  ok("the side cuts fade on the CUT's clock, a quarter of the slider's 2 s: a line 1.9 s old (2.2%) is drawn in all four boxes beside the spectra of the same age, one 2.0 s old (1.8%) is dropped while those spectra (37%) stay",
+     oc19 === "16,1,1" && oc20 === "8,0,1", oc19 + " | " + oc20);
+  env.run("function(){ musicTraces.rows4 = []; musicTraces.spec = []; }");
+
+  // devicePixelRatio 2: the host is still 512 CSS px, the canvas 1024 backing px, and the
+  // picture hook answers in CSS px -- every length of the panels and of the cut doubles
+  env.getEl("selTrSide").value = "time";
+  env.run("function(){ window.devicePixelRatio = 2; }");
+  const box2 = (i, second) => ({ x: (second ? 712 : 0) + 20, y: 256 * i + 20, w: 272, h: 216 });
+  setPic(LRPIC); inject(); enerIn();
+  const hd = draw(100000), hdW = env.run("function(){ return musicTraces.canvas.width + 'x' + musicTraces.canvas.height; }"), hdT = tx();
+  ok("at devicePixelRatio 2 (a 1024 x 1024 canvas on the same 512 px host) the picture's CSS box is scaled to backing pixels for the panels: the strips are 312 wide, the boxes 272 x 216 after a 20 px gap, at x = 20 and x = 732, and the titles sit 8 px inside them",
+     hdW === "1024x1024" && hd.length === 32 && hd.every((e, k) => clipIs(e, box2(k >> 3, (k & 7) >= 4))) && close(hd[7].pts[1][0], 732 + 272, 1e-9) && close(hd[3].pts[0][0], 20, 1e-9) &&
+     hdT.length === 8 && hdT[0][1] === 20 + 272 - 8 && hdT[0][2] === 28 && hdT[1][1] === 732 + 8, hdW + "; clips " + Array.from(new Set(hd.map(e => e.clip && e.clip.join()))).slice(0, 2).join(" | "));
+  env.getEl("cbTrSpec").checked = true;
+  setPic({ x: 80, y: 0, w: 352, h: 512, tile: false }); inject(); enerIn();
+  const hdNarrow = draw(100000);
+  setPic({ x: 100, y: 0, w: 312, h: 512, tile: false }); inject(); enerIn();
+  const hdRoom = draw(100000);
+  ok("  ... and the 90 px minimum is CSS pixels there too: strips of 80 CSS px (160 backing) take no panels -- the bottom spectrum is drawn, in its band of the 1024 px canvas -- and strips of 100 do",
+     hdNarrow.length === 6 && hdNarrow.every(e => e.clip && close(e.clip[1], 1024 - 204.8, 1e-9) && e.clip[0] + e.clip[2] === 1024) &&
+     hdRoom.length === 32 && hdRoom.every((e, k) => clipIs(e, { x: ((k & 7) >= 4 ? 824 : 0) + 20, y: 256 * (k >> 3) + 20, w: 160, h: 216 })), hdNarrow.length + " and " + hdRoom.length + " strokes");
+  env.getEl("cbTrSpec").checked = false; env.getEl("cbTrSides").checked = false; env.getEl("cbTrCut").checked = true;
+  cutIn([{ t: 200000, fill: 0, head: [2, 0, -2], max: 2, kind: "signed", mode: 0 }]);
+  setPic({ x: 100, w: 256, y: 0, h: 512, tile: false });
+  const hc1 = draw(200000);
+  setPic({ x: 100, w: 256, y: 0, h: 512, tile: true });
+  const hc2 = draw(200000), hx = hc2.filter((e, i) => i % 2 === 1).map(e => e.pts[0][0]).sort((a, b) => a - b);
+  ok("  ... and for the line cut: with picture() = { x: 100, w: 256 } (CSS) sample ix is at 200 + 2 (ix + 0.5) backing px, in a band 204.8 high; tiled, the three copies start at -312, 200 and 712 (+1)",
+     hc1.length === 2 && hc1[1].pts.length === 256 && hc1[1].pts.every((q, ix) => close(q[0], 200 + 2 * (ix + 0.5), 1e-12)) && close(hc1[1].pts[0][1], 0) && close(hc1[1].pts[2][1], 204.8) &&
+     hc2.length === 6 && hx.length === 3 && close(hx[0], -311) && close(hx[1], 201) && close(hx[2], 713), hc1.length + " strokes, x " + (hc1[1] && hc1[1].pts[0][0]) + " .. ; tiled " + hx.join(" "));
+  env.getEl("cbTrCut").checked = false;
+  env.run("function(){ window.devicePixelRatio = 1; musicTraces.cut = []; musicTraces.fit(); }");
+
+  // the page's own frame hook still runs under the traces' wrapper
+  const probe = async E => { E.env.run("function(){ music.autoMax = NaN; music.autoAt = -1e9; cards.disp[0].dirty = true; }"); await E.frame(); await E.frame();
+    return JSON.parse(E.env.run("function(){ return JSON.stringify({ a: music.autoMax, read: musicScaleReadout(), fixed: !!solver.disp[0].musicFixed, f: musicTraces.frames }); }")); };
+  const pb = await probe(P);
+  ok("under the traces' frame-hook wrapper the page's OWN hook still runs every frame: musicScaleProbe reads what the autoscale would be (0 under the stub, where it was NaN) and the readout says so",
+     pb.fixed === true && pb.a === 0 && /; the autoscale would be 0\.00/.test(pb.read) && /frameHook = async sv => \{ if \(sv === solver\) musicTraces\.frame\(sv, performance\.now\(\)\); await fh\(sv\); \};/.test(fs.readFileSync(path.join(dir, "music.html"), "utf8")),
+     JSON.stringify(pb));
+  setPic(null);
+  ok("through all of the side panels nothing non-finite reached the canvas and the page logged no failure of its own", realFails(env).length === 0, realFails(env).slice(0, 3).join(" | "));
+  }
+  // any host: the stage's element is not the card's wrap
+  const moved = env.run(`function(){ const h = document.createElement("div"), old = musicTraces.canvas; h.id = "stage";
+    h.clientWidth = 1280; h.clientHeight = 720; const c = musicTraces.attach(h);
+    return c !== old && old.parentNode === null && c.parentNode === h && h.children.length === 1 && c.width === 1280 && c.height === 720; }`);
+  ok("attach(host) takes ANY host: moved to a 1280 x 720 element, the old canvas is removed and the new one is sized from the new host", moved === true);
+  // ?stage is the same switch, and there the shell (stage.js, leg 15) has made #stage. The
+  // wiring line hands the traces `document.querySelector("#stage") || cards.disp[0].wrap`: in
+  // a browser that is #stage itself (the canvas beside the picture, so the zoom pulse does
+  // not scale it). The stub's querySelector knows no "#stage", so HERE the canvas lands on
+  // the card's wrap -- which the shell has moved into #stage. Both halves are stated.
+  const S = await musicPage("?stage");
+  const stq = JSON.parse(S.env.run(`function(){ const c = musicTraces.canvas, w = cards.disp[0].wrap;
+    return JSON.stringify({ on: musicTraces.on, cv: !!c, inWrap: !!c && c.parentNode === w, wrapInStage: !!stage.el && w.parentNode === stage.el,
+      qs: document.querySelector("#stage") === null, n: w.children.filter(x => x.className === "traces").length }); }`));
+  ok("?stage switches the traces on too: ONE canvas, inside #stage -- under the stub on the picture's wrap (which the shell moved into #stage), because the stub cannot resolve \"#stage\"; the wiring line asks for #stage first",
+     stq.on === true && stq.cv && stq.inWrap && stq.wrapInStage && stq.qs === true && stq.n === 1 &&
+     /musicTraces\.attach\(document\.querySelector\("#stage"\) \|\| cards\.disp\[0\]\.wrap\);/.test(fs.readFileSync(path.join(dir, "music.html"), "utf8")) &&
+     grp(S.env).indexOf("grpTraces") >= 0 && realFails(S.env).length === 0, JSON.stringify(stq));
+  S.env.run("function(){ music.autoMax = NaN; music.autoAt = -1e9; cards.disp[0].dirty = true; }");
+  await S.frame(); await S.frame();
+  ok("  ... and there too the page's own frame hook runs under the traces' wrapper (musicScaleProbe: the autoscale read, 0 under the stub where it was NaN)",
+     S.env.run("function(){ return music.autoMax === 0 && /the autoscale would be/.test(musicScaleReadout()) && musicTraces.frames >= 2; }") === true);
+  // the flag, by evaluating traces.js with a location of this file's making
+  const onFor = q => { const c = vm.createContext({ location: { search: q } }); vm.runInContext(src, c, { filename: "traces.js" }); return vm.runInContext("TRACES_ON && musicTraces.on && musicTraces.groups().length === 1", c); };
+  ok("the traces' flag is a whole word, by stage.js's rule: ?traces, ?stage, ?traces=1, ?stage=1 and &traces / &stage are on; ?tracesfoo, ?stage-x, ?traces-old, ?stagefright, ?traces_2, ?x=traces and nothing are off",
+     ["?traces", "?stage", "?traces=1", "?stage=1", "?musicdebug&traces", "?a=1&stage&b"].every(q => onFor(q) === true) &&
+     ["", "?tracesfoo", "?stage-x", "?traces-old", "?stagefright", "?traces_2", "?x=traces", "?backstage", "?musicdebug"].every(q => onFor(q) === false) &&
+     /const TRACES_ON = typeof location !== "undefined" && \/\[\?&\]\(traces\|stage\)\(\?!\[\\w-\]\)\/\.test\(location\.search \|\| ""\);/.test(src));
+}
+
+// ===========================================================================
+// 15. the stage (plans-webgpu/MUSIC_STAGE_PLAN.md S1): stage.js / stage.css, live with ?stage
+// ===========================================================================
+// What the stub can say: the pure rules (window -> canvas, the idle fade and the press that
+// only wakes, where a status goes, the fullscreen feature test), the STRUCTURE the page
+// builds with the flag, and that without the flag none of it exists. What it cannot: that
+// stage.css lays any of it out as meant, that a real pointer or touch event reaches the
+// listeners in the order the rules assume, fullscreen, or anything about iOS. The stub's
+// elements take no events at all, so the idle rows drive stageEvent / stageTick by hand.
+async function legStage(state) {
+  const src = fs.readFileSync(path.join(dir, "stage.js"), "utf8");
+  const ctx = vm.createContext({});
+  const msg = throws(() => vm.runInContext(src, ctx, { filename: "stage.js" }));
+  ok("stage.js evaluates in a bare context (no DOM, no location, none of the shared scripts) and is OFF there",
+     msg === "" && vm.runInContext("STAGE_ON === false && stage.el === null", ctx) === true, msg);
+  const S = vm.runInContext(`({ stageFlag, stageFit, stageTiles, stageFill, stageFrame, stagePicture, stageIdleNew, stageIdleEvent, stageStatusPlace, stageFullscreen,
+    stageBuild, stageAdopt, stageAspect, stageResize, STAGE_CAP, STAGE_IDLE_MS, STAGE_GRACE_MS })`, ctx);
+  ok("  ... where its entry points are no-ops: stageBuild / stageAdopt / stageResize / stageFrame do nothing, stageAspect() and stagePicture() are null, and the sides are black (stageFill() is \"bars\")",
+     throws(() => { S.stageBuild(); S.stageAdopt(); S.stageResize(true); S.stageFrame(); }) === "" && S.stageAspect() === null &&
+     S.stagePicture() === null && S.stageFill() === "bars" && vm.runInContext("stage.tile === null && stage.fit === null", ctx) === true);
+  const names = [];
+  for (const l of src.split("\n")) {
+    const m = /^(?:async\s+)?(?:function\*?|const|let|var|class)\s+([A-Za-z_$][\w$]*)/.exec(l);
+    if (m) names.push(m[1]);
+  }
+  const shared = ["common.js", "physics.js", "solver2d.js", "music.js"].map(f => fs.readFileSync(path.join(dir, f), "utf8")).join("\n");
+  const html = fs.readFileSync(path.join(dir, "music.html"), "utf8");
+  const clash = names.filter(n => new RegExp("^(?:async\\s+)?(?:function\\*?|const|let|var|class)\\s+" + n + "\\b", "m").test(shared + "\n" + html));
+  ok("every top-level name is stage* / STAGE_* (" + names.length + " names), and none is declared by the shared files, music.js or the page",
+     names.length >= 20 && names.every(n => /^(stage|STAGE_)/.test(n)) && clash.length === 0,
+     names.filter(n => !/^(stage|STAGE_)/.test(n)).concat(clash).join(", "));
+
+  // ---- the flag -------------------------------------------------------------------------
+  ok("stageFlag: ?stage, &stage and ?stage=1 are the flag; ?stagefright, ?backstage, ?x=stage and nothing are not",
+     ["?stage", "?musicdebug&stage", "?stage=1", "?stage&musicdebug=energy"].every(s => S.stageFlag(s) === true) &&
+     ["", "?stagefright", "?backstage", "?x=stage", "?stage_2", "?musicdebug", undefined].every(s => S.stageFlag(s) === false));
+
+  // ---- window -> canvas -------------------------------------------------------------------
+  // (two rules in one function: COVER, the five-argument form, which the page no longer
+  // uses, and CONTAIN, the sixth argument, which is what stageMeasure always passes)
+  const fit = (w, h, d, a, c) => S.stageFit(w, h, d, a, c);
+  const fitIn = (w, h, d, a, c) => S.stageFit(w, h, d, a, c, true);
+  const eq = (f, o) => Object.keys(o).every(k => Math.abs(f[k] - o[k]) < 1e-9);
+  ok("stageFit (cover), a landscape window 1280 x 800 at dpr 1: the square picture is 1280 CSS px, cropped 240 top and bottom; backing 1280^2",
+     eq(fit(1280, 800, 1), { cssW: 1280, cssH: 1280, left: 0, top: -240, w: 1280, h: 1280 }), JSON.stringify(fit(1280, 800, 1)));
+  ok("  ... a portrait phone 390 x 844 at dpr 3: 844 CSS px, cropped 227 left and right; 2532 backing px CAPPED at 1920",
+     eq(fit(390, 844, 3), { cssW: 844, cssH: 844, left: -227, top: 0, w: 1920, h: 1920 }), JSON.stringify(fit(390, 844, 3)));
+  ok("  ... the backing size follows window x devicePixelRatio below the cap: 800 x 600 at dpr 2 -> 1600, at dpr 1 -> 800, at 1.5 -> 1200",
+     fit(800, 600, 2).w === 1600 && fit(800, 600, 1).w === 800 && fit(800, 600, 1.5).w === 1200 && fit(800, 600, 2).cssW === 800);
+  ok("  ... the cap is 1920 on the long side: 1920 wide is untouched, 1921 and a 4K window at dpr 2 are 1920",
+     S.STAGE_CAP === 1920 && fit(1920, 1080, 1).w === 1920 && fit(1921, 1080, 1).w === 1920 && fit(3840, 2160, 2).w === 1920 &&
+     fit(3840, 2160, 2).h === 1920 && fit(3840, 2160, 2).cssW === 3840);
+  ok("  ... and it is an argument: cap 1000 -> 1000; an odd size is rounded to an even one (1365 -> 1366)",
+     fit(1280, 800, 2, 1, 1000).w === 1000 && fit(1365, 700, 1).w === 1366 && fit(1365, 700, 1).h === 1366);
+  // a box that is not square (the later window-shaped box): cover, either way round
+  ok("  ... a 2:1 box in a square 1000 window covers by height (2000 x 1000 CSS, 500 off each side; backing 1920 x 960)",
+     eq(fit(1000, 1000, 1, 2), { cssW: 2000, cssH: 1000, left: -500, top: 0, w: 1920, h: 960 }), JSON.stringify(fit(1000, 1000, 1, 2)));
+  ok("  ... and in a 4:1 window by width (1600 x 800 CSS, 200 off top and bottom); a 1:2 box in a landscape window likewise",
+     eq(fit(1600, 400, 1, 2), { cssW: 1600, cssH: 800, left: 0, top: -200, w: 1600, h: 800 }) &&
+     eq(fit(1000, 500, 1, 0.5), { cssW: 1000, cssH: 2000, left: 0, top: -750, w: 960, h: 1920 }));
+  // CONTAIN (the sixth argument): the whole box inside the window, what the page shows
+  ok("stageFit (contain), the same 1280 x 800 window at dpr 1: the square picture is 800 CSS px, 240 in from the left and the right, nothing cropped; backing 800^2",
+     eq(fitIn(1280, 800, 1), { cssW: 800, cssH: 800, left: 240, top: 0, w: 800, h: 800 }), JSON.stringify(fitIn(1280, 800, 1)));
+  ok("  ... the portrait phone 390 x 844 at dpr 3: 390 CSS px, 227 above and below; backing 1170^2 (390 x 3, under the cap)",
+     eq(fitIn(390, 844, 3), { cssW: 390, cssH: 390, left: 0, top: 227, w: 1170, h: 1170 }), JSON.stringify(fitIn(390, 844, 3)));
+  ok("  ... a 2:1 box in a square 1000 window fits by width (1000 x 500 CSS, 250 above and below), in a 4:1 window by height (800 x 400, 400 either side); a 1:2 box in a landscape window by height (250 x 500, 375 either side)",
+     eq(fitIn(1000, 1000, 1, 2), { cssW: 1000, cssH: 500, left: 0, top: 250, w: 1000, h: 500 }) &&
+     eq(fitIn(1600, 400, 1, 2), { cssW: 800, cssH: 400, left: 400, top: 0, w: 800, h: 400 }) &&
+     eq(fitIn(1000, 500, 1, 0.5), { cssW: 250, cssH: 500, left: 375, top: 0, w: 250, h: 500 }),
+     JSON.stringify([fitIn(1000, 1000, 1, 2), fitIn(1600, 400, 1, 2), fitIn(1000, 500, 1, 0.5)]));
+  ok("  ... a box of the window's own shape is the same under both rules: it fills the window exactly, at (0, 0)",
+     [[1280, 800, 1, 1.6], [1920, 1080, 2, 16 / 9], [390, 844, 3, 390 / 844], [600, 600, 1, 1]].every(q =>
+       JSON.stringify(fitIn(...q)) === JSON.stringify(fit(...q)) && Math.abs(fitIn(...q).cssW - q[0]) < 1e-9 && Math.abs(fitIn(...q).cssH - q[1]) < 1e-9 &&
+       Math.abs(fitIn(...q).left) < 1e-9 && Math.abs(fitIn(...q).top) < 1e-9));
+  ok("  ... the backing size is the PICTURE's CSS size x devicePixelRatio (800 x 600 at dpr 2 -> 1200, at dpr 1 -> 600), under the same cap on its long side: a 4K window at dpr 2 is 2160 CSS px and 1920 backing, a 2.4 box in 3000 x 1000 is 2400 x 1000 CSS and 1920 x 800",
+     fitIn(800, 600, 2).w === 1200 && fitIn(800, 600, 2).h === 1200 && fitIn(800, 600, 1).w === 600 && fitIn(3840, 2160, 2).cssW === 2160 && fitIn(3840, 2160, 2).w === 1920 &&
+     fitIn(3840, 2160, 2).h === 1920 && eq(fitIn(3000, 1000, 1, 2.4), { cssW: 2400, cssH: 1000, left: 300, top: 0, w: 1920, h: 800 }) && fitIn(1280, 800, 2, 1, 1000).w === 1000,
+     JSON.stringify(fitIn(3000, 1000, 1, 2.4)));
+  let sweep = 0, sweepBad = 0, sweepIn = 0, sweepInBad = 0;
+  for (const w of [320, 390, 768, 1024, 1366, 1920, 2560, 5120]) for (const h of [480, 844, 1080, 1440, 2880])
+    for (const d of [1, 1.25, 2, 3]) for (const a of [0.5, 1, 16 / 9, 2.4]) for (const contain of [false, true]) {
+      const f = contain ? fitIn(w, h, d, a) : fit(w, h, d, a);
+      const oneExact = Math.abs(f.cssW - w) < 1e-9 || Math.abs(f.cssH - h) < 1e-9;
+      // cover: no smaller than the window on either side, offsets <= 0; contain: no larger, offsets >= 0
+      const extent = contain ? f.cssW <= w + 1e-9 && f.cssH <= h + 1e-9 && f.left >= -1e-9 && f.top >= -1e-9
+                             : f.cssW >= w - 1e-9 && f.cssH >= h - 1e-9 && f.left <= 1e-9 && f.top <= 1e-9;
+      const centred = Math.abs(f.left - (w - f.cssW) / 2) < 1e-9 && Math.abs(f.top - (h - f.cssH) / 2) < 1e-9;
+      const shape = Math.abs(f.cssW / f.cssH - a) < 1e-9 && Math.abs(f.w / f.h - a) < 2.5 / Math.min(f.w, f.h) * Math.max(a, 1 / a) + 1e-9;
+      const size = Math.max(f.w, f.h) <= 1920 && f.w % 2 === 0 && f.h % 2 === 0 && f.w >= 2 && f.h >= 2 &&
+                   (Math.max(f.cssW, f.cssH) * d > 1920 ? Math.max(f.w, f.h) === 1920 : Math.abs(f.w - f.cssW * d) <= 1 && Math.abs(f.h - f.cssH * d) <= 1);
+      const good = oneExact && extent && centred && shape && size;
+      if (contain) { sweepIn++; if (!good) sweepInBad++; } else { sweep++; if (!good) sweepBad++; }
+    }
+  ok("  ... cover, over " + sweep + " windows, pixel ratios and box shapes: it covers (one side exact, the other no smaller), is centred, keeps the box's shape, and the backing is window x dpr or the cap",
+     sweep === 640 && sweepBad === 0, sweepBad + " bad");
+  ok("  ... contain, over the same " + sweepIn + ": it fits INSIDE (one side exact, the other no larger, both offsets >= 0), is centred, keeps the box's shape, and the backing is the picture x dpr or the cap",
+     sweepIn === 640 && sweepInBad === 0, sweepInBad + " bad");
+  ok("  ... bad input never throws or returns nonsense: a 0 / NaN window is 1 x 1 CSS and a 2 x 2 canvas, dpr and aspect fall back to 1 (either rule)",
+     [fit(0, 0, 0), fit(NaN, -5, NaN, NaN, NaN), fit(undefined, undefined), fitIn(0, 0, 0), fitIn(NaN, -5, NaN, NaN, NaN), fitIn(undefined, undefined)]
+       .every(f => f.cssW === 1 && f.cssH === 1 && f.w === 2 && f.h === 2) &&
+     fit(1280, 800, 0).w === 1280 && fit(1280, 800, 1, -1).cssH === 1280 && fitIn(1280, 800, 0).w === 800 && fitIn(1280, 800, 1, -1).cssH === 800);
+
+  // ---- the repeats: which copies of the picture cover the window ------------------------------
+  // (pure: [x, y] of each copy of a w x h picture at (left, top) in a W x H window)
+  const tiles = (...a) => S.stageTiles(...a);
+  const t1 = tiles(1280, 800, 240, 0, 800, 800), t2 = tiles(390, 844, 0, 227, 390, 390);
+  ok("stageTiles, the 800 px square centred in 1280 x 800: three copies side by side, at x = -560, 240 (its own place) and 1040; in the portrait phone three stacked, at y = -163, 227, 617",
+     JSON.stringify(t1) === "[[-560,0],[240,0],[1040,0]]" && JSON.stringify(t2) === "[[0,-163],[0,227],[0,617]]", JSON.stringify(t1) + " " + JSON.stringify(t2));
+  ok("  ... a picture that already fills the window is exactly ONE copy, at its own place; so is one larger than the window",
+     JSON.stringify(tiles(1280, 800, 0, 0, 1280, 800)) === "[[0,0]]" && JSON.stringify(tiles(390, 844, 0, 0, 390, 844)) === "[[0,0]]" &&
+     JSON.stringify(tiles(1280, 800, -100, -50, 1480, 900)) === "[[-100,-50]]");
+  ok("  ... a picture smaller than the window both ways repeats both ways: 200 x 300 at (300, 400) in 1000 x 1000 is 6 columns (x = -100 .. 900) by 4 rows (y = -200 .. 700)",
+     (() => { const t = tiles(1000, 1000, 300, 400, 200, 300), xs = Array.from(new Set(t.map(p => p[0]))).sort((a, b) => a - b), ys = Array.from(new Set(t.map(p => p[1]))).sort((a, b) => a - b);
+       return t.length === 24 && xs.join() === "-100,100,300,500,700,900" && ys.join() === "-200,100,400,700"; })());
+  let tl = 0, tlBad = 0;
+  for (const W of [320, 1000, 1280, 1920]) for (const H of [480, 800, 1080]) for (const w of [1, 97, 320, 800, 2000]) for (const h of [1, 131, 480, 3000])
+    for (const left of [-w + 1, -37, 0, 17, 240, W - 1]) for (const top of [-h + 1, 0, 113, H - 1]) {
+      if (w * h < 2000) continue;                  // (a 1 x 1 picture in a 1920 x 1080 window is two million copies)
+      const t = tiles(W, H, left, top, w, h), xs = Array.from(new Set(t.map(p => p[0]))).sort((a, b) => a - b), ys = Array.from(new Set(t.map(p => p[1]))).sort((a, b) => a - b);
+      tl++;
+      const lattice = t.length === xs.length * ys.length && new Set(t.map(p => p.join())).size === t.length &&
+                      xs.every(x => (x - left) % w === 0) && ys.every(y => (y - top) % h === 0);
+      const abut = xs.every((x, i) => i === 0 || x - xs[i - 1] === w) && ys.every((y, i) => i === 0 || y - ys[i - 1] === h);     // no gap, no overlap
+      const covers = xs.length > 0 && ys.length > 0 && xs[0] <= 0 && xs[xs.length - 1] + w >= W && ys[0] <= 0 && ys[ys.length - 1] + h >= H;
+      const needed = t.every(p => p[0] < W && p[0] + w > 0 && p[1] < H && p[1] + h > 0);    // every copy shows in the window: none wasted
+      // the picture's own place is one of them exactly when any of it is in the window
+      const inWin = left < W && left + w > 0 && top < H && top + h > 0;
+      const own = t.some(p => p[0] === left && p[1] === top) === inWin;
+      if (!(lattice && abut && covers && needed && own)) tlBad++;
+    }
+  ok("  ... over " + tl + " windows, picture sizes and offsets: the copies lie on the picture's own lattice and include its own place (whenever any of it is in the window), abut exactly (step = its size: no gap, no overlap), cover the window edge to edge, and none lies wholly outside it",
+     tl > 1000 && tlBad === 0, tlBad + " bad");
+  ok("  ... degenerate input gives NO copies and never loops: a picture under one pixel, a zero or negative window, NaN",
+     [tiles(1280, 800, 0, 0, 0, 800), tiles(1280, 800, 0, 0, 800, 0.5), tiles(0, 800, 0, 0, 800, 800), tiles(1280, -1, 0, 0, 800, 800),
+      tiles(1280, 800, 0, 0, NaN, 800), tiles(NaN, 800, 0, 0, 800, 800), tiles()].every(t => Array.isArray(t) && t.length === 0));
+
+  // ---- the idle fade, and the press that only wakes ----------------------------------------
+  const run = { running: true }, ev = (st, k, t, o) => S.stageIdleEvent(st, k, t, o === undefined ? run : o);
+  let st = S.stageIdleNew(0);
+  ok("stageIdle, running: shown at first, still at 2999 ms without activity, hidden at 3000 (STAGE_IDLE_MS)",
+     S.STAGE_IDLE_MS === 3000 && st.shown === true && ev(st, "tick", 2999).shown === true && ev(st, "tick", 3000).shown === false);
+  ok("  ... any activity brings them back and restarts the 3 s: a move at 5000 shows, 7999 shown, 8000 hidden",
+     ev(st, "move", 5000).shown === true && ev(st, "tick", 7999).shown === true && ev(st, "tick", 8000).shown === false);
+  st = S.stageIdleNew(0);
+  ok("  ... NOT running (before Start, after Stop) they are always shown, however long nothing happens; so are they while held (the mouse rests on them)",
+     ev(st, "tick", 1e7, { running: false }).shown === true && ev(st, "tick", 2e7, { running: true, hold: true }).shown === true &&
+     ev(st, "tick", 2e7, { running: true }).shown === false && ev(st, "tick", 2e7, { running: false }).shown === true);
+  ok("  ... only a tick hides: a state nobody has ticked is still shown, so a press on it is an ordinary press",
+     (st = S.stageIdleNew(0), ev(st, "down", 9000).waking === false && ev(st, "click", 9050).swallow === false));
+  // the tap that wakes
+  st = S.stageIdleNew(0);
+  ev(st, "tick", 4000);
+  const d1 = ev(st, "down", 5000), u1 = ev(st, "up", 5080), c1 = ev(st, "click", 5085), c1b = ev(st, "click", 5090);
+  ok("a press while they are HIDDEN shows them and is swallowed: waking from the press to its click, that click swallowed, the next one not",
+     d1.shown === true && d1.waking === true && d1.swallow === false && u1.waking === true && c1.swallow === true && c1.waking === false &&
+     c1b.swallow === false, JSON.stringify([d1, u1, c1, c1b]));
+  ok("  ... and from then on they are ordinary controls: a press and its click go through, and the 3 s run from the last of them",
+     ev(st, "down", 6000).waking === false && ev(st, "click", 6100).swallow === false && ev(st, "tick", 9099).shown === true && ev(st, "tick", 9100).shown === false);
+  st = S.stageIdleNew(0);
+  ev(st, "tick", 4000);
+  ok("  ... a mouse that MOVED first has already woken them: its press is not waking and its click is not swallowed",
+     ev(st, "move", 5000).shown === true && ev(st, "down", 5200).waking === false && ev(st, "up", 5300).waking === false && ev(st, "click", 5301).swallow === false);
+  st = S.stageIdleNew(0);
+  ev(st, "tick", 4000);
+  ev(st, "down", 5000);
+  ok("  ... a LONG press that woke them is still swallowed when it is let go 5 s later (no timeout while the press is down)",
+     ev(st, "tick", 9000).waking === true && ev(st, "up", 10000).waking === true && ev(st, "click", 10001).swallow === true);
+  st = S.stageIdleNew(0);
+  ev(st, "tick", 4000);
+  ev(st, "down", 5000);
+  ev(st, "up", 5100);
+  ok("  ... a waking press that produces no click (a drag, a key) disarms " + S.STAGE_GRACE_MS + " ms after it is released: waking at +399, not at +400, and a later click goes through",
+     S.STAGE_GRACE_MS === 400 && ev(st, "tick", 5499).waking === true && ev(st, "tick", 5500).waking === false && ev(st, "click", 5600).swallow === false);
+  st = S.stageIdleNew(0);
+  ev(st, "tick", 4000);
+  ev(st, "down", 5000);
+  ev(st, "up", 5050);
+  const d2 = ev(st, "down", 5200);
+  ok("  ... a second press INSIDE that grace is the same gesture (a double tap): still waking, its click swallowed; one after the grace is not",
+     d2.waking === true && ev(st, "up", 5250).waking === true && ev(st, "click", 5251).swallow === true &&
+     (st = S.stageIdleNew(0), ev(st, "tick", 4000), ev(st, "down", 5000), ev(st, "up", 5050), ev(st, "down", 5450).waking === false) &&
+     ev(st, "click", 5500).swallow === false);
+  st = S.stageIdleNew(0);
+  ev(st, "tick", 4000);
+  ev(st, "down", 5000);
+  ev(st, "up", 5050);
+  ev(st, "down", 5200);
+  ok("  ... and that second press, HELD past the grace, is still waking (the grace runs from a release, never under a press) and its click swallowed",
+     ev(st, "tick", 5500).waking === true && ev(st, "tick", 9000).waking === true && ev(st, "up", 9100).waking === true && ev(st, "click", 9101).swallow === true);
+  st = S.stageIdleNew(0);
+  ev(st, "tick", 4000);
+  ev(st, "down", 5000);
+  ok("  ... a waking press whose release never comes (a key held while the window loses focus) stays armed for as long as nothing ends it -- a minute here -- and the \"up\" a blur then delivers ends it: waking 399 ms later, not at 400, and the next click goes through",
+     ev(st, "tick", 65000).waking === true && ev(st, "up", 65000).waking === true && ev(st, "tick", 65399).waking === true && ev(st, "tick", 65400).waking === false &&
+     ev(st, "click", 65500).swallow === false && /for \(const k of \["pointerup", "pointercancel", "keyup", "blur"\]\)\s*\n\s*w\.addEventListener\(k, \(\) => \{ stageEvent\("up", stageNow\(\)\);/.test(src));
+  st = S.stageIdleNew(0);
+  ev(st, "tick", 4000);
+  ok("  ... while hidden and NOT running a tick shows them again, and a press then is not a wake (Stop from another route, e.g. the capture ending)",
+     ev(st, "tick", 4100, { running: false }).shown === true && ev(st, "down", 4200, { running: false }).waking === false);
+
+  // ---- where a status goes; the fullscreen feature test --------------------------------------
+  ok("stageStatusPlace: nothing for an empty or unstyled status; the drawer for info and for an error with a live solver; the CENTRE for an error with no solver, a lost device or a WebGPU error",
+     S.stageStatusPlace("info", "", true) === "none" && S.stageStatusPlace("", "x", true) === "none" && S.stageStatusPlace("err", "", false) === "none" &&
+     S.stageStatusPlace("info", "choose an audio file first", true) === "drawer" && S.stageStatusPlace("info", "x", false) === "drawer" &&
+     S.stageStatusPlace("err", "could not start: x", true) === "drawer" && S.stageStatusPlace("err", "Error: x", true) === "drawer" &&
+     S.stageStatusPlace("err", "WebGPU is not available in this browser. ", false) === "centre" &&
+     S.stageStatusPlace("err", "WebGPU device lost: x", true) === "centre" && S.stageStatusPlace("err", "WebGPU error: x", true) === "centre");
+  const calls = [];
+  const fsDoc = o => Object.assign({ fullscreenElement: null }, o), fsEl = o => Object.assign({}, o);
+  const std = S.stageFullscreen(fsDoc({ fullscreenEnabled: true, exitFullscreen() { calls.push("exit"); this.fullscreenElement = null; } }),
+                                fsEl({ requestFullscreen() { calls.push("req"); } }));
+  const dW = fsDoc({ webkitFullscreenEnabled: true, webkitFullscreenElement: null, webkitExitFullscreen() { calls.push("wexit"); } });
+  const wk = S.stageFullscreen(dW, fsEl({ webkitRequestFullscreen() { calls.push("wreq"); dW.webkitFullscreenElement = {}; } }));
+  ok("stageFullscreen: null with no API at all (iPhone Safari), with it disabled, or with no way out; the standard API, or the webkit-prefixed one, otherwise",
+     S.stageFullscreen({}, {}) === null && S.stageFullscreen(null, null) === null &&
+     S.stageFullscreen(fsDoc({ fullscreenEnabled: false, exitFullscreen() {} }), fsEl({ requestFullscreen() {} })) === null &&
+     S.stageFullscreen(fsDoc({ fullscreenEnabled: true }), fsEl({ requestFullscreen() {} })) === null &&
+     S.stageFullscreen(fsDoc({ webkitFullscreenEnabled: false, webkitExitFullscreen() {} }), fsEl({ webkitRequestFullscreen() {} })) === null &&
+     !!std && std.event === "fullscreenchange" && !!wk && wk.event === "webkitfullscreenchange");
+  ok("  ... toggle() enters when not fullscreen and leaves when it is (prefixed: wreq then wexit)",
+     (std.toggle(), wk.toggle(), wk.on() === true) && (wk.toggle(), calls.join() === "req,wreq,wexit") && std.on() === false, calls.join());
+
+  // ---- stage.css and the page's markup, as text -------------------------------------------------
+  const css = fs.readFileSync(path.join(dir, "stage.css"), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  const sels = [];
+  for (const m of css.replace(/@media[^{]*\{/g, "").matchAll(/([^{}]+)\{[^{}]*\}/g))
+    for (const s of m[1].split(",")) if (s.trim()) sels.push(s.trim());
+  const loose = sels.filter(s => !/^(html\.stage\b|#stage)/.test(s));
+  ok("stage.css: every one of its " + sels.length + " selectors starts at html.stage or at an element stage.js creates (#stage...), so it matches nothing without the flag",
+     sels.length >= 25 && loose.length === 0, loose.join(" | "));
+  ok("  ... #stage is position: fixed; inset: 0, 100dvh with a 100vh fallback BEFORE it; the picture, the repeated picture (#stageTile, the whole window), canvas.traces, the controls, the centred error stack 0 < 1 < 2 < 3 < 4",
+     /#stage \{[^}]*position: fixed; inset: 0; height: 100vh; height: 100dvh;/.test(css) &&
+     /#stage > \.cvwrap \{[^}]*z-index: 0;/.test(css) && /#stageTile \{ position: absolute; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; \}/.test(css) &&
+     /#stage > canvas\.traces \{ z-index: 2; \}/.test(css) && /#stageUi \{[^}]*z-index: 3;/.test(css) && /#stageFatal \{[^}]*z-index: 4;/.test(css) &&
+     (css.match(/z-index:/g) || []).length === 5, (css.match(/z-index: \d+/g) || []).join(", "));
+  ok("  ... faded or waking, the bar and the drawer take no pointer events",
+     /#stage\.idle #stageBar, #stage\.idle #stageDrawer,\s*#stage\.waking #stageBar, #stage\.waking #stageDrawer \{ pointer-events: none; \}/.test(css) &&
+     /#stage\.idle #stageUi \{ opacity: 0; \}/.test(css));
+  // (a line of the stage: it loads one of its files, names one of its functions -- called or
+  // handed over -- or carries its mark)
+  const marked = html.split("\n").filter(l => /stage\.(js|css)|\bstage[A-Z]\w*\b|STAGE:/.test(l));
+  const mk = re => marked.findIndex(l => re.test(l));
+  const order = [/<link rel="stylesheet" href="stage\.css">/, /<script src="stage\.js"[^>]*><\/script>/,
+                 /^\s*\/\/ STAGE: what the window shows beside a box of another shape/,                   // the `sides` select (selFill)
+                 /^stageBuild\(\);/, /^function cardAspect\(\) \{ return stageAspect\(\) \|\| musicCardSize\(\); \}/,
+                 /^  if \(typeof stage !== "undefined" && stage\.tile\) stage\.tile\.style\.transform = t;/,   // the zoom pulse reaches the repeats
+                 /^  stageAdopt\(\);/,
+                 /^\s*\/\/ STAGE: the picture need not span the window/,                                    // the block that follows
+                 /^    musicTraces\.picture = stagePicture;/, /^    renderCards = function \(a\) \{ const r = rc\(a\); stageFrame\(r > 0\); return r; \};/].map(mk);
+  ok("music.html: every line that names the stage is marked STAGE: -- the stylesheet, the script, and eight wiring lines (the sides select, stageBuild, cardAspect, the zoom on the repeats, stageAdopt, and the block that hands the traces stagePicture and wraps renderCards with stageFrame(r > 0): whether a card rendered in that task)",
+     marked.length === 10 && marked.every(l => /STAGE:/.test(l)) && order.every((i, k) => i === k),
+     marked.length + " lines; unmarked: " + (marked.filter(l => !/STAGE:/.test(l)).map(l => l.trim().slice(0, 60)).join(" | ") || "none") + "; order " + order.join());
+  // (every tag, attributes or not: leg 7 pins the same list from the bare tags)
+  const all = Array.from(html.matchAll(/<script[^>]*\ssrc="([^"]+)"/g)).map(m => m[1]);
+  ok("  ... its scripts, every tag counted: common.js, physics.js, solver2d.js, music.js, stage.js, traces.js -- stage.js after music.js, before the page's own",
+     all.join() === "common.js,physics.js,solver2d.js,music.js,stage.js,traces.js" && html.indexOf('src="stage.js"') < html.indexOf("<script>\n"), all.join());
+  const others = fs.readdirSync(dir).filter(f => /\.(html|js|css)$/.test(f) && f !== "music.html" && f !== "stage.js" && f !== "stage.css");
+  const users = others.filter(f => /stage\.(js|css)\b|\bstage(Build|Adopt|Aspect|Resize|Frame|Picture|Fill|Tiles|Measure)\b/.test(fs.readFileSync(path.join(dir, f), "utf8")));
+  ok("no other page or shared file loads stage.js / stage.css or calls into it (" + others.length + " files)", others.length >= 9 && users.length === 0, users.join(", "));
+
+  // ---- WITHOUT ?stage: nothing of it exists ---------------------------------------------------
+  const N = await musicPage("?musicdebug"), nenv = N.env;
+  const nq = JSON.parse(nenv.run(`function(){ const c = cards.disp[0]; return JSON.stringify({ on: STAGE_ON, el: stage.el, idle: stage.idle, timer: stage.timer, back: stage.back,
+    asp: cardAspect(), cv: [c.cv.width, c.cv.height, c.cvVec.width], wrapIn: c.wrap.parentNode === c.root, charts: cards.chart.map(x => x.type()),
+    run: el("btnRun").parentNode.id, ctl: el("grpMusic").parentNode.id, arrow: c.cbArrow.parentNode.style.display, off: !!c.rOffX && c.rOffX.style.display,
+    add: el("btnAddDisp").style.display, grpOpen: [el("grpMusic").open, el("grpSim").open] }); }`));
+  ok("without ?stage: STAGE_ON is false, no element with a stage id was created, no timer and no idle state",
+     nq.on === false && nq.el === null && nq.idle === null && nq.timer === 0 && nq.back === null &&
+     nenv.allEls.filter(e => /^stage/i.test(e.id || "")).length === 0, nenv.allEls.filter(e => /^stage/i.test(e.id || "")).map(e => e.id).join());
+  ok("  ... no `sides` select (selFill) and no #stageTile either, the traces are told nothing about where the picture is (musicTraces.picture is null) and renderCards is the shared one, unwrapped",
+     nenv.allEls.filter(e => e.id === "selFill" || e.id === "stageTile").length === 0 &&
+     nenv.run("function(){ return musicTraces.picture === null && stage.tile === null && stage.fit === null && String(renderCards).indexOf('stageFrame') < 0 && stagePicture() === null; }") === true);
+  ok("  ... the card is the shipped one: 512 x 512 (cardAspect and both canvases), its canvas inside the card, arrows / offsets / + display in place, both charts",
+     nq.asp.w === 512 && nq.asp.h === 512 && nq.cv.join() === "512,512,512" && nq.wrapIn === true && nq.charts.join() === "energy,spectrum" &&
+     nq.arrow === undefined && nq.off === undefined && nq.add === undefined, JSON.stringify(nq.cv));
+  ok("  ... and the controls are where they were: the Start button in #topbar, the groups in #controls, open as groupsInit left them",
+     nq.run === "topbar" && nq.ctl === "controls" && nq.grpOpen.join() === "true,true" && nenv.getEl("controls").parentNode === null);
+  ok("  ... stageResize / stageAdopt / stageBuild called there change nothing",
+     nenv.run(`function(){ stageBuild(); stageAdopt(); stageResize(true); const c = cards.disp[0];
+       return stage.el === null && c.cv.width === 512 && cards.chart.length === 2 && c.wrap.parentNode === c.root; }`) === true && realFails(nenv).length === 0);
+
+  // ---- WITH ?stage ----------------------------------------------------------------------------
+  const P = await musicPage("?stage&musicdebug"), env = P.env;
+  ok("with ?stage the page boots under the stub with no failure of its own", realFails(env).length === 0, realFails(env).slice(0, 3).join(" | "));
+  // (2026-11-23, later the same day: with ?stage the box is SQUARE by default again, as it is
+  // without the flag, and the stage shows it WHOLE -- contain, never a crop -- with the two
+  // sides left over black or carrying the picture again. Every row below is about the shell
+  // and about a square picture in a window; the window-shaped box is leg 16's subject.)
+  // (one frame, and the shell's 250 ms tick -- fired by hand, the stub has no timers running)
+  await P.frame();
+  env.run("function(){ stageTick(stageNow()); }");
+  const up = (e, id) => { for (let p = e; p; p = p.parentNode) if (p.id === id) return true; return false; };
+  const sEl = env.getEl("stage"), kid = id => sEl.children.filter(c => c.id === id).length;
+  const q = JSON.parse(env.run(`function(){ const c = cards.disp[0], h = c.selField.parentNode; return JSON.stringify({ on: STAGE_ON,
+    kids: stage.el.children.map(x => x.id || x.className), ui: stage.ui.children.map(x => x.id),
+    wrapIn: c.wrap.parentNode === stage.el, cvIn: c.cv.parentNode === c.wrap, charts: cards.chart.length, chartEls: cards.hostC.children.length,
+    cv: [c.cv.width, c.cv.height], vec: [c.cvVec.width, c.cvVec.height], css: c.wrap.style, asp: cardAspect(),
+    headIn: h.parentNode === stage.slotPic, footIn: c.foot.parentNode === stage.slotPic, head: h.className,
+    arrow: [c.cbArrow.checked, c.cbArrow.parentNode.style.display], off: [c.rOffX.value, c.rOffX.style.display, c.rOffX.lab.style.display, c.rOffY.style.display, c.offset()],
+    close: c.btnClose.style.display, filt: el("cbFilter").parentNode.style.display,
+    sel: c.selField.value, cmap: c.selCmap.value === String(MUSIC_CMAP_DEFAULT), fs: [stage.fs, stage.btnFs.style.display], menu: stage.btnMenu.textContent,
+    open: stageDrawerIsOpen(), p: [solver.p.nx, solver.p.ny, solver.p.Lx === solver.p.Ly], hook: stepHook === musicStep, timer: stage.timer > 0,
+    box: el("selBox").value, tile: [stage.tile.kind, stage.tile.parentNode === stage.el, stage.tile.style.display],
+    wired: musicTraces.picture === stagePicture && String(renderCards).indexOf("stageFrame") >= 0 }); }`));
+  // (the ORDER of stacking is stage.css's z-indexes, pinned above as text; this is the DOM)
+  ok("#stage exists and holds four children: #stageTile (a canvas for the repeated picture, made first, hidden), the controls column #stageUi (#stageBar, #stageDrawer), #stageFatal, and the adopted picture (the card's .cvwrap, its WebGPU canvas inside)",
+     q.on === true && kid("stageTile") === 1 && kid("stageUi") === 1 && kid("stageFatal") === 1 && q.kids.join() === "stageTile,stageUi,stageFatal,cvwrap" && q.ui.join() === "stageBar,stageDrawer" &&
+     q.wrapIn === true && q.cvIn === true && sEl.children.length === 4 && q.tile.join() === "canvas,true,none", q.kids.join() + " | tile " + q.tile.join());
+  ok("  ... and the page's two hooks into it are in place: the traces ask stagePicture where the picture is, and renderCards is wrapped to call stageFrame", q.wired === true);
+  const bar = ["btnRun", "btnReset", "selSrc", "stageBtnMenu", "stageBtnFs"];
+  ok("the bar holds Start, Reset, the source select, the drawer button and the fullscreen button -- the page's #topbar, moved whole, plus the stage's two",
+     bar.every(id => up(env.getEl(id), "stageBar") && !up(env.getEl(id), "stageDrawer")) && env.getEl("topbar").parentNode === env.getEl("stageBar") &&
+     env.getEl("btnRun").textContent === "Start" && q.menu === "controls");
+  ok("  ... the fullscreen button is HIDDEN here: the stub's document has no Fullscreen API, which is the iPhone Safari case",
+     q.fs[0] === null && q.fs[1] === "none");
+  const groups = env.descendants(env.getEl("controls"), "details");
+  // (the file row is #controls markup, so it rides along in a browser; the stub does not
+  // model markup nesting and cannot show it)
+  ok("ALL the control groups are in the drawer (" + groups.map(g => g.id).join(", ") + "), inside #controls, which moved whole",
+     groups.map(g => g.id).join() === "grpMusic,grpFx,grpSim,grpDisp,grpTraces" && groups.every(g => up(g, "stageDrawer") && up(g, "controls")) &&
+     up(env.getEl("controls"), "stageDrawer") && ["rThr", "selKick", "rCfl", "btnSaveAll", "cbFixScale", "cbTrSpec"].every(id => up(env.getEl(id), "stageDrawer")));
+  env.run(`function(){ controlsBuild({ topbar: [{ k: "btn", id: "btnLate", t: "late" }], groups: [{ id: "grpLate", summary: "added later", rows: [[{ k: "lab", t: "x" }, { k: "rng", id: "rLate", min: 0, max: 1, step: 0.1, v: 0 }]] }] }); }`);
+  ok("  ... and a group someone adds LATER through controlsBuild lands in the drawer (its top-bar item in the bar) with no wiring",
+     up(env.getEl("grpLate"), "stageDrawer") && up(env.getEl("rLate"), "stageDrawer") && up(env.getEl("btnLate"), "stageBar"));
+  ok("the status, sync and readout lines are in the drawer: #status, the sync line (#musicMode), the band strip, #steps, #readout, the build line",
+     ["status", "musicMode", "musicStrip", "steps", "readout", "buildline"].every(id => up(env.getEl(id), "stageDrawer")) &&
+     env.getEl("status").parentNode.id === "stageStatus");
+  const links = env.allEls.filter(e => e.kind === "a" && up(e, "stageDrawer")).map(e => e.href);
+  ok("a \"what is this\" section in the drawer links to docs.html and rmhd2d.html", links.join() === "docs.html,rmhd2d.html" &&
+     env.allEls.filter(e => e.kind === "a" && up(e, "stageAbout")).length === 2, links.join());
+  ok("the chart cards are ABSENT: no energy or spectrum card object, none in the chart column",
+     q.charts === 0 && q.chartEls === 0 && env.allEls.filter(e => /card chart/.test(e.className) && up(e, "charts")).length === 0, q.charts + " cards, " + q.chartEls + " elements");
+  ok("the picture's options are in the drawer: the card's header (field, colormap) and footer (caption, colour bar, save / rec), |u| in magma as on the card page",
+     q.headIn && q.footIn && q.head === "cardhead" && q.sel === "4" && q.cmap === true);
+  ok("  ... arrows and the per-card offset sliders are NOT shown (arrows off, offsets zero and hidden with their labels), nor close, + display, + chart, rec all, the k filter",
+     q.arrow[0] === false && q.arrow[1] === "none" && q.off[0] === "0" && q.off[1] === "none" && q.off[2] === "none" && q.off[3] === "none" &&
+     q.off[4].join() === "0,0" && q.close === "none" && q.filt === "none" &&
+     /html\.stage #btnAddDisp, html\.stage #btnAddChart, html\.stage #btnRecAll \{ display: none !important; \}/.test(css), JSON.stringify([q.arrow, q.off]));
+  const sv0 = env.run("function(){ globalThis.__sv0 = solver; return solver.modeOf(0); }");
+  env.run(`function(){ const c = cards.disp[0]; c.selField.value = "0"; c.selField.onchange({}); }`);
+  ok("  ... and they still drive the picture from there: the field select changes the solver's display mode",
+     env.run("function(){ return solver.modeOf(0); }") !== sv0 && (env.run(`function(){ const c = cards.disp[0]; c.selField.value = "4"; c.selField.onchange({}); return solver.modeOf(0); }`) === sv0));
+  ok("in the drawer the groups start folded, all but the first", env.run(`function(){ return [el("grpMusic").open, el("grpFx").open, el("grpSim").open, el("grpDisp").open].join(); }`) === "true,false,false,false");
+  ok("the drawer starts closed; its button opens and closes it and says so (aria-expanded)",
+     q.open === false && (env.getEl("stageBtnMenu").onclick({}), env.run("function(){ return stageDrawerIsOpen(); }") === true) &&
+     env.getEl("stageBtnMenu").attrs["aria-expanded"] === "true" && env.getEl("stageDrawer").classList.contains("open") &&
+     (env.getEl("stageBtnMenu").onclick({}), env.run("function(){ return stageDrawerIsOpen(); }") === false) && env.getEl("stageBtnMenu").attrs["aria-expanded"] === "false");
+  ok("the solver is the shipped one -- 256^2 in a square box, the box select's own default here too -- with the music step hook installed, and the stage runs a timer",
+     q.p.join() === "256,256,true" && q.box === "square" && q.hook === true && q.timer === true);
+
+  // ---- the canvas follows the window ------------------------------------------------------------
+  // (the stub's window is 1280 x 800 at dpr 1, and its elements report no client size, so the
+  // stage reads window.innerWidth / innerHeight -- the fallback a browser never needs)
+  ok("the square picture is shown WHOLE: the canvas backing store is the window's SHORT side squared, 800 x 800 at the stub's 1280 x 800 dpr 1, in an 800 px CSS box centred in the window -- 240 px in from its left edge, at its top",
+     q.cv.join() === "800,800" && q.asp.w === 800 && q.asp.h === 800 && q.css.left === "240.00px" && q.css.top === "0.00px" &&
+     q.css.width === "800.00px" && q.css.height === "800.00px", q.cv.join("x") + " " + JSON.stringify(q.css));
+  ok("  ... and the unused arrow overlay is kept at 1 x 1 (the shared code would make it canvas x dpr)", q.vec.join() === "1,1", q.vec.join("x"));
+  const win = (w, h, d, now) => JSON.parse(env.run(`function(w, h, d, now){ window.innerWidth = w; window.innerHeight = h; window.devicePixelRatio = d;
+    stageResize(now); const c = cards.disp[0];
+    return JSON.stringify({ cv: [c.cv.width, c.cv.height], css: [c.wrap.style.left, c.wrap.style.top, c.wrap.style.width, c.wrap.style.height],
+      vec: c.cvVec.width, same: solver === __sv0, grave: graveyard.length, n: [solver.p.nx, solver.p.ny], pending: stage.backTimer !== 0, dirty: c.dirty }); }`, w, h, d, now));
+  let r = win(390, 844, 3, true);
+  ok("a portrait phone, 390 x 844 at dpr 3: the picture is the window's WIDTH, a 390 px CSS box 227 px down from the top (bars above and below), on a 1170 x 1170 canvas (390 x 3, under the cap)",
+     r.cv.join() === "1170,1170" && r.css.join() === "0.00px,227.00px,390.00px,390.00px" && r.vec === 1, r.cv.join("x") + " " + r.css.join(" "));
+  r = win(800, 600, 2, true);
+  ok("800 x 600 at dpr 2: the canvas is 1200 x 1200 (the picture's 600 CSS px x devicePixelRatio), the CSS box 600 px, 100 in from the left", r.cv.join() === "1200,1200" && r.css.join() === "100.00px,0.00px,600.00px,600.00px", r.cv.join("x") + " " + r.css.join(" "));
+  r = win(800, 600, 1, true);
+  ok("  ... the same window at dpr 1 (dragged to another screen): 600 x 600, the CSS box unchanged, the card marked for a redraw", r.cv.join() === "600,600" && r.css.join() === "100.00px,0.00px,600.00px,600.00px" && r.dirty === true, r.cv.join("x"));
+  r = win(3840, 2160, 2, true);
+  ok("a 4K window at dpr 2: the picture is 2160 CSS px (840 in from the left), 4320 px wanted, the canvas CAPPED at 1920 x 1920", r.cv.join() === "1920,1920" && r.css.join() === "840.00px,0.00px,2160.00px,2160.00px", r.cv.join("x") + " " + r.css.join(" "));
+  ok("through every one of those the SOLVER is the same object, still 256 x 256, and nothing was retired: a resize re-fits the canvas and rebuilds nothing",
+     r.same === true && r.grave === 0 && r.n.join() === "256,256");
+  r = win(1024, 768, 1, false);
+  ok("a resize EVENT (not forced) moves the CSS box at once and leaves the backing store for " + env.run("function(){ return STAGE_RESIZE_MS; }") + " ms, so a window being dragged does not flash",
+     r.cv.join() === "1920,1920" && r.css.join() === "128.00px,0.00px,768.00px,768.00px" && r.pending === true, r.cv.join("x") + " " + r.css.join(" "));
+  await new Promise(res => setTimeout(res, 200));
+  r = JSON.parse(env.run("function(){ const c = cards.disp[0]; return JSON.stringify({ cv: [c.cv.width, c.cv.height], pending: stage.backTimer !== 0, same: solver === __sv0, vec: c.cvVec.width }); }"));
+  ok("  ... after which the canvas follows by itself: 768 x 768 (the 1024 x 768 window's short side), same solver", r.cv.join() === "768,768" && r.pending === false && r.same === true && r.vec === 1, r.cv.join("x"));
+  r = win(1024, 768, 1, false);
+  ok("  ... and a resize event that changes nothing arms nothing", r.pending === false && r.cv.join() === "768,768", r.cv.join("x") + " pending " + r.pending);
+  // any re-apply of the cards asks for the window as it is NOW (a rebuild with another box)
+  env.run("function(){ window.innerWidth = 640; window.innerHeight = 480; cardsSync(); }");
+  ok("any cardsSync (a control moved, a rebuild) sizes the canvas for the window as it is then: 480 x 480 in 640 x 480, 80 in from the left",
+     env.run("function(){ const c = cards.disp[0]; return [c.cv.width, c.cv.height, c.wrap.style.width, c.wrap.style.left].join(); }") === "480,480,480.00px,80.00px",
+     env.run("function(){ const c = cards.disp[0]; return [c.cv.width, c.cv.height, c.wrap.style.width, c.wrap.style.left].join(); }"));
+  env.run("function(){ window.innerWidth = 1280; window.innerHeight = 800; stageResize(true); }");
+
+  // ---- the sides: black, or the picture again --------------------------------------------------
+  // (`sides`, selFill, exists only with ?stage. On "tile" stageFrame -- called by the wrapped
+  // renderCards, once a frame, and told whether a card rendered -- copies the picture's canvas over the whole window onto
+  // #stageTile with drawImage; the stub's 2D context logs each drawImage's source and
+  // destination. What the stub cannot say: that a WebGPU canvas is readable at that moment,
+  // or what any of it looks like.)
+  const tile = env.getEl("stageTile"), selFill = env.getEl("selFill");
+  const drawn = () => (tile.__cx2d ? tile.__cx2d.__draws.map(d => d.at.join()) : null);
+  const fq = () => JSON.parse(env.run(`function(){ return JSON.stringify({ fill: stageFill(), pic: stagePicture(), disp: stage.tile.style.display,
+    wh: [stage.tile.width, stage.tile.height], src: !stage.tileCtx || stage.tileCtx.__draws.every(d => d.src === cards.disp[0].cv) }); }`));
+  // the copies wanted, by this file's own arithmetic: the window x dpr scaled down to the cap,
+  // the picture (the window's short side, squared, centred) scaled with it, repeated to cover
+  const wantTiles = (W, H, dpr) => {
+    const long = Math.max(W, H) * dpr, sc = dpr * (long > 1920 ? 1920 / long : 1), side = Math.min(W, H);
+    const tw = Math.round(W * sc), th = Math.round(H * sc), w = Math.round(side * sc), x0 = Math.round((W - side) / 2 * sc), y0 = Math.round((H - side) / 2 * sc), out = [];
+    for (let y = y0 - Math.ceil(y0 / w) * w; y < th; y += w) for (let x = x0 - Math.ceil(x0 / w) * w; x < tw; x += w) out.push([x, y, w, w].join());
+    return { wh: [tw, th].join(), at: out };
+  };
+  const cardQ = () => JSON.parse(env.run("function(){ const c = cards.disp[0]; return JSON.stringify({ dirty: c.dirty, need: c.needsRender(), key: stage.tileKey, running: running }); }"));
+  await P.frame();
+  await P.frame();
+  let f0 = fq();
+  ok("the `sides` select exists with ?stage, in the simulation group in the drawer: black (\"bars\", the default) or repeat the picture (\"tile\")",
+     selFill.options.map(o => o.value).join() === "bars,tile" && selFill.value === "bars" && up(selFill, "grpSim") && up(selFill, "stageDrawer") && f0.fill === "bars",
+     selFill.options.map(o => o.value).join() + " = " + selFill.value);
+  ok("  ... on black, frames come and go and #stageTile stays hidden and untouched: no 2D context is ever asked of it",
+     f0.disp === "none" && drawn() === null && env.run("function(){ return stage.tileCtx; }") === null && cardQ().key === "", f0.disp + " " + JSON.stringify(drawn()));
+  ok("  ... stagePicture() is the picture's CSS box as laid out -- x = 240, w = 800, y = 0, h = 800 in the 1280 x 800 window -- and tile: false",
+     JSON.stringify(f0.pic) === JSON.stringify({ x: 240, w: 800, y: 0, h: 800, tile: false }) &&
+     env.run("function(){ const p = stagePicture(), f = stage.fit; return p.x === f.left && p.w === f.cssW && p.y === f.top && p.h === f.cssH && cards.disp[0].wrap.style.left === f.left.toFixed(2) + 'px'; }") === true,
+     JSON.stringify(f0.pic));
+  // The page is PAUSED here, and a WebGPU canvas can only be read in the task that rendered
+  // it (anywhere else it reads back blank -- seen in Chrome). So stageFrame(drawn) copies
+  // only on a frame whose card rendered, and where the copies on show are not the current
+  // ones it marks the card dirty, which makes the NEXT frame render and copy.
+  const tl_pre = cardQ();
+  await P.input("selFill", "tile");
+  await P.frame();
+  const tl_a1 = fq(), tl_q1 = cardQ(), tl_d1 = drawn().slice();
+  const tl_clears = [], tl_clear0 = tile.__cx2d.clearRect;
+  tile.__cx2d.clearRect = (...a) => { tl_clears.push(a.join()); return tl_clear0(...a); };
+  await P.frame();
+  f0 = fq();
+  const tl_q2 = cardQ(), tl_d2 = drawn().slice();
+  const w0 = wantTiles(1280, 800, 1);
+  ok("on \"repeat the picture\", on a PAUSED page: the first frame has no render to copy (the card was not dirty), so it shows #stageTile, sizes it for the window (1280 x 800 at dpr 1), draws NOTHING on it -- and marks the card dirty",
+     tl_pre.running === false && tl_pre.dirty === false && tl_pre.need === false && tl_a1.fill === "tile" && tl_a1.disp === "block" && tl_a1.wh.join() === "1280,800" && tl_d1.length === 0 && tl_q1.dirty === true && tl_q1.need === true && tl_q1.key === "",
+     tl_a1.disp + " " + tl_a1.wh.join("x") + ", " + tl_d1.length + " copies, dirty " + tl_q1.dirty);
+  ok("  ... so the following frame renders, and THAT one copies: the canvas cleared once, then the picture's canvas drawn three times, at x = -560, 240 (the picture's own place) and 1040, each 800 x 800",
+     w0.wh === "1280,800" && w0.at.join(" ") === "-560,0,800,800 240,0,800,800 1040,0,800,800" && JSON.stringify(tl_d2) === JSON.stringify(w0.at) && f0.src === true &&
+     tl_clears.join(" ") === "0,0,1280,800" && tl_q2.dirty === false && tl_q2.key === "1280,800,800,800,240,0", JSON.stringify(tl_d2) + " cleared " + tl_clears.join(" "));
+  ok("  ... and stagePicture() says so (tile: true, the same box), which is what repeats the line cut with it and keeps the side panels off", f0.pic.x === 240 && f0.pic.w === 800 && f0.pic.y === 0 && f0.pic.h === 800 && f0.pic.tile === true, JSON.stringify(f0.pic));
+  tile.__cx2d.__draws.length = 0;
+  await P.frame();
+  await P.frame();
+  await P.frame();
+  const tl_q3 = cardQ();
+  ok("  ... after which the paused page is STEADY: the copies on show are the current ones, so further frames draw nothing, clear nothing and dirty nothing",
+     drawn().length === 0 && tl_clears.length === 1 && tl_q3.dirty === false && tl_q3.need === false && tl_q3.key === tl_q2.key, drawn().length + " copies, dirty " + tl_q3.dirty);
+  // a resize that leaves the picture's own canvas alone (the window gets wider: still 800 x 800)
+  env.run("function(){ window.innerWidth = 1400; stageResize(true); }");
+  const tl_r0 = cardQ(), tl_cvSame = env.run("function(){ return cards.disp[0].cv.width + 'x' + cards.disp[0].cv.height; }");
+  await P.frame();
+  const tl_r1 = cardQ(), tl_rd1 = drawn().slice();
+  await P.frame();
+  const tl_r2 = cardQ(), tl_rd2 = drawn().slice(), tl_w14 = wantTiles(1400, 800, 1);
+  ok("a resize while paused re-dirties: the window widened to 1400 (the picture's canvas untouched, " + tl_cvSame + ", and the card not dirty from the resize itself), the next frame copies nothing and marks the card, and the one after tl_clears and copies for the new window -- x = -500, 300, 1100 on 1400 x 800",
+     tl_cvSame === "800x800" && tl_r0.dirty === false && tl_rd1.length === 0 && tl_r1.dirty === true && tl_w14.at.join(" ") === "-500,0,800,800 300,0,800,800 1100,0,800,800" &&
+     JSON.stringify(tl_rd2) === JSON.stringify(tl_w14.at) && tl_r2.dirty === false && tl_r2.key === "1400,800,800,800,300,0" && tl_clears.join(" ") === "0,0,1280,800 0,0,1400,800" && fq().wh.join() === "1400,800",
+     tl_rd1.length + " then " + tl_rd2.join(" ") + "; cleared " + tl_clears.join(" "));
+  tile.__cx2d.__draws.length = 0;
+  env.run("function(){ stageFrame(true); stageFrame(true); }");
+  ok("  ... while the picture keeps rendering (stageFrame(true), twice by hand: a running page) every frame copies afresh over the last, with no clear and no dirtying of its own",
+     drawn().length === 6 && JSON.stringify(drawn().slice(3)) === JSON.stringify(tl_w14.at) && tl_clears.length === 2 && cardQ().dirty === false, drawn().length + " copies, " + tl_clears.length + " tl_clears");
+  // (a window whose change also resizes the picture's canvas dirties the card by itself --
+  // cardsSync -- so the copies arrive one frame sooner; two frames cover both, and must
+  // leave exactly one set)
+  const tileAt = async (W, H, dpr) => { win(W, H, dpr, true); tile.__cx2d.__draws.length = 0; await P.frame(); await P.frame(); const o = fq(); o.at = drawn().slice(); o.want = wantTiles(W, H, dpr); o.q = cardQ(); return o; };
+  let ta = await tileAt(800, 600, 2), tb = await tileAt(390, 844, 3), tc = await tileAt(3840, 2160, 2);
+  ok("  ... its backing store follows the window x devicePixelRatio under the picture's own cap: 800 x 600 at dpr 2 is 1600 x 1200 with three 1200 px copies (x = -1000, 200, 1400); 4K at dpr 2 is 1920 x 1080 with three 1080 px copies (x = -660, 420, 1500) -- one set each, within two frames",
+     ta.wh.join() === "1600,1200" && ta.at.join(" ") === "-1000,0,1200,1200 200,0,1200,1200 1400,0,1200,1200" && JSON.stringify(ta.at) === JSON.stringify(ta.want.at) &&
+     tc.wh.join() === "1920,1080" && tc.at.join(" ") === "-660,0,1080,1080 420,0,1080,1080 1500,0,1080,1080" && JSON.stringify(tc.at) === JSON.stringify(tc.want.at) && ta.src && tc.src &&
+     ta.q.dirty === false && tc.q.dirty === false && tc.q.key === "1920,1080,1080,1080,420,0",
+     ta.wh.join("x") + " " + ta.at.join(" ") + " | " + tc.wh.join("x") + " " + tc.at.join(" "));
+  ok("  ... and in the portrait phone (390 x 844 at dpr 3, capped: 887 x 1920) the copies are STACKED, three of them 887 px square, the middle one at the picture's own place",
+     tb.wh.join() === tb.want.wh && tb.wh.join() === "887,1920" && tb.at.length === 3 && JSON.stringify(tb.at) === JSON.stringify(tb.want.at) &&
+     tb.at.join(" ") === "0,-371,887,887 0,516,887,887 0,1403,887,887" && tb.pic.tile === true && tb.pic.x === 0 && tb.pic.w === 390 && tb.pic.y === 227 && tb.pic.h === 390, tb.wh.join("x") + " " + tb.at.join(" "));
+  win(1280, 800, 1, true);
+  await P.frame();
+  await P.frame();
+  await P.input("selFill", "bars");
+  tile.__cx2d.__draws.length = 0;
+  await P.frame();
+  f0 = fq();
+  const tl_qb = cardQ();
+  await P.input("selFill", "tile");
+  await P.frame();
+  const tl_qt = cardQ(), tl_dt1 = drawn().length;
+  await P.frame();
+  const tl_dt2 = drawn().slice();
+  await P.input("selFill", "bars");
+  await P.frame();
+  ok("  ... back on black the next frame hides it again, draws nothing more and FORGETS the copies (the key is reset), so choosing the repeats again starts over: a frame that marks the card, then one that copies",
+     f0.fill === "bars" && f0.disp === "none" && f0.pic.tile === false && tl_qb.key === "" && tl_qb.dirty === false && tl_qt.dirty === true && tl_dt1 === 0 &&
+     JSON.stringify(tl_dt2) === JSON.stringify(w0.at) && fq().disp === "none" && cardQ().key === "", f0.disp + ", then " + tl_dt1 + " and " + tl_dt2.length + " copies");
+
+  // ---- the zoom pulse -----------------------------------------------------------------------------
+  const z = JSON.parse(env.run(`function(){ musicZoomApply(1.08); const c = cards.disp[0];
+    const o = { t: c.cv.style.transform, clip: c.wrap.style.overflow, host: c.wrap.parentNode.id, ui: stage.ui.style.transform, st: stage.el.style.transform,
+                tile: stage.tile.style.transform };
+    musicZoomApply(1); o.back = c.cv.style.transform; o.tileBack = stage.tile.style.transform; return JSON.stringify(o); }`));
+  ok("the zoom pulse still works: a CSS scale on the picture's canvas, clipped by its wrap inside #stage; the controls and #stage are not scaled",
+     z.t === "scale(1.0800)" && z.clip === "hidden" && z.host === "stage" && z.ui === undefined && z.st === undefined && z.back === "", JSON.stringify(z));
+  ok("  ... and it reaches the repeated picture: #stageTile takes the SAME scale (so the copies pulse as one with the picture under them) and loses it with it",
+     z.tile === "scale(1.0800)" && z.tile === z.t && z.tileBack === "" && /stage\.tile\) stage\.tile\.style\.transform = t;/.test(html), JSON.stringify([z.tile, z.tileBack]));
+
+  // ---- idle fade and the waking press, on the page (events driven by hand) -------------------------
+  const cls = () => ["idle", "waking", "fatal"].filter(c => sEl.classList.contains(c)).join();
+  const sev = (k, t) => JSON.parse(env.run("function(k, t){ return JSON.stringify(stageEvent(k, t)); }", k, t));
+  const T = 1e9;                                   // far beyond the stub's own clock
+  env.run("function(t){ stageEvent('move', t); stageTick(t + 60000); }", T);
+  ok("before Start the bar is ALWAYS shown: a minute without activity and #stage is not idle", cls() === "" && env.run("function(){ return running; }") === false, cls());
+  env.run(MODEL, 0.004);
+  P.A.t = 5;
+  await P.click("btnRun");
+  env.run("function(t){ stageEvent('move', t); stageTick(t + 2999); }", 2 * T);
+  const before = cls();
+  env.run("function(t){ stageTick(t + 3000); }", 2 * T);
+  ok("after Start: shown 2999 ms after the last activity, faded (#stage.idle) at 3000",
+     env.run("function(){ return running; }") === true && before === "" && cls() === "idle", "\"" + before + "\" then \"" + cls() + "\"");
+  const w1 = sev("down", 2 * T + 5000), c1cls = cls(), w2 = sev("up", 2 * T + 5060), w3 = sev("click", 2 * T + 5065);
+  ok("a tap on the faded page brings them back NON-interactive (#stage.waking) and its click is the one the page's capture listener cancels; Stop is not pressed",
+     w1.shown && w1.waking && c1cls === "waking" && w2.waking && w3.swallow === true && cls() === "" &&
+     env.run("function(){ return running; }") === true && env.getEl("btnRun").textContent === "Stop", c1cls + " -> \"" + cls() + "\"");
+  const w4 = sev("down", 2 * T + 6000), w5 = sev("click", 2 * T + 6100);
+  await P.click("btnRun");
+  ok("  ... the next tap is an ordinary one: not swallowed, and Stop stops", w4.waking === false && w5.swallow === false && env.run("function(){ return running; }") === false);
+  env.run("function(t){ stageTick(t); }", 2 * T + 60000);
+  ok("  ... and stopped, they stay", cls() === "");
+  await P.click("btnRun");
+  env.run("function(t){ stageEvent('move', t); stage.hover = true; stageTick(t + 60000); }", 3 * T);
+  const held = cls();
+  env.run("function(t){ stage.hover = false; stageTick(t + 60000); }", 3 * T);
+  ok("while the mouse rests on the bar or the drawer they do not fade; once it leaves, they do", held === "" && cls() === "idle", "\"" + held + "\" then \"" + cls() + "\"");
+  await P.click("btnRun");
+  env.tick();
+  ok("the stage's own timer (the stub's interval, fired once) runs the same tick: stopped, so shown again", cls() === "");
+  // touch has no hover: there an OPEN drawer holds the controls up (it is being read)
+  await P.click("btnRun");
+  env.run("function(t){ stage.hover = false; stage.touch = true; stageDrawerOpen(true); stageEvent('move', t); stageTick(t + 60000); }", 5 * T);
+  const th0 = cls();
+  env.run("function(t){ stageDrawerOpen(false); stageTick(t + 60000); }", 5 * T);
+  const th1 = cls();
+  env.run("function(t){ stageDrawerOpen(true); stageTick(t + 60001); }", 5 * T);
+  const th2 = cls();
+  env.run("function(t){ stage.touch = false; stageTick(t + 60002); }", 5 * T);
+  const th3 = cls();
+  env.run("function(){ stageDrawerOpen(false); }");
+  await P.click("btnRun");
+  ok("on TOUCH (stage.touch: the last pointer was a finger) an open drawer holds them up while running, a minute past the 3 s; closing it lets them fade, opening it again holds them again -- and with a mouse (touch false) the open drawer alone does not",
+     th0 === "" && th1 === "idle" && th2 === "" && th3 === "idle" && env.run("function(){ return stage.touch === false && running === false; }") === true &&
+     /touch: false,/.test(src) && /hold: stage\.hover \|\| stage\.isFatal \|\| \(stage\.touch && stageDrawerIsOpen\(\)\) \}\);/.test(src) &&
+     (src.match(/stage\.touch = e\.pointerType === "touch";/g) || []).length === 2, [th0, th1, th2, th3].map(c => '"' + c + '"').join(" "));
+
+  // ---- status ---------------------------------------------------------------------------------------
+  env.run("function(){ stageDrawerOpen(false); showStatus('choose an audio file first', 'info'); stageTick(4e9); }");
+  ok("a status message stays in the drawer and OPENS it (a closed drawer would hide it)",
+     env.getEl("status").parentNode.id === "stageStatus" && env.run("function(){ return stageDrawerIsOpen(); }") === true && cls() === "");
+  env.run("function(){ stageDrawerOpen(false); stageTick(4e9 + 250); }");
+  ok("  ... once: closing the drawer again is respected while the message stands", env.run("function(){ return stageDrawerIsOpen(); }") === false);
+  env.run("function(){ showStatus('WebGPU device lost: gone', 'err'); stageTick(4e9 + 500); }");
+  ok("an error that stops the page (the device lost) shows CENTRED: #status moves into #stageFatal and #stage is .fatal",
+     env.getEl("status").parentNode.id === "stageFatal" && cls() === "fatal" && env.getEl("status").textContent === "WebGPU device lost: gone");
+  env.getEl("stageFatal").onclick({});
+  ok("  ... a click dismisses it back into the drawer, and it stays dismissed", env.getEl("status").parentNode.id === "stageStatus" && cls() === "" &&
+     (env.run("function(){ stageTick(4e9 + 750); }"), env.getEl("status").parentNode.id === "stageStatus"));
+  ok("through all of it the stage page logged no failure of its own", realFails(env).length === 0, realFails(env).slice(0, 2).join(" | "));
+
+  // ---- no WebGPU at all, with ?stage ----------------------------------------------------------------
+  // (gpuFallback looks up controls this page has never had -- btnParams, btnText, intro:
+  // the same misses are logged on a no-WebGPU boot WITHOUT the flag, which is the reference)
+  const noGpuFails = async search => { const e = await boot(dir, "music.html", { search: search, noGpu: true }); await turn(); return e; };
+  const G0 = await noGpuFails(""), G = await noGpuFails("?stage");
+  const own = e => realFails(e).filter(f => realFails(G0).indexOf(f) < 0);
+  G.tick();
+  const gs = G.getEl("stage");
+  ok("with ?stage and NO WebGPU: the stage and its bar are built, there is no picture, and the browser advice is centred (taken back from the poster card common.js moved it to)",
+     !!gs && gs.children.filter(c => c.className === "cvwrap").length === 0 && gs.classList.contains("fatal") &&
+     G.getEl("status").parentNode.id === "stageFatal" && /WebGPU is not available/.test(G.getEl("status").textContent) &&
+     up(G.getEl("btnRun"), "stageBar") && G.getEl("btnRun").disabled === true && up(G.getEl("grpMusic"), "stageDrawer") &&
+     own(G).length === 0 && realFails(G).join() === realFails(G0).join() && G0.allEls.filter(e => /^stage/i.test(e.id || "")).length === 0,
+     own(G).slice(0, 2).join(" | "));
+}
+
+// ===========================================================================
+// 16. the window-shaped box and the current sheets (MUSIC_STAGE_PLAN S2 / S4, step 3)
+// ===========================================================================
+// The rectangular rules against the offline script (fixtures/music_ref.json, key `stage`,
+// written by ../gen_musicfixture.py), then the page: window -> box -> grid, the three
+// selects, the auto rung, the sheets' initial condition and its Reset. What the stub cannot
+// say: anything a GPU computes (that the sheets are HELD, what they look like, what the
+// timestep does), how a real window reports its size, or how long a rebuild takes.
+async function legShape(state) {
+  const F = state.F && state.F.stage;
+  ok("the fixture carries the offline rectangular-box and sheet rows", !!F && /box_for, cutoff_k, band_plan/.test(F.source) && F.hyper === 4);
+  if (!F) return;
+  const ctx = vm.createContext({});
+  vm.runInContext(fs.readFileSync(path.join(dir, "music.js"), "utf8"), ctx, { filename: "music.js" });
+  const M = vm.runInContext(`({ musicBandPlan, musicRint, musicWindowAspect, musicBoxFor, musicCutoffK, musicGridFor, musicRungFor,
+    musicAutoRung, musicSheetPsi0, musicSheetEq, musicSheetField, musicSheetEnergy, musicKickBlobs, musicBlobsFor, musicPanX, musicWrap,
+    musicRng, MUSIC_LBOX, MUSIC_ASPECT_MAX, MUSIC_RUNGS, MUSIC_AUTO_WINDOW, MUSIC_AUTO_REBASES })`, ctx);
+  const L = 2 * Math.PI, rel = (a, b) => Math.abs(a / b - 1);
+
+  // ---- the box ------------------------------------------------------------------------
+  let db = 0;
+  for (const b of F.boxes) { const g = M.musicBoxFor(b.aspect); db = Math.max(db, rel(g[0], b.box[0]), rel(g[1], b.box[1])); }
+  ok("musicBoxFor is box_for at " + F.boxes.length + " aspects (16:9, 2:1, 2.4:1, the stub's 1.6, portrait ones): the short side 2 pi, the long side 2 pi * the aspect",
+     F.boxes.length >= 9 && db < 1e-15 && F.lbox === M.MUSIC_LBOX, "max relative difference " + e2(db));
+  ok("  ... aspect 1 is EXACTLY the square 2 pi box; landscape is long in x, portrait long in y, and the short side is 2 pi bit for bit",
+     M.musicBoxFor(1).join() === [L, L].join() && M.musicBoxFor(2)[0] === 2 * L && M.musicBoxFor(2)[1] === L &&
+     M.musicBoxFor(0.5)[0] === L && M.musicBoxFor(0.5)[1] === 2 * L && M.musicBoxFor(16 / 9)[1] === L && M.musicBoxFor(9 / 16)[0] === L);
+  ok("  ... and a non-positive or non-finite aspect is refused",
+     [0, -1, NaN, Infinity, "2", undefined].every(a => /aspect/.test(throws(() => M.musicBoxFor(a)))));
+
+  // ---- the band plan, the cutoff, the dissipation ---------------------------------------
+  let np = 0, worst = 0;
+  const seen = {};
+  for (const p of F.plans) {
+    const tag = "band_plan((" + p.grid.join(", ") + "), box " + p.tag + (p.nbands === null ? "" : ", nbands = " + p.nbands)
+              + (p.sigmaMin === null ? "" : ", sigma_min = " + p.sigmaMin) + ")";
+    const box = M.musicBoxFor(p.aspect);
+    let r = null, err = "";
+    try { r = M.musicBandPlan(p.grid, p.nbands, p.sigmaMin, null, box[0], box[1]); } catch (e) { err = e.message; }
+    if (p.error) { ok(tag + ": refused by both", !!err, err.slice(0, 50)); continue; }
+    let ds = 0;
+    if (r && r.sigmas.length === p.sigmas.length)
+      for (let i = 0; i < p.sigmas.length; i++) ds = Math.max(ds, rel(r.sigmas[i], p.sigmas[i]));
+    const kc = M.musicCutoffK(p.grid[0], p.grid[1], box[0], box[1]);
+    const dd = Math.max.apply(null, p.diss.map(([amp, v]) => rel(48 * amp / Math.pow(kc, 2 * F.hyper), v)));
+    worst = Math.max(worst, ds, rel(kc, p.cutoff_k), dd);
+    ok(tag + ": " + p.nblobs.length + " bands, blobs " + p.nblobs.join(" ") + ", cutoff k " + p.cutoff_k.toFixed(2),
+       !!r && r.sigmas.length === p.sigmas.length && ds < 1e-14 && JSON.stringify(Array.from(r.nblobs)) === JSON.stringify(p.nblobs) &&
+       rel(kc, p.cutoff_k) < 1e-15 && dd < 1e-14, err || "sigma " + e2(ds) + ", cutoff " + e2(rel(kc, p.cutoff_k)) + ", diss " + e2(dd));
+    if (p.nbands === null && p.sigmaMin === null) seen[p.tag + "/" + p.rung] = 1;
+    np++;
+  }
+  ok("  ... " + np + " plans: the three rungs at 16:9, 2:1, 2.4:1 and in portrait (9:16, 1:2.4), the square box's two, and explicit nbands / sigma_min",
+     np >= 20 && ["16:9", "2:1", "2.4:1", "9:16", "1:2.4"].every(t => ["light", "standard", "sharp"].every(r => seen[t + "/" + r])) &&
+     seen["square/light"] && seen["square/standard"], "worst relative difference " + e2(worst));
+  // the rules from their definitions, at 16:9 on the standard rung (stretched cells)
+  const b169 = M.musicBoxFor(16 / 9), p169 = M.musicBandPlan([256, 256], null, null, null, b169[0], b169[1]);
+  const last = a => a[a.length - 1];
+  ok("the narrowest blob is 3.7 times the LARGER grid spacing (16:9 on 256 x 256: dx = " + (b169[0] / 256).toFixed(4) + " > dy = " + (L / 256).toFixed(4) + "), the widest stays 0.45",
+     last(p169.sigmas) === 3.7 * b169[0] / 256 && last(p169.sigmas) > 3.7 * L / 256 * 1.7 && p169.sigmas[0] === 0.45 &&
+     last(M.musicBandPlan([256, 256], null, null, null, L, b169[0]).sigmas) === 3.7 * b169[0] / 256, "sigma_min " + last(p169.sigmas).toFixed(4));
+  ok("  ... and on a grid that is finer along the long side the SHORT side's spacing can be the larger one (16:9 on 512 x 256: 3.7 * 2 pi / 256)",
+     last(M.musicBandPlan([512, 256], null, null, null, b169[0], b169[1]).sigmas) === 3.7 * L / 256 &&
+     last(M.musicBandPlan([256, 512], null, null, null, b169[1], b169[0]).sigmas) === 3.7 * L / 256);
+  const area = (b169[0] / L) * (b169[1] / L);
+  ok("the blob counts are rint(3 * 0.45 / sigma * area / (2 pi)^2): " + p169.nblobs.join(" ") + " at 16:9 against " +
+     p169.sigmas.map(s => Math.round(1.35 / s)).join(" ") + " for the same widths in the square box",
+     p169.nblobs.every((n, i) => n === M.musicRint(3 * 0.45 / p169.sigmas[i] * area)) && p169.nblobs[0] === 5 &&
+     p169.nblobs.some((n, i) => n !== Math.round(1.35 / p169.sigmas[i])));
+  ok("  ... the factor is the AREA, both sides: a 4 pi x 4 pi box has four times the square box's counts at the same widths, 4 pi x pi the same count as the square one",
+     JSON.stringify(M.musicBandPlan(256, 3, 0.2, null, 2 * L, 2 * L).nblobs) === JSON.stringify(M.musicBandPlan(256, 3, 0.2).nblobs.map((n, i) => M.musicRint(1.35 / M.musicBandPlan(256, 3, 0.2).sigmas[i] * 4))) &&
+     M.musicBandPlan(256, 3, 0.2, null, 2 * L, 2 * L).nblobs[0] === 12 && M.musicBandPlan(256, 3, 0.2, null, 2 * L, L / 2).nblobs.join() === M.musicBandPlan(256, 3, 0.2).nblobs.join() &&
+     M.musicBandPlan(256, 3, 0.2, null, 2 * L, L / 2).nblobs[0] === 3);
+  ok("  ... rounding half to EVEN, as numpy's rint: 0.5 -> 0, 1.5 -> 2, 2.5 -> 2, 3.5 -> 4, 2.4999 -> 2, 2.5001 -> 3",
+     [0.5, 1.5, 2.5, 3.5, 2.4999, 2.5001, 7].map(M.musicRint).join() === "0,2,2,4,2,3,7");
+  ok("with the square box the factor is exactly 1: musicBandPlan([256, 256], .., 2 pi, 2 pi) is musicBandPlan(256), bit for bit; so is a box left out",
+     JSON.stringify(M.musicBandPlan([256, 256], null, null, 32, L, L)) === JSON.stringify(M.musicBandPlan(256, null, null, 32)) &&
+     JSON.stringify(M.musicBandPlan([512, 512])) === JSON.stringify(M.musicBandPlan(512)) &&
+     JSON.stringify(M.musicBandPlan(256, 3, 0.2, null, L, L)) === JSON.stringify(M.musicBandPlan(256, 3, 0.2)));
+  ok("musicBandPlan refuses a grid that is not a positive integer or a pair of them, and a box that is not two positive lengths",
+     [[[256]], [[256, 0]], [[256, 128.5]], [[256, 128, 64]], [["256", 128]]].every(a => /positive integer/.test(throws(() => M.musicBandPlan.apply(null, a)))) &&
+     [[256, null, null, null, 0, L], [256, null, null, null, L, -1], [256, null, null, null, NaN, L], [256, null, null, null, "6", L]]
+       .every(a => /box/.test(throws(() => M.musicBandPlan.apply(null, a)))));
+  ok("musicCutoffK is the SMALLER of the two dealias cutoffs: n/3 exactly in the square 2 pi box, the long side's at 16:9 on 256 x 256, the short side's on 512 x 256",
+     M.musicCutoffK(256, 256, L, L) === 256 / 3 && M.musicCutoffK(256, 256, b169[0], L) === (256 / 3) * (L / b169[0]) &&
+     M.musicCutoffK(512, 256, b169[0], L) === 256 / 3 && M.musicCutoffK(256, 512, L, b169[0]) === 256 / 3 &&
+     M.musicCutoffK(256, 256, b169[0], L) < 256 / 3 * 0.6);
+  // KICK_MAX: one kick() holds 32 slots per channel; a dipole band takes two per blob
+  let most = 0, mostD = 0, nsw = 0, thrown = 0;
+  for (let i = 0; i <= 140; i++) {
+    const asp = 1 + i * 0.01;
+    for (const a of [asp, 1 / asp]) for (const rung of M.MUSIC_RUNGS) {
+      const bx = M.musicBoxFor(a), g = M.musicGridFor(rung, bx[0], bx[1]);
+      try {
+        const p = M.musicBandPlan(g, null, null, 32, bx[0], bx[1]);
+        most = Math.max(most, Math.max.apply(null, p.nblobs)); mostD = Math.max(mostD, 2 * p.nblobs[0]);
+      } catch (e) { thrown++; }
+      nsw++;
+    }
+  }
+  ok("the area-scaled counts never exceed the solver's KICK_MAX = 32 per channel: over " + nsw + " boxes (aspect 1 to 2.4 both ways, every rung) the most is " + most + ", and a bass DIPOLE band (two slots per blob) at most " + mostD,
+     thrown === 0 && most <= 32 && most === 30 && mostD <= 32 && mostD === 14, thrown + " refused");
+
+  // ---- stereo placement, and blob placement in a rectangular box ------------------------
+  let dpx = 0;
+  for (const c of F.panx) dpx = Math.max(dpx, Math.abs(M.musicPanX(c.pan, c.gain, M.musicBoxFor(c.aspect)[0]) - c.xc));
+  ok("musicPanX(pan, gain, Lx) is run()'s Lx (0.5 + 0.4 clip(gain pan)): over the long side in landscape, the short one in portrait; without Lx it is the 2 pi it was",
+     F.panx.length >= 15 && dpx < 1e-13 && M.musicPanX(0.5, 1) === L * 0.7 && Math.abs(M.musicPanX(1, 1, 10) - 9) < 1e-14 && Math.abs(M.musicPanX(-1, 3, 10) - 1) < 1e-14 && M.musicPanX(0, 5, 10) === 5, "max difference " + e2(dpx));
+  // the offline kick_blobs was run on a SCRIPTED generator; the page's draw order differs
+  // (per blob x, y, sign -- then, placed, two uniforms per normal -- then the angles), so the
+  // same numbers are dealt to it in ITS order: uniform -> the same uniform; a normal g ->
+  // (1 - exp(-g^2/2), 0 or 1/2), which Box-Muller's cosine branch turns back into g
+  const script = (c) => {
+    const pu = c.u.slice(), pg = c.g.slice(), ps = c.s.slice(), seq = [], n = c.nblob, take = (a, k) => a.splice(0, k);
+    const placed = () => {
+      const xy = take(pu, 2 * n), gs = c.xc === null ? [] : take(pg, n), sg = take(ps, n);
+      for (let i = 0; i < n; i++) seq.push(xy[2 * i], xy[2 * i + 1], sg[i] > 0 ? 0.75 : 0.25);
+      for (const g of gs) seq.push(1 - Math.exp(-0.5 * g * g), g >= 0 ? 0 : 0.5);
+    };
+    const angles = () => { for (const v of take(pu, n)) seq.push(v); };
+    if (c.kind === "elsasser") { placed(); placed(); }
+    else if (c.kind === "sheet") { placed(); angles(); placed(); angles(); }
+    else if (c.kind === "sheet-island") { placed(); angles(); }
+    else if (c.kind === "dipole") { placed(); angles(); }
+    else placed();
+    return { seq: seq, used: [c.u.length - pu.length, c.g.length - pg.length, c.s.length - ps.length] };
+  };
+  let pbad = [], pmax = 0, long = 0;
+  for (const c of F.placement) {
+    const sc = script(c);
+    let at = 0;
+    const rng = () => { if (at >= sc.seq.length) throw new Error("the page drew more numbers than the offline script"); return sc.seq[at++]; };
+    let list = null, err = "";
+    try { list = M.musicKickBlobs(rng, c.kind, c.sigma, c.nblob, c.amp, { xc: c.xc, ratio: c.ratio, sheetEnergy: c.sheetEnergy, box: c.box }); }
+    catch (e) { err = e.message; }
+    const rows = pol => (list || []).filter(b => (b.pol < 0) === (pol < 0)).map(b => b.ratio === undefined ? [b.x, b.y, b.sigma, b.amp] : [b.x, b.y, b.sigma, b.amp, b.ratio, b.theta]);
+    let d = 0, shape = !!list && at === sc.seq.length && sc.used.join() === c.used.join();
+    for (const [got, want] of [[rows(1), c.zp], [rows(-1), c.zm]]) {
+      if (got.length !== want.length) { shape = false; continue; }
+      for (let i = 0; i < want.length; i++) {
+        if (got[i].length !== want[i].length) { shape = false; continue; }
+        for (let j = 0; j < want[i].length; j++) d = Math.max(d, Math.abs(got[i][j] - want[i][j]));
+        if (want[i][0] > L || want[i][1] > L) long++;
+        if (!(got[i][0] >= 0 && got[i][0] < c.box[0] && got[i][1] >= 0 && got[i][1] < c.box[1])) shape = false;
+      }
+    }
+    pmax = Math.max(pmax, d);
+    if (!shape || !(d < 1e-12)) pbad.push(c.tag + " " + c.kind + (c.xc === null ? "" : " placed") + (err ? ": " + err : " (" + e2(d) + ")"));
+  }
+  ok("musicKickBlobs in a rectangular box is kick_blobs(.., box): " + F.placement.length + " kicks (six types, uniform and placed, 16:9 and 9:16) dealt the offline script's own uniforms, normals and signs give its blobs -- x over Lx, y over Ly, the stereo scatter 0.12 Lx about xc and wrapped by Lx, a dipole's halves wrapped per axis",
+     F.placement.length === 24 && pbad.length === 0 && long > 40, pbad.slice(0, 3).join(" | ") || "max difference " + e2(pmax) + "; " + long + " blobs beyond 2 pi on the long side");
+  const rg = M.musicRng(11), far = M.musicBlobsFor(rg, 0.3, 400, 1, 1, [3 * L, L]), tall = M.musicBlobsFor(M.musicRng(11), 0.3, 400, 1, 1, [L, 3 * L]);
+  ok("musicBlobsFor(.., box): 400 blobs fill a 6 pi x 2 pi box in x and stay inside 2 pi in y (and the other way round in a tall box); without a box it draws what it always drew",
+     far.every(b => b.x >= 0 && b.x < 3 * L && b.y >= 0 && b.y < L) && far.filter(b => b.x > 2 * L).length > 100 &&
+     tall.every((b, i) => Math.abs(b.x - far[i].x / 3) < 1e-14 && Math.abs(b.y - far[i].y * 3) < 1e-13 && b.amp === far[i].amp) && tall.filter(b => b.y > 2 * L).length > 100 &&
+     JSON.stringify(M.musicBlobsFor(M.musicRng(5), 0.2, 6, 1, -1)) === JSON.stringify(M.musicBlobsFor(M.musicRng(5), 0.2, 6, 1, -1, [L, L])));
+
+  // ---- the sheets ------------------------------------------------------------------------
+  for (const c of F.sheets) {
+    const box = M.musicBoxFor(c.aspect), plan = M.musicBandPlan(c.grid, null, null, null, box[0], box[1]);
+    const a = c.width * last(plan.sigmas), psi0 = M.musicSheetPsi0(c.strength, c.amp, a), nx = c.grid[0], ny = c.grid[1];
+    const fld = M.musicSheetField(nx, ny, box[0], psi0, a);
+    let d = 0, flat = fld.length === nx * ny && fld.BYTES_PER_ELEMENT === 4;
+    for (let k = 0; k < c.psi.length; k++) {
+      const i = k * c.stride;
+      d = Math.max(d, Math.abs(M.musicSheetEq(i * box[0] / nx, box[0], psi0, a) - c.psi[k]) / c.psi0);
+      for (const j of [0, 1, ny >> 1, ny - 1]) if (fld[i * ny + j] !== Math.fround(M.musicSheetEq(i * box[0] / nx, box[0], psi0, a))) flat = false;
+    }
+    // the gate's own derivative of the page's profile: a naive DFT along x, in fp64
+    const f = Float64Array.from({ length: nx }, (_, i) => M.musicSheetEq(i * box[0] / nx, box[0], psi0, a));
+    let e = 0;
+    const dre = new Float64Array(nx), kmax = nx / 2;
+    for (let k = 1; k < kmax; k++) {
+      let re = 0, im = 0;
+      for (let i = 0; i < nx; i++) { const th = 2 * Math.PI * k * i / nx; re += f[i] * Math.cos(th); im -= f[i] * Math.sin(th); }
+      const kk = 2 * Math.PI * k / box[0];
+      e += kk * kk * (re * re + im * im) / (nx * nx);                 // (1/2) * 2 (the +-k pair) * k^2 |f_k|^2
+      for (let i = 0; i < nx; i++) { const th = 2 * Math.PI * k * i / nx; dre[i] += 2 * kk * (-re * Math.sin(th) - im * Math.cos(th)) / nx; }
+    }
+    let peak = 0;
+    for (let i = 0; i < nx; i++) peak = Math.max(peak, Math.abs(dre[i]));
+    ok("sheets, " + c.tag + ": a = " + c.a.toFixed(4) + " (" + c.width + " x the narrowest blob), psi0 = " + c.psi0.toFixed(4) + ", psi_eq at " + c.psi.length + " points, energy " + c.energy.toPrecision(4),
+       rel(a, c.a) < 1e-14 && rel(psi0, c.psi0) < 1e-14 && d < 1e-13 && flat && rel(M.musicSheetEnergy(psi0, a, box[0]), c.energy) < 1e-14 &&
+       rel(e, c.energy_grid) < 1e-9 && rel(e, c.energy) < 2e-3 && rel(peak, c.peak_grid) < 1e-9 && rel(peak, c.strength * c.amp) < 0.02,
+       "psi " + e2(d) + " of psi0; grid energy vs closed form " + e2(rel(e, c.energy)) + "; peak field " + peak.toFixed(4) + " for " + (c.strength * c.amp));
+  }
+  ok("  ... " + F.sheets.length + " sheet rows: landscape, portrait and square boxes, the page's defaults (strength 5, width 2) among them",
+     F.sheets.length >= 5 && F.sheets.some(c => c.strength === 5 && c.width === 2 && c.amp === 1 && c.aspect > 1));
+  const sy = (x, Lx) => M.musicSheetEq(x, Lx, 1, 0.4);
+  ok("musicSheetEq: psi0 at the centre x = Lx/2, even about it, the same at x = 0 and x = Lx (the periodic images), and its peak field 4 psi0 / (3 sqrt(3) a) is what musicSheetPsi0 inverts",
+     Math.abs(sy(5, 10) - 1) < 1e-10 && Math.abs(sy(3.7, 10) - sy(6.3, 10)) < 1e-15 && sy(0, 10) === sy(10, 10) && sy(0, 10) > 0 && sy(0, 10) < 1e-9 &&
+     Math.abs(sy(0.3, 2) - (1 / Math.cosh(-0.7 / 0.4) ** 2 + 1 / Math.cosh(-2.7 / 0.4) ** 2 + 1 / Math.cosh(1.3 / 0.4) ** 2)) < 1e-15 &&
+     M.musicSheetPsi0(5, 1, 0.4) === 0.75 * Math.sqrt(3) * 0.4 * 5 && M.musicSheetPsi0(2, 3, 0.1) === 3 * M.musicSheetPsi0(2, 1, 0.1) &&
+     M.musicSheetPsi0(0, 1, 0.4) === 0 && M.musicSheetEnergy(2, 0.5, 10) === 8 * 4 / (15 * 0.5 * 10));
+
+  // ---- window -> box -> grid, and the auto rung: the pure rules ---------------------------
+  const wa = M.musicWindowAspect;
+  ok("musicWindowAspect: the window's width over height -- 1920 x 1080 is 16/9, 390 x 844 a tall 0.462, 1280 x 800 is 1.6 -- clamped to [1/2.4, 2.4]",
+     M.MUSIC_ASPECT_MAX === 2.4 && wa(1920, 1080, "window") === 16 / 9 && wa(390, 844, "window") === 390 / 844 && wa(1280, 800, "window") === 1.6 &&
+     wa(3440, 1000, "window") === 2.4 && wa(2400, 1000, "window") === 2.4 && wa(2399, 1000, "window") === 2.399 &&
+     wa(300, 2000, "window") === 1 / 2.4 && wa(1000, 1000, "window") === 1);
+  ok("  ... `square`, and a window that is not two finite positive numbers, is 1",
+     wa(1920, 1080, "square") === 1 && wa(390, 844, "square") === 1 && [[0, 800], [1280, 0], [NaN, 800], [1280, Infinity], [-5, 5], [undefined, undefined]].every(a => wa(a[0], a[1], "window") === 1));
+  const gf = (rung, a) => { const b = M.musicBoxFor(a); return M.musicGridFor(rung, b[0], b[1]).join("x"); };
+  ok("musicGridFor, long side x short side: light 256 x 128, standard 256 x 256, sharp 512 x 256 in landscape; in portrait the long side is y (128 x 256, 256 x 256, 256 x 512)",
+     gf("light", 16 / 9) === "256x128" && gf("standard", 16 / 9) === "256x256" && gf("sharp", 16 / 9) === "512x256" &&
+     gf("light", 9 / 16) === "128x256" && gf("standard", 9 / 16) === "256x256" && gf("sharp", 9 / 16) === "256x512" &&
+     gf("light", 2.4) === "256x128" && gf("sharp", 1.01) === "512x256" && gf("sharp", 1 / 1.01) === "256x512" && M.MUSIC_RUNGS.join() === "light,standard,sharp");
+  ok("  ... a SQUARE box takes square grids: light 128 x 128, standard 256 x 256, and sharp is standard (512 x 512 is not offered); an unknown rung is refused",
+     gf("light", 1) === "128x128" && gf("standard", 1) === "256x256" && gf("sharp", 1) === "256x256" &&
+     /rung/.test(throws(() => M.musicGridFor("auto", L, L))) && /rung/.test(throws(() => M.musicGridFor(undefined, 2 * L, L))));
+  ok("musicRungFor: a named rung is itself; auto is where auto stands -- standard, or light once it has dropped -- and NEVER sharp, whatever it is handed",
+     ["light", "standard", "sharp"].every(r => ["light", "standard", "sharp"].every(a => M.musicRungFor(r, a) === r)) &&
+     M.musicRungFor("auto", "standard") === "standard" && M.musicRungFor("auto", "light") === "light" && M.musicRungFor("auto", "sharp") === "standard" &&
+     M.musicRungFor("auto", undefined) === "standard" && M.musicRungFor("nonsense", "light") === "light");
+  const ar = M.musicAutoRung;
+  ok("musicAutoRung: from standard, MORE than " + M.MUSIC_AUTO_REBASES + " fall-behind rebases in the first " + M.MUSIC_AUTO_WINDOW + " s drop ONE rung, to light (3 does not, 4 does); the limit is an argument",
+     M.MUSIC_AUTO_REBASES === 3 && M.MUSIC_AUTO_WINDOW === 10 && ar("standard", 0) === "standard" && ar("standard", 3) === "standard" && ar("standard", 4) === "light" &&
+     ar("standard", 1000) === "light" && ar("standard", 4, 4) === "standard" && ar("standard", 5, 4) === "light" && ar("standard", 1, 0) === "light");
+  ok("  ... it never climbs (light stays light at any count, 0 included) and is never sharp (handed sharp it answers standard, or light)",
+     [0, 1, 3, 4, 1e6].every(n => ar("light", n) === "light") && ar("sharp", 0) === "standard" && ar("sharp", 9) === "light" && ar(undefined, 0) === "standard" &&
+     (() => { let r = "standard"; const out = []; for (const n of [0, 9, 0, 0, 50, 0]) { r = ar(r, n); out.push(r); } return out.join(); })() === "standard,light,light,light,light,light");
+
+  // ---- the page, WITHOUT ?stage: at its defaults it is the shipped one ----------------------
+  const SNAP = `function(){ const s = solver, c = cards.disp[0]; return JSON.stringify({ p: s.p, ui: uiParams(), sh: music.shape, plan: music.plan,
+    cv: [c.cv.width, c.cv.height], sel: c.selField.value, lit: music.lit.length, grave: graveyard.length,
+    b0: Array.from(s._b0), hasB0: !!s.buf.b0, hasEqk: !!s.buf.eqk, lin0: s.g.gridB[1], box: el("musicBox").textContent,
+    dis: ["rSheetB", "rSheetW", "rField", "rFieldDeg", "cbFieldWalk"].map(id => !!el(id).disabled) }); }`;
+  const snap = env => JSON.parse(env.run(SNAP));
+  // the model readback (MODEL), ONCE per solver: it wraps step / kick / setIC, and a second
+  // install on the same solver would advance its clock twice per step
+  const model = env => env.run("function(dt){ if (!solver.__log) (" + MODEL + ")(dt); }", 0.004);
+  const setWin = (env, w, h) => env.run("function(w, h){ window.innerWidth = w; window.innerHeight = h; }", w, h);
+  const mark = env => env.run("function(){ globalThis.__svm = solver; }");
+  const same = env => env.run("function(){ return solver === __svm; }");
+  const P = await musicPage("?musicdebug"), env = P.env;
+  let q = snap(env);
+  const diss0 = 48 * Math.max(1, 0.1) / Math.pow(256 / 3, 2 * 4);      // the shipped expression, MUSIC_N / 3
+  const shipped = JSON.stringify({ nx: 256, ny: 256, Lx: L, Ly: L, hyper: 4, diss: diss0, pm: 1, eqsrc: false, epsP: 0, epsM: 0, tau: 1,
+                                   fshell: [1, 3], smax: 1e4, cfl: 0.4, seed: 7, kick: true, mu: 1, b0: true });
+  ok("without ?stage the three selects are at box = square, grid = STANDARD (not auto: the shipped page never changes its grid), background = walking mean field; sheet field 5, sheet width 2",
+     env.getEl("selBox").value === "square" && env.getEl("selGrid").value === "standard" && env.getEl("selGrid").options.map(o => o.value).join() === "auto,light,standard,sharp" && env.getEl("selBg").value === "field" &&
+     env.getEl("rSheetB").value === "5" && env.getEl("rSheetW").value === "2" && env.getEl("vSheetB").textContent === "5.0" && env.getEl("vSheetW").textContent === "2.00" &&
+     ["rSheetB", "rSheetW"].every(id => env.getEl(id).min !== undefined) && env.getEl("rSheetB").max === "8" && env.getEl("rSheetW").min === "1" && env.getEl("rSheetW").max === "4");
+  ok("  ... and what the page hands the Solver is EXACTLY the shipped parameter set, key for key and bit for bit (no eqsrcDrag key; diss is 48 / (256/3)^8, the old MUSIC_N / 3 expression's own double)",
+     JSON.stringify(q.ui) === shipped && !("eqsrcDrag" in q.p) && q.p.diss === diss0 && q.p.b0 === true && q.p.eqsrc === false && q.hasB0 && !q.hasEqk, JSON.stringify(q.ui).slice(0, 90));
+  ok("  ... the band plan is musicBandPlan(256) under KICK_MAX, the card 512 x 512 showing |u|, and the line under the selects says so",
+     JSON.stringify(q.plan) === JSON.stringify(M.musicBandPlan(256, null, null, 32)) && q.cv.join() === "512,512" && q.sel === "4" && q.lit === 4 &&
+     /^box 6\.28 × 6\.28 on 256 × 256 \(standard\), 4 bands$/.test(q.box), q.box);
+  ok("  ... the sheet sliders are disabled while the mean field is the background, the mean-field controls live", q.dis.join() === "true,true,false,false,false");
+  // a resize, then Reset and Start: on the square box nothing is ever rebuilt
+  mark(env);
+  model(env);
+  setWin(env, 390, 844);
+  env.run("function(){ cardsSync(); }");
+  await P.frame();
+  await P.click("btnReset");
+  P.A.t = 50;
+  await P.click("btnRun");
+  await P.frame(50.02);
+  q = snap(env);
+  ok("on the square box a window resized to portrait, then Reset, then Start, rebuild NOTHING: the same Solver object, the shipped parameters, nothing retired",
+     same(env) === true && JSON.stringify(q.ui) === shipped && q.grave === 0 && env.run("function(){ return running; }") === true);
+  await P.click("btnRun");
+  const htmlS = fs.readFileSync(path.join(dir, "music.html"), "utf8");
+  const inline = htmlS.slice(htmlS.indexOf("<script>\n"));
+  ok("music.html installs no resize listener at all (the stage's own, in stage.js, re-fits the canvas and never touches the solver)",
+     !/["'`]resize["'`]|onresize|orientationchange|ResizeObserver/.test(inline.split("\n").filter(l => !/^\s*\/\//.test(l)).join("\n")));
+
+  // ---- box = the window's shape ------------------------------------------------------------
+  setWin(env, 1920, 1080);
+  await P.input("selBox", "window");
+  await P.frame();
+  q = snap(env);
+  const f169 = F.plans.find(p => p.tag === "16:9" && p.rung === "standard");
+  ok("box = window in a 1920 x 1080 window: a REBUILD (a new Solver, the old one retired and freed) on a 16:9 box, 2 pi (16/9) x 2 pi, standard rung 256 x 256",
+     same(env) === false && q.grave === 0 && q.p.nx === 256 && q.p.ny === 256 && q.p.Lx === f169.box[0] && q.p.Ly === L && q.sh.aspect === 16 / 9 && q.sh.rung === "standard",
+     q.p.nx + " x " + q.p.ny + " in " + q.p.Lx.toFixed(4) + " x " + q.p.Ly.toFixed(4));
+  ok("  ... everything else is the shipped set (b0, no eqsrc, the drag), the dissipation is pinned at the SMALLER cutoff (the offline rule: 48 amp / cutoff_k^8 = " + f169.diss[0][1].toExponential(3) + "), and it is in the column",
+     JSON.stringify(Object.assign({}, q.ui, { Lx: L, diss: diss0 })) === shipped && rel(q.p.diss, f169.diss[0][1]) < 1e-14 && q.p.diss > 50 * diss0 && q.lin0 === -0.5,
+     "diss " + q.p.diss.toExponential(4) + " against the square box's " + diss0.toExponential(3));
+  ok("  ... the band plan is the offline one for that box and grid (" + f169.nblobs.join(" ") + " blobs, sigma_min " + last(f169.sigmas).toFixed(4) + "), the strip has its " + f169.sigmas.length + " bands",
+     q.plan.sigmas.length === f169.sigmas.length && q.plan.sigmas.every((s, i) => rel(s, f169.sigmas[i]) < 1e-14) && q.plan.nblobs.join() === f169.nblobs.join() &&
+     q.lit === f169.sigmas.length && env.getEl("musicStrip").textContent.split("|").length === f169.sigmas.length &&
+     new RegExp("^box 11\\.17 × 6\\.28 on 256 × 256 \\(standard\\), " + f169.sigmas.length + " bands$").test(q.box), q.box);
+  ok("  ... and the display card takes the box's shape: 512 x 288 (was 512 x 512)", q.cv.join() === "512,288", q.cv.join("x"));
+  // per unit area: the energy the walk's sqrt(2E) reads, and the fixed colour scale
+  const pua = JSON.parse(env.run(`function(){ const m = /const INVN2: f32 = ([-+.\\de]+);/.exec(solver.pl.energyPartial.__code);
+    return JSON.stringify({ inv: m ? parseFloat(m[1]) : NaN, box: /\\bL[xy]\\b|INVLX|INVLY/.test(solver.pl.energyPartial.__code), scale: musicScaleMax(musicUi()),
+      fld: musicWalkField({ r: 1.5, th: 0 }, 0.08)[0] }); }`));
+  ok("  ... the energy the walking field's sqrt(2E) reads is a VOLUME AVERAGE on the rectangular box too (the kernel's weight is 1 / (nx ny)^2, no box length in it), and the fixed colour scale is a multiple of amp alone: neither needs an area factor",
+     rel(pua.inv, 1 / Math.pow(256 * 256, 2)) < 1e-11 && pua.box === false && Math.abs(pua.scale - Math.pow(2, 0.585)) < 1e-12 && Math.abs(pua.fld - 1.5 * 0.4) < 1e-15, JSON.stringify(pua));
+  await P.input("rMAmp", 2.5);
+  ok("  ... the amp slider still moves the dissipation by the same rule on the live solver (amp 2.5: " + f169.diss[2][1].toExponential(3) + ")",
+     f169.diss[2][0] === 2.5 && rel(snap(env).p.diss, f169.diss[2][1]) < 1e-14 && same(env) === false);
+  await P.input("rMAmp", 1);
+  // a kick on the rectangular box: positions over the long side, the pan mapped onto Lx
+  model(env);
+  env.getEl("cbStereo").checked = true;
+  P.A.t = 10;
+  await P.click("btnRun");
+  await P.frame(10.02);
+  await P.frame(10.04);
+  P.takeLog();
+  env.run(`function(){ music.stereoSeen = true; const t = music.audio.ctx.currentTime - music.audio.t0;
+    for (let i = 0; i < 12; i++) music.queue.push({ due: t, o: { band: 2, strength: 1, t: t, tFire: t }, pan: null });
+    music.queue.push({ due: t, o: { band: 1, strength: 0.5, t: t, tFire: t }, pan: 0.35 }); }`);
+  await P.frame(10.06);
+  const kl = P.takeLog().filter(l => l.op === "kick");
+  const free = [].concat.apply([], kl.slice(0, 12).map(k => k.list)), placedK = kl[12] ? kl[12].list : [];
+  const xc = M.musicPanX(0.35, 2, f169.box[0]), mx = placedK.reduce((a, b) => a + b.x, 0) / Math.max(1, placedK.length);
+  ok("a kick on the 16:9 box: " + free.length + " unplaced blobs spread over the whole long side (x up to Lx = 11.17, " + free.filter(b => b.x > L).length + " of them beyond 2 pi) with y inside 2 pi",
+     kl.length === 13 && free.length === 12 * 2 * f169.nblobs[2] && free.every(b => b.x >= 0 && b.x < f169.box[0] && b.y >= 0 && b.y < L) &&
+     free.filter(b => b.x > L).length > 0.3 * free.length && free.filter(b => b.x > 0.9 * f169.box[0]).length > 0, kl.length + " kicks");
+  ok("  ... and a placed one (pan 0.35, gain 2) gathers about x = Lx (0.5 + 0.4 * 0.7) = " + xc.toFixed(2) + ", which is beyond the square box's whole width: mean x " + mx.toFixed(2) + ", half the amplitude at strength 0.5",
+     placedK.length === 2 * f169.nblobs[1] && xc > L && Math.abs(mx - xc) < 0.12 * f169.box[0] && placedK.every(b => Math.abs(b.amp) === 0.5 && b.sigma === q.plan.sigmas[1]), "xc " + xc.toFixed(3));
+  // a resize mid-run rebuilds nothing; the new shape is taken at the next Reset
+  mark(env);
+  setWin(env, 390, 844);
+  env.run("function(){ cardsSync(); }");
+  await P.frame(10.08);
+  await P.frame(10.10);
+  q = snap(env);
+  ok("a window turned to portrait MID-RUN rebuilds nothing: the same Solver, still 16:9, the card still 512 x 288 -- and the line says the new shape waits for Start or Reset",
+     same(env) === true && q.p.Lx === f169.box[0] && q.p.Ly === L && q.cv.join() === "512,288" && q.grave === 0 && /taken at the next Start or Reset/.test(q.box), q.box.slice(0, 110));
+  await P.click("btnReset");
+  await P.frame(10.12);
+  q = snap(env);
+  const bP = M.musicBoxFor(390 / 844);
+  ok("  ... Reset takes it: a tall box 2 pi x 2 pi (844/390), still running, the card 236 x 512, standard is 256 x 256 either way round",
+     same(env) === false && q.p.Lx === L && q.p.Ly === bP[1] && q.p.Ly > 2 * L && q.p.nx === 256 && q.p.ny === 256 && q.cv.join() === "236,512" &&
+     env.run("function(){ return running; }") === true && !/taken at the next/.test(q.box), q.p.Lx.toFixed(3) + " x " + q.p.Ly.toFixed(3) + ", card " + q.cv.join("x"));
+  const detN = JSON.parse(env.run("function(){ return JSON.stringify([music.det.nbands, music.plan.sigmas.length, music.lit.length, music.det.sr, music.det.threshold, music.det.fluxFloor, music.queue.length]); }"));
+  ok("  ... the tall box has 2 bands where 16:9 had 3, and the RUNNING session's detector was replaced by one with that many (same rate, threshold and noise floor; nothing queued from the old one), so no onset can name a band the plan has not got",
+     detN[0] === 2 && detN[1] === 2 && detN[2] === 2 && f169.sigmas.length === 3 && detN[3] === 44100 && detN[4] === 0.3 && detN[5] === 0.3 && detN[6] === 0, detN.join());
+  await P.click("btnRun");
+  await P.input("selGrid", "light");
+  q = snap(env);
+  ok("grid = light in portrait: 128 x 256 (ny > nx: the long side of the grid lies along the long side of the box)", q.p.nx === 128 && q.p.ny === 256 && q.sh.rung === "light" && /on 128 × 256 \(light\)/.test(q.box), q.box);
+  ok("  ... its band plan is the rule's for THAT grid and box (both spacings: here the long side's is the larger), and its dissipation sits at the SMALLER cutoff, which here is the long side's (256/3 * 2 pi / Ly < 128/3)",
+     JSON.stringify(q.plan) === JSON.stringify(M.musicBandPlan([128, 256], null, null, 32, L, bP[1])) && last(q.plan.sigmas) === 3.7 * bP[1] / 256 &&
+     JSON.stringify(q.plan) !== JSON.stringify(M.musicBandPlan([128, 128], null, null, 32, L, bP[1])) && q.p.diss === 48 / Math.pow((256 / 3) * (L / bP[1]), 8) && (256 / 3) * (L / bP[1]) < 128 / 3, "sigma_min " + last(q.plan.sigmas).toFixed(4));
+  await P.input("selGrid", "sharp");
+  q = snap(env);
+  const kcP = M.musicCutoffK(256, 512, L, bP[1]);
+  ok("grid = sharp in portrait: 256 x 512, the dissipation at the LONG side's cutoff (512/3 * 2 pi / Ly = " + kcP.toFixed(1) + " < 256/3), each axis with its own length",
+     q.p.nx === 256 && q.p.ny === 512 && /on 256 × 512 \(sharp\)/.test(q.box) && q.p.diss === 48 / Math.pow(kcP, 8) && kcP === (512 / 3) * (L / bP[1]) && kcP < 256 / 3 &&
+     JSON.stringify(q.plan) === JSON.stringify(M.musicBandPlan([256, 512], null, null, 32, L, bP[1])), q.box + "; diss " + q.p.diss.toExponential(3));
+  setWin(env, 3440, 1000);
+  await P.click("btnReset");
+  q = snap(env);
+  ok("a 3440 x 1000 window: the aspect is CLAMPED at 2.4 (Lx = 2.4 * 2 pi), sharp is 512 x 256, and Start after a Reset on the same window does not rebuild again",
+     q.p.Lx === 2.4 * L && q.p.Ly === L && q.p.nx === 512 && q.p.ny === 256 &&
+     (mark(env), P.A.t = 20, true) && (await P.click("btnRun"), same(env) === true) && (await P.click("btnRun"), true));
+  setWin(env, 1000, 3000);
+  P.A.t = 30;
+  await P.click("btnRun");
+  q = snap(env);
+  ok("  ... a window changed while STOPPED is taken by Start: 1000 x 3000 -> the tall clamp, 2 pi x 2.4 * 2 pi on 256 x 512, and the session starts on it",
+     same(env) === false && q.p.Lx === L && rel(q.p.Ly, 2.4 * L) < 1e-15 && q.p.nx === 256 && q.p.ny === 512 && env.run("function(){ return running && !!music.audio; }") === true);
+  await P.click("btnRun");
+  await P.input("selGrid", "standard");
+  await P.input("selBox", "square");
+  q = snap(env);
+  ok("box = square again, grid = standard: back to the shipped parameter set exactly, the card 512 x 512",
+     JSON.stringify(q.ui) === shipped && q.cv.join() === "512,512" && JSON.stringify(q.plan) === JSON.stringify(M.musicBandPlan(256, null, null, 32)));
+  await P.input("selGrid", "light");
+  const sqL = snap(env);
+  await P.input("selGrid", "sharp");
+  q = snap(env);
+  ok("on the SQUARE box light is 128 x 128 and sharp is 256 x 256, the same as standard (the tooltip says so)",
+     sqL.p.nx === 128 && sqL.p.ny === 128 && q.p.nx === 256 && q.p.ny === 256 && JSON.stringify(q.ui) === shipped &&
+     /SQUARE box[^.]*128 × 128[^.]*sharp is the same 256 × 256 as standard/.test(env.getEl("selGrid").title), sqL.p.nx + "^2 and " + q.p.nx + "^2");
+  await P.input("selGrid", "auto");
+  await P.frame();
+
+  // one axis of the grid at a time, on one box: each is a rebuild
+  setWin(env, 1920, 1080);
+  for (const [id, v] of [["selBox", "window"], ["selGrid", "standard"]]) await P.input(id, v);
+  const steps = [];
+  for (const g of ["light", "standard", "sharp", "standard"]) {
+    mark(env);
+    await P.input("selGrid", g);
+    const s = snap(env);
+    steps.push(g + " " + s.p.nx + "x" + s.p.ny + " " + (same(env) ? "same" : "rebuilt") + " " + (s.p.Lx === f169.box[0] && s.p.Ly === L ? "16:9" : "?"));
+  }
+  ok("on one 16:9 box the grid select alone rebuilds, one axis at a time: standard -> light changes ny only (256 x 128), -> standard, -> sharp changes nx only (512 x 256), and back",
+     steps.join() === "light 256x128 rebuilt 16:9,standard 256x256 rebuilt 16:9,sharp 512x256 rebuilt 16:9,standard 256x256 rebuilt 16:9", steps.join(" | "));
+  await P.input("selGrid", "auto");
+  await P.frame();
+
+  // ---- the background select ------------------------------------------------------------------
+  const flags = [];
+  for (const box of ["square", "window"]) for (const grid of ["auto", "light", "standard", "sharp"]) for (const bg of ["field", "sheets", "none"]) {
+    setWin(env, 1600, 900);
+    env.getEl("selBox").value = box; env.getEl("selGrid").value = grid; env.getEl("selBg").value = bg;
+    env.getEl("selBg").onchange({});
+    await turn(4);
+    const s = snap(env);
+    flags.push({ box: box, grid: grid, bg: bg, b0: s.p.b0, eq: s.p.eqsrc, drag: s.p.eqsrcDrag, mu: s.p.mu, hasB0: s.hasB0, hasEqk: s.hasEqk, n: s.p.nx + "x" + s.p.ny });
+  }
+  await P.frame();
+  const wantN = { square: { auto: "256x256", light: "128x128", standard: "256x256", sharp: "256x256" }, window: { auto: "256x256", light: "256x128", standard: "256x256", sharp: "512x256" } };
+  ok("  (every one of those selections is taken at once, each on its own grid: a change of ny alone -- 256 x 256 to 256 x 128 on the same box -- is a rebuild too)",
+     flags.every(f => f.n === wantN[f.box][f.grid]), flags.filter(f => f.n !== wantN[f.box][f.grid]).map(f => f.box + "/" + f.grid + " " + f.n).join(", "));
+  ok("the background builds its own kernel flag and never both: over every box x grid x background (" + flags.length + " solvers) the mean field and `none` are b0: true, eqsrc: false with no eqsrcDrag key; the sheets are b0: false, eqsrc: true, eqsrcDrag: true",
+     flags.length === 24 && flags.every(f => !(f.b0 && f.eq) && f.mu === 1 &&
+       (f.bg === "sheets" ? f.b0 === false && f.eq === true && f.drag === true && !f.hasB0 && f.hasEqk
+                          : f.b0 === true && f.eq === false && f.drag === undefined && f.hasB0 && !f.hasEqk)),
+     flags.filter(f => f.b0 && f.eq).length + " with both; grids " + Array.from(new Set(flags.map(f => f.n))).join(" "));
+  // none: the shipped graph with the field held at zero, whatever its sliders say
+  setWin(env, 1920, 1080);
+  for (const [id, v] of [["selBox", "square"], ["selGrid", "auto"], ["selBg", "field"]]) await P.input(id, v);
+  await P.frame();
+  mark(env);
+  await P.input("selBg", "none");
+  ok("mean field -> none is a rebuild too (as a Reset), although the two build the same kernels: a new Solver, and the manifest says `none`",
+     same(env) === false && snap(env).sh.bg === "none" && env.run("function(){ return runManifest().forcing.background; }") === "none" && JSON.stringify(snap(env).ui) === shipped);
+  env.getEl("rField").value = "1.5";
+  model(env);
+  P.A.t = 40;
+  await P.click("btnRun");
+  for (let i = 1; i <= 6; i++) await P.frame(40 + 0.02 * i);
+  q = snap(env);
+  const walkNone = env.run("function(){ return music.walk; }");
+  ok("background = none: the shipped parameter set (b0: true, so the default graph), the mean field HELD at zero while running although its slider says 1.5, no walk, its controls and the sheets' disabled",
+     JSON.stringify(q.ui) === shipped && q.b0.join() === "0,0,0,0" && walkNone === null && q.dis.join() === "true,true,true,true,true" &&
+     env.run("function(){ return musicUi().field; }") === 0 && env.run("function(){ return runManifest().forcing.effects.meanField; }") === 0);
+  ok("  ... and on `none`, as on the mean field, the fixed colour scale's reference is amp", env.run("function(){ const u = musicUi(); return musicScaleRef(u) === u.amp && musicScaleMax(u) === u.scaleM * u.amp && /× amp\\)/.test(musicScaleReadout()); }") === true,
+     env.run("function(){ return musicScaleReadout(); }"));
+  await P.input("selBg", "field");
+  model(env);                            // (a new solver: the model readback goes on it again)
+  for (let i = 7; i <= 12; i++) await P.frame(40 + 0.02 * i);
+  q = snap(env);
+  ok("  ... and back on the walking mean field (a rebuild, mid-run) the field is on again: B0 = r sqrt(2E) != 0, a walk exists",
+     Math.hypot(q.b0[0], q.b0[1]) > 0 && env.run("function(){ return !!music.walk && running; }") === true && q.dis.join() === "true,true,false,false,false", "B0 " + Math.hypot(q.b0[0], q.b0[1]).toFixed(3));
+  await P.click("btnRun");
+  env.getEl("rField").value = "0";
+
+  // ---- the current sheets -----------------------------------------------------------------------
+  // every initial condition any Solver is given from here on, in order
+  env.run(`function(){ const f = Solver.prototype.setICFromReal, g = Solver.prototype.setIC; globalThis.__ic = [];
+    Solver.prototype.setICFromReal = function(a, b){ const nx = this.p.nx, ny = this.p.ny; let flat = !!b && b.length === nx * ny;
+      for (let i = 0; flat && i < nx; i++) for (let j = 1; j < ny; j++) if (b[i * ny + j] !== b[i * ny]) flat = false;
+      __ic.push({ k: "real", phi: a === null, flat: flat, col: b ? Array.from({ length: nx }, (_, i) => b[i * ny]) : null, live: this === solver, n: [nx, ny] });
+      return f.call(this, a, b); };
+    Solver.prototype.setIC = function(z){ __ic.push({ k: "builtin", zero: z === true }); return g.call(this, z); }; }`);
+  const ics = () => JSON.parse(env.run("function(){ const l = __ic; globalThis.__ic = []; return JSON.stringify(l); }"));
+  const fs169 = F.sheets.find(c => c.strength === 5 && c.width === 2 && c.amp === 1 && c.aspect > 1);
+  setWin(env, 1920, 1080);
+  await P.input("selBox", "window");
+  ics();
+  env.gpuReset();
+  await P.input("selBg", "sheets");
+  await P.frame();
+  let ic = ics();
+  q = snap(env);
+  const colErr = (col, c, scale) => { let d = 0; for (let k = 0; k < c.psi.length; k++) d = Math.max(d, Math.abs(col[k * c.stride] - Math.fround(scale * c.psi[k]))); return d / (scale * c.psi0); };
+  const sheet = () => JSON.parse(env.run("function(){ return JSON.stringify(music.sheet); }"));
+  const realIC = ic.filter(c => c.k === "real");
+  ok("background = current sheets (16:9, standard, the defaults): a rebuild whose initial condition is setICFromReal(null, psi_eq) on the NEW solver -- phi null, psi independent of y -- and it is the offline bump: a = " + fs169.a.toFixed(4) + ", psi0 = " + fs169.psi0.toFixed(4),
+     realIC.length === 1 && realIC[0].phi === true && realIC[0].flat === true && realIC[0].live === true && realIC[0].n.join() === "256,256" &&
+     colErr(realIC[0].col, fs169, 1) < 1e-7 && rel(sheet().a, fs169.a) < 1e-14 && rel(sheet().psi0, fs169.psi0) < 1e-14 && rel(sheet().energy, fs169.energy) < 1e-14 &&
+     ic.filter(c => c.k === "builtin" && c.zero).length === 0, ic.map(c => c.k).join(",") + "; psi " + e2(colErr(realIC[0] ? realIC[0].col : [], fs169, 1)) + " of psi0");
+  const si = env.gpu.dispatches.map((d, i) => d.pipe.__name === "srcInit" ? i : -1).filter(i => i >= 0);
+  ok("  ... that upload is when the solver takes its maintained equilibrium: `srcInit` is dispatched with it, over ceil(NM / 64) (twice in a rebuild: the constructor's own built-in IC first, then the sheets, whose column is the one that stands)",
+     si.length === 2 && si.every(i => env.gpu.dispatches[i].d[0] === Math.ceil(256 * 129 / 64)) && q.hasEqk &&
+     ic.map(c => c.k).join() === "builtin,real", ic.map(c => c.k + (c.zero ? "(zero)" : "")).join(","));
+  ok("  ... the card switches to a magnetic field, |b| (field 5), the sheet sliders come alive and the mean-field ones go dead, and the line states the cost: the peak field, a, the energy, and that sheets this strong shorten the timestep",
+     q.sel === "5" && q.dis.join() === "false,false,true,true,true" && /current sheets: peak field 5\.00, width a = 0\.323, energy /.test(q.box) &&
+     /shorten the timestep \(about 1\.3-1\.5 times the steps at 5, twice at 8\)/.test(q.box) && env.run("function(){ return solver.modeOf(0); }") === 5, q.box.slice(40));
+  // the fixed colour scale: on the sheets its reference is the sheet's peak field / 1.5, not amp
+  const sc = () => JSON.parse(env.run(`function(){ const u = musicUi(), c = cards.disp[0]; return JSON.stringify({ m: u.scaleM, amp: u.amp, ref: musicScaleRef(u), max: musicScaleMax(u),
+    bar: c.barMax, dirty: c.dirty, v: el("vScale").textContent, read: musicScaleReadout(), rec: musicScaleRecord().max, b: music.sheet ? music.sheet.b : null }); }`));
+  const sc5 = sc();
+  ok("  ... and the fixed colour scale changes its reference: on the sheets it is the sheet's PEAK FIELD / 1.5 (5 / 1.5 here), not amp, so the slider's default 1.5 puts the top of the scale on the peak itself -- 5.00, to the slider's own rounding of 1.5 (2^0.585)",
+     sc5.b === 5 && sc5.amp === 1 && sc5.ref === 5 / 1.5 && sc5.max === sc5.m * (5 / 1.5) && Math.abs(sc5.m - Math.pow(2, 0.585)) < 1e-12 && Math.abs(sc5.max / 5 - 1) < 1e-4 && sc5.rec === sc5.max,
+     JSON.stringify([sc5.ref, sc5.max]));
+  ok("  ... the slider's label and the readout say so: \"1.50 → 5.00\", \"colour scale fixed at 5.00 (1.50 × the sheets' peak field / 1.5)\"",
+     sc5.v === "1.50 → 5.00" && /^colour scale fixed at 5\.00 \(1\.50 × the sheets' peak field \/ 1\.5\)/.test(sc5.read) && !/× amp/.test(sc5.read), sc5.v + " | " + sc5.read);
+  const tip = env.getEl("selBg").title;
+  ok("  ... the tooltip is honest about it: ONE current sheet through the centre with weaker return currents (not a pair), hyper 4 has no resistive layer, this is NOT the tearing instability but a restored sheet broken up by kicks, and rmhd2d.html has the real one; the sliders' say a change waits for the next Reset",
+     /no resistive layer/.test(tip) && /NOT the tearing instability/.test(tip) && /it is a restored sheet broken up by kicks/.test(tip) && /with weaker return currents/.test(tip) && !/\bpair\b/.test(tip) && /rmhd2d\.html/.test(tip) &&
+     /next Reset/.test(env.getEl("rSheetB").title) && /next Reset/.test(env.getEl("rSheetW").title) && /shorten the timestep/.test(env.getEl("rSheetB").title));
+  // the sliders do nothing until Reset; Reset restores the sheets
+  mark(env);
+  await P.input("rSheetB", 8);
+  await P.input("rSheetW", 1);
+  await P.input("rMAmp", 2);
+  const quiet = ics();
+  const scQ = sc();
+  env.gpuReset();
+  await P.click("btnReset");
+  const sc16 = sc();                               // (read before any frame: the stub's readbacks return zeros)
+  ic = ics();
+  ok("the scale's reference is the sheet AS LAID DOWN: with the sliders at 8 and amp 2 but no Reset yet it is still 5 / 1.5 (the amp slider does not move it here), and Reset, which lays a peak field of 16, makes it 16 / 1.5 -- the label, the readout and the card's colour bar at once (\"1.50 → 16.0\")",
+     scQ.b === 5 && scQ.amp === 2 && scQ.ref === 5 / 1.5 && scQ.max === sc5.max && scQ.v === "1.50 → 5.00" &&
+     sc16.b === 16 && sc16.ref === 16 / 1.5 && sc16.max === sc16.m * (16 / 1.5) && sc16.v === "1.50 → 16.0" && sc16.bar === sc16.max && sc16.dirty === true &&
+     /^colour scale fixed at 16\.0 \(1\.50 × the sheets' peak field \/ 1\.5\)/.test(sc16.read), JSON.stringify([scQ.max, sc16.max, sc16.bar, sc16.v]));
+  const s8 = sheet(), a8 = last(q.plan.sigmas), want8 = M.musicSheetPsi0(8, 2, a8);
+  ok("sheet field 8, width 1, amp 2: moving the sliders uploads NOTHING (" + quiet.length + " initial conditions); they take effect at Reset",
+     quiet.length === 0 && rel(sheet().psi0, want8) < 1e-14 && rel(s8.a, a8) < 1e-14 && s8.b === 16);
+  ok("Reset RESTORES the sheets -- one setICFromReal(null, psi_eq) on the same solver, never the blank setIC(true) -- with the equilibrium taken again (srcInit), psi0 = (3 sqrt(3)/4) a * 8 * 2",
+     same(env) === true && ic.length === 1 && ic[0].k === "real" && ic[0].phi && ic[0].flat && ic[0].live &&
+     Math.abs(ic[0].col[128] - Math.fround(M.musicSheetEq(128 * f169.box[0] / 256, f169.box[0], want8, a8))) < 1e-6 * want8 && Math.abs(ic[0].col[128] / want8 - 1) < 1e-6 &&
+     env.gpu.dispatches.filter(d => d.pipe.__name === "srcInit").length === 1, ic.map(c => c.k).join(",") + "; centre " + (ic[0] && ic[0].col[128]) + " for psi0 " + want8.toFixed(4));
+  for (const [id, v] of [["rSheetB", 5], ["rSheetW", 2], ["rMAmp", 1]]) await P.input(id, v);
+  await P.click("btnReset");
+  ic = ics();
+  ok("  ... and back at the defaults the next Reset lays the first profile again, bit for bit", ic.length === 1 && JSON.stringify(ic[0].col) === JSON.stringify(realIC[0].col));
+  // strength 0 is still the sheets' solver, with nothing in it
+  await P.input("rSheetB", 0);
+  await P.click("btnReset");
+  ic = ics();
+  ok("sheet field 0: still the sheets' solver (eqsrc), an all-zero psi, and the line drops the cost note",
+     ic.length === 1 && ic[0].k === "real" && ic[0].col.every(v => v === 0) && snap(env).p.eqsrc === true && !/shorten the timestep/.test(snap(env).box) && sheet().energy === 0);
+  const sc0 = sc();
+  ok("  ... and with no sheet to refer to (peak field 0) the colour scale falls back to amp: 1.50 × amp, and the readout says amp again",
+     sc0.b === 0 && sc0.amp === 1 && sc0.ref === 1 && sc0.max === sc0.m && sc0.v === "1.50 → 1.50" && /^colour scale fixed at 1\.50 \(1\.50 × amp\)/.test(sc0.read), sc0.v + " | " + sc0.read);
+  await P.input("rSheetB", 5);
+  await P.click("btnReset");
+  ics();
+  // the memory slider on a live solver with the source on
+  const SRC = `function(){ const s = solver, b = s.bg.nlAssemble.__buffers; return JSON.stringify({ mu: s.p.mu, diss: s.p.diss, drag: s.p.eqsrcDrag, eq: s.p.eqsrc,
+    lin0: s.g.gridB[1], lin1: s.g.gridB[5], k1: s.g.gridA[6], gridB: b.indexOf(s.buf.gridB), eqk: b.indexOf(s.buf.eqk), n: b.length }); }`;
+  const dev = env.run("function(){ return device; }"), wq = dev.queue, worig = wq.writeBuffer, wrote = [];
+  wq.writeBuffer = function (b, off, data) { wrote.push(b); return worig.apply(wq, arguments); };
+  let memErr = "", v2 = null, gb = null;
+  try {
+    await P.input("rMem", 2);
+    v2 = JSON.parse(env.run(SRC));
+    gb = env.run("function(){ return solver.buf.gridB; }");
+  } catch (e) { memErr = String(e && e.message || e); } finally { wq.writeBuffer = worig; }
+  const f169d = f169.diss[0][1];
+  ok("the memory slider on the LIVE sheets solver (setDrag with the source on) does not throw: mu = 1/2, the drag is in the rebuilt column (-1/4 at k = 0, -diss k^8 - 1/4 beside it) and that column is uploaded",
+     memErr === "" && !!v2 && v2.mu === 0.5 && v2.lin0 === -0.25 && Math.abs(v2.lin1 - Math.fround(Math.fround(-f169d * Math.pow(v2.k1, 4)) - 0.25)) < 1e-9 &&
+     wrote.indexOf(gb) >= 0 && same(env) === true && realFails(env).length === 0, memErr || "mu " + (v2 && v2.mu) + ", lin(k=0) " + (v2 && v2.lin0));
+  ok("  ... and the sheets stay HELD by construction: the source kernel (nlAssemble) is bound to that same gridB buffer and to eqk, so it reads the new column -- -gridB.y * psi_eq cancels the new decay rate exactly -- and no initial condition was re-uploaded (eqk is still the Reset's)",
+     !!v2 && v2.gridB >= 0 && v2.eqk >= 0 && v2.eqk === v2.n - 1 && v2.drag === true && v2.eq === true && ics().length === 0, JSON.stringify(v2));
+  env.getEl("selBg").value = "field";              // the select moved, its handler not yet run
+  const inForce = JSON.parse(env.run("function(){ return JSON.stringify(uiParams()); }"));
+  env.getEl("selBg").value = "sheets";
+  ok("  ... uiParams() describes the solver IN FORCE (music.shape), not a select that has moved since: still eqsrc + eqsrcDrag, no b0",
+     inForce.eqsrc === true && inForce.eqsrcDrag === true && inForce.b0 === false);
+  const noOpt = throws(() => env.run("function(){ const p = Object.assign({}, uiParams()); delete p.eqsrcDrag; new Solver(device, p); }"));
+  ok("  ... which rests on the opt-in: the page's own parameters WITHOUT eqsrcDrag are refused by the solver", /eqsrcDrag/.test(noOpt), noOpt.slice(0, 80));
+  await P.input("rMem", 1);
+  ics();
+  // running on the sheets: kicks land, steps are taken, the missing mean-field uniform is never touched
+  model(env);
+  P.A.t = 60;
+  await P.click("btnRun");
+  for (let i = 1; i <= 40; i++) await P.frame(60 + i / 60);
+  env.run(`function(){ const t = music.audio.ctx.currentTime - music.audio.t0; music.queue.push({ due: t, o: { band: 0, strength: 1, t: t, tFire: t }, pan: null }); }`);
+  for (let i = 41; i <= 44; i++) await P.frame(60 + i / 60);
+  const lg = P.takeLog();
+  ok("a session on the sheets runs: steps are taken, a bass onset kicks (and pulses), no mean field is asked of a solver that has none, and nothing is logged as a failure",
+     lg.filter(l => l.op === "step").length > 20 && lg.filter(l => l.op === "kick").length >= 1 && env.run("function(){ return running && music.walk === null && !solver.buf.b0; }") === true &&
+     realFails(env).length === 0 && !/non-finite|could not/.test(env.getEl("status").textContent), realFails(env).slice(0, 2).join(" | ") || lg.filter(l => l.op === "step").length + " steps");
+  await P.click("btnReset");
+  ic = ics();
+  ok("  ... and Reset mid-run restores the sheets there too (the kicks are gone, the equilibrium is back)", ic.length === 1 && ic[0].k === "real" && JSON.stringify(ic[0].col) === JSON.stringify(realIC[0].col));
+  await P.click("btnRun");
+  setWin(env, 2000, 1000);
+  await P.click("btnReset");
+  ic = ics();
+  setWin(env, 1920, 1080);
+  await P.click("btnReset");
+  ok("  ... a Reset that REBUILDS (the window became 2:1) lays the sheets once, on the new box -- the constructor's built-in IC, then one setICFromReal on a 4 pi-long box, not two",
+     ic.map(c => c.k).join() === "builtin,real" && ic[1].live && snap(env).p.Lx === f169.box[0] && Math.abs(ic[1].col[128] / M.musicSheetPsi0(5, 1, 2 * last(M.musicBandPlan([256, 256], null, null, 32, 2 * L, L).sigmas)) - 1) < 1e-6 &&
+     ics().map(c => c.k).join() === "builtin,real", ic.map(c => c.k).join());
+  // the card's field: set by a change of background, and by nothing else
+  const pick = v => env.run(`function(v){ const c = cards.disp[0]; c.selField.value = v; c.selField.onchange({}); }`, v);
+  const fld = () => snap(env).sel + "/" + env.run("function(){ return solver.modeOf(0); }");
+  const seq = [];
+  await P.input("selBg", "field");
+  const scF = sc();                                // (before any frame, as above)
+  seq.push(fld());                                 // sheets -> mean field: the page's default, |u|
+  await P.input("selBg", "sheets");
+  const scS = sc();
+  seq.push(fld());                                 // -> sheets: |b|
+  ok("the colour scale's reference follows the BACKGROUND select at once, the card's colour bar with it: leaving the sheets it is amp again (1.50 × amp = 1.50), choosing them it is the new sheet's peak / 1.5 (top of the scale 5.00)",
+     scF.ref === scF.amp && scF.amp === 1 && scF.max === scF.m && scF.bar === scF.max && /× amp\)/.test(scF.read) &&
+     scS.b === 5 && scS.ref === 5 / 1.5 && scS.max === scS.m * (5 / 1.5) && scS.bar === scS.max && /× the sheets' peak field \/ 1\.5\)/.test(scS.read),
+     JSON.stringify([scF.max, scF.bar, scS.max, scS.bar]));
+  pick("1");                                       // the visitor picks the current
+  await P.click("btnReset");
+  seq.push(fld());                                 // ... which survives Reset
+  await P.input("selGrid", "light");
+  await P.input("selGrid", "auto");
+  seq.push(fld());                                 // ... and two rebuilds that are not a change of background
+  model(env);
+  P.A.t = 80;
+  await P.click("btnRun");
+  for (let i = 1; i <= 5; i++) await P.frame(80 + 0.02 * i);
+  await P.click("btnRun");
+  seq.push(fld());                                 // ... and a Start, frames, a Stop
+  await P.input("selBg", "none");
+  seq.push(fld());                                 // leaving the sheets: the default again
+  pick("3");
+  await P.input("selBg", "field");
+  seq.push(fld());                                 // none -> mean field: no sheets either side, the pick (psi) stays
+  await P.click("btnReset");
+  seq.push(fld());
+  await P.input("selBg", "sheets");
+  seq.push(fld());                                 // -> sheets again: |b| again
+  ics();
+  ok("on the current sheets the picture shows the MAGNETIC FIELD by default: choosing them puts |b| (field 5) on the card and on the solver, going back to the mean field puts the page's default |u| (4) back",
+     seq[0] === "4/4" && seq[1] === "5/5" && seq[8] === "5/5" && env.run("function(){ return [musicBgField('sheets'), musicBgField('field'), musicBgField('none')].join(); }") === "5,4,4" &&
+     /cardsLayout\(\{ disp: \[\{ sel: musicBgField\(music\.shape\.bg\), cmap: MUSIC_CMAP_DEFAULT/.test(htmlS), seq.join(" "));
+  ok("  ... only the CHANGE of background sets it: a field the visitor picks afterwards (the current, 1) survives Reset, two rebuilds from the grid select, and a Start / frames / Stop",
+     seq[2] === "1/1" && seq[3] === "1/1" && seq[4] === "1/1", seq.slice(2, 5).join(" "));
+  ok("  ... leaving the sheets for `none` restores the default too; between `none` and the mean field (no sheets on either side) nothing is touched, so psi picked there stays, through a Reset as well",
+     seq[5] === "4/4" && seq[6] === "3/3" && seq[7] === "3/3", seq.slice(5, 8).join(" "));
+  const man = JSON.parse(env.run("function(){ return JSON.stringify(runManifest().forcing); }"));
+  ok("a saved params.json records the box, the grid, the rung, the background and the sheets as laid down",
+     man.box[0] === f169.box[0] && man.box[1] === L && man.grid.join() === "256,256" && man.rung === "standard" && man.background === "sheets" &&
+     rel(man.sheets.psi0, fs169.psi0) < 1e-14 && rel(man.sheets.a, fs169.a) < 1e-14 && man.sheets.peakField === 5 && man.effects.meanField === 0, JSON.stringify(man.sheets));
+  await P.input("selBg", "field");
+  await P.input("selBox", "square");
+  await P.frame();
+  ok("  ... and with all three selects back at their defaults the page is the shipped one again", JSON.stringify(snap(env).ui) === shipped && snap(env).sel === "4" && realFails(env).length === 0);
+
+  // ---- the auto rung, on the page -----------------------------------------------------------------
+  const A = await musicPage("?musicdebug"), aenv = A.env;
+  const au = () => JSON.parse(aenv.run("function(){ return JSON.stringify({ behind: music.behind, a: music.auto, n: [solver.p.nx, solver.p.ny], sel: el('selGrid').value, st: el('status').textContent, box: el('musicBox').textContent, run: running }); }"));
+  // one run: Start at audio time t0, `nb` frames that each find the clock a second behind, at
+  // audio times t0 + from + i; then Stop
+  const session = async (t0, from, nb) => {
+    model(aenv);
+    A.A.t = t0;
+    await A.click("btnRun");
+    for (let i = 1; i <= 3; i++) await A.frame(t0 + 0.02 * i);
+    // (each followed by two ordinary frames INSIDE the clock's 1 s BEHIND hold: lit, not counted)
+    for (let i = 0; i < nb; i++) { await A.frame(t0 + from + i); await A.frame(t0 + from + i + 0.02); await A.frame(t0 + from + i + 0.04); }
+    const r = au();
+    await A.click("btnRun");
+    return r;
+  };
+  // (2026-11-24: without ?stage the grid select says standard, so auto is CHOSEN here; with
+  // ?stage it is the default, which the ?stage rows below state)
+  await A.input("selGrid", "auto");
+  aenv.run("function(){ globalThis.__svm = solver; }");
+  let r = await session(100, 1, 3);
+  ok("auto, a run that is rebased for falling behind 3 times in its first 10 s: counted (3 -- the REBASES, not the nine frames on which BEHIND was lit), nothing changes mid-run, and the next Start stays on standard (3 is not MORE than 3)",
+     r.a.n === 3 && r.behind === true && r.a.rung === "standard" && r.n.join() === "256,256" && aenv.run("function(){ return solver === __svm; }") === true, JSON.stringify(r.a));
+  r = await session(200, 1, 6);
+  const mid = aenv.run("function(){ return solver === __svm; }");
+  ok("  ... the count starts again with each run (3 was forgotten: this run's own 6 are counted), and a run that falls behind 6 times still finishes on the grid it started on",
+     r.a.n === 6 && r.a.rung === "standard" && r.n.join() === "256,256" && mid === true && r.box.indexOf("dropped") < 0, JSON.stringify(r.a));
+  A.A.t = 300;
+  await A.click("btnRun");
+  r = au();
+  ok("the NEXT Start drops ONE rung: auto is on light (128 x 128 on the square box), the select still says auto, and the status line and the line under the selects both say why",
+     r.run === true && r.a.rung === "light" && r.n.join() === "128,128" && r.sel === "auto" && r.a.n === 0 &&
+     /auto dropped to light -- the simulation fell behind the audio 6 times in the first 10 s/.test(r.st) && /auto dropped to light/.test(r.box) && /on 128 × 128 \(light, auto\)/.test(r.box),
+     r.st);
+  await A.click("btnRun");
+  r = await session(400, 1, 9);
+  A.A.t = 500;
+  await A.click("btnRun");
+  const low = au();
+  await A.click("btnRun");
+  ok("  ... on light, a run that falls behind 9 times changes nothing: there is no rung below, and auto says nothing new",
+     r.a.n === 9 && low.a.rung === "light" && low.n.join() === "128,128" && low.st === "", JSON.stringify(low.a));
+  r = await session(600, 20, 0);
+  A.A.t = 700;
+  await A.click("btnRun");
+  const calm = au();
+  await A.click("btnRun");
+  ok("  ... and it NEVER climbs: a run with no rebase at all, then Start, is still light; nor is it ever sharp",
+     r.a.n === 0 && calm.a.rung === "light" && calm.n.join() === "128,128" && aenv.run("function(){ return musicShapeWanted().rung; }") === "light", JSON.stringify([r.a, calm.a, calm.n]));
+  // only the first MUSIC_AUTO_WINDOW seconds count, and only while the select says auto
+  const B = await musicPage("?musicdebug"), benv = B.env;
+  await B.input("selGrid", "auto");
+  const bu = () => JSON.parse(benv.run("function(){ return JSON.stringify({ a: music.auto, n: [solver.p.nx, solver.p.ny], behind: music.behind, box: el('musicBox').textContent }); }"));
+  model(benv);
+  B.A.t = 100;
+  await B.click("btnRun");
+  for (let i = 1; i <= 3; i++) await B.frame(100 + 0.02 * i);
+  for (let i = 0; i < 8; i++) await B.frame(100 + 10.5 + i);
+  const late = bu();
+  await B.click("btnRun");
+  B.A.t = 200;
+  await B.click("btnRun");
+  const afterLate = bu();
+  await B.click("btnRun");
+  ok("falling behind AFTER the first 10 s of a run is not counted (8 rebases from 10.5 s on, BEHIND lit, count 0): the next Start stays on standard",
+     late.a.n === 0 && late.behind === true && afterLate.a.rung === "standard" && afterLate.n.join() === "256,256", JSON.stringify(late));
+  await B.input("selGrid", "standard");
+  model(benv);
+  B.A.t = 300;
+  await B.click("btnRun");
+  for (let i = 1; i <= 3; i++) await B.frame(300 + 0.02 * i);
+  for (let i = 0; i < 8; i++) await B.frame(300 + 1 + i);
+  const named = bu();
+  await B.click("btnRun");
+  await B.input("selGrid", "auto");
+  ok("  ... nor is it counted while a rung is chosen BY NAME (standard, 8 rebases, count 0): going back to auto afterwards is still standard",
+     named.a.n === 0 && named.behind === true && bu().a.rung === "standard" && bu().n.join() === "256,256");
+  // a pending drop is also taken by Reset
+  model(benv);
+  B.A.t = 400;
+  await B.click("btnRun");
+  for (let i = 1; i <= 3; i++) await B.frame(400 + 0.02 * i);
+  for (let i = 0; i < 5; i++) await B.frame(400 + 1 + i);
+  await B.click("btnReset");
+  const viaReset = bu();
+  ok("a drop that is due is also taken by Reset, mid-run: 5 rebases, Reset -> light, still running, and the status line says so",
+     viaReset.a.rung === "light" && viaReset.n.join() === "128,128" && benv.run("function(){ return running; }") === true &&
+     /auto dropped to light/.test(benv.getEl("status").textContent) && realFails(benv).length === 0, benv.getEl("status").textContent.slice(0, 60));
+  await B.click("btnRun");
+  await B.input("selGrid", "standard");
+  ok("  ... and choosing standard by name overrides it (256 x 256 again), as the message says -- and the line under the selects then stops repeating auto's note (it was there while auto was the choice)",
+     /dropped to light/.test(viaReset.box) && bu().n.join() === "256,256" && /choose standard to override/.test(bu().a.note) && !/dropped/.test(bu().box) && /on 256 × 256 \(standard\), 4 bands$/.test(bu().box), bu().box);
+
+  // ---- the shipped page (no ?stage, grid = standard by default) never drops ---------------------------
+  const C = await musicPage("?musicdebug"), cenv = C.env;
+  const cu0 = () => JSON.parse(cenv.run("function(){ return JSON.stringify({ a: music.auto, n: [solver.p.nx, solver.p.ny], behind: music.behind, sel: el('selGrid').value, st: el('status').textContent, box: el('musicBox').textContent, ui: uiParams(), lit: music.lit.length, run: running }); }"));
+  cenv.run("function(){ globalThis.__svm = solver; }");
+  model(cenv);
+  C.A.t = 100;
+  await C.click("btnRun");
+  for (let i = 1; i <= 3; i++) await C.frame(100 + 0.02 * i);
+  for (let i = 0; i < 9; i++) await C.frame(100 + 1 + i);
+  const cRun = cu0();
+  await C.click("btnRun");
+  C.A.t = 200;
+  await C.click("btnRun");
+  const cStart = cu0();
+  await C.click("btnRun");
+  await C.click("btnReset");
+  const cReset = cu0();
+  await C.input("selBg", "none");
+  await C.input("selBg", "field");
+  await C.input("selGrid", "standard");
+  const cSel = cu0();
+  ok("without ?stage, at the defaults, a run that is rebased for falling behind 9 times in its first 10 s (BEHIND lit) counts NOTHING, and the next Start, a Reset and changes of the selects all leave the grid at 256 x 256 with 4 bands: no drop, no note, nothing in the status line",
+     cRun.sel === "standard" && cRun.behind === true && cRun.a.n === 0 && [cRun, cStart, cReset, cSel].every(c => c.a.rung === "standard" && c.a.note === "" && c.a.n === 0 && c.n.join() === "256,256" && c.lit === 4 &&
+       !/dropped/.test(c.st) && /^box 6\.28 × 6\.28 on 256 × 256 \(standard\), 4 bands$/.test(c.box)) && realFails(cenv).length === 0, JSON.stringify([cRun.a, cStart.n, cSel.box]));
+  ok("  ... and what the Solver holds is still the shipped parameter set, bit for bit (the two rebuilds were the background select's, none of them a change of grid)",
+     [cRun, cStart, cReset, cSel].every(c => JSON.stringify(c.ui) === shipped) && cStart.run === true && cenv.run("function(){ return solver.p.nx === 256 && solver.p.ny === 256; }") === true, JSON.stringify(cSel.ui).slice(0, 80));
+  // auto earns a drop, and the visitor then chooses a rung by name: the drop is not taken behind their back
+  await C.input("selGrid", "auto");
+  model(cenv);
+  C.A.t = 300;
+  await C.click("btnRun");
+  for (let i = 1; i <= 3; i++) await C.frame(300 + 0.02 * i);
+  for (let i = 0; i < 6; i++) await C.frame(300 + 1 + i);
+  const dEarn = cu0();
+  await C.click("btnRun");
+  cenv.run("function(){ showStatus('', 'info'); }");
+  await C.input("selGrid", "standard");
+  const dName = cu0();
+  await C.input("selGrid", "auto");
+  const dBack = cu0();
+  C.A.t = 400;
+  await C.click("btnRun");
+  const dStart = cu0();
+  await C.click("btnRun");
+  ok("on auto, a run that falls behind 6 times has EARNED a drop (count 6) -- but choosing standard by name before the next Start takes none: no \"auto dropped\" note anywhere, 256 x 256, and auto's own rung is still standard",
+     dEarn.sel === "auto" && dEarn.a.n === 6 && dEarn.a.rung === "standard" && dName.sel === "standard" && dName.a.rung === "standard" && dName.a.note === "" && dName.a.n === 0 &&
+     dName.n.join() === "256,256" && !/dropped/.test(dName.st) && !/dropped/.test(dName.box), JSON.stringify([dEarn.a, dName.a, dName.st]));
+  ok("  ... and going back to auto afterwards does not jump to light from that old run (its count was zeroed when the rung was chosen): standard at the select, and at the next Start",
+     dBack.sel === "auto" && dBack.a.rung === "standard" && dBack.a.n === 0 && dBack.n.join() === "256,256" && /on 256 × 256 \(standard, auto\), 4 bands$/.test(dBack.box) &&
+     dStart.run === true && dStart.a.rung === "standard" && dStart.n.join() === "256,256" && !/dropped/.test(dStart.st) && realFails(cenv).length === 0, JSON.stringify([dBack.a, dStart.n, dBack.box]));
+
+  // ---- WITH ?stage: square by default; the window's shape on request, and then the picture fills #stage --
+  // (2026-11-23: the default box is square with the flag too, and the stage shows whatever box
+  // it has WHOLE -- contain -- so a window of another shape than the box has bars, or repeats,
+  // and never a crop. The rows about the window-shaped box choose it through the select.)
+  const S = await musicPage("?stage&musicdebug"), senv = S.env;
+  const SS = `function(){ const s = solver, c = cards.disp[0], st = c.wrap.style; return JSON.stringify({ p: [s.p.nx, s.p.ny, s.p.Lx, s.p.Ly], b0: s.p.b0, eq: s.p.eqsrc,
+    cv: [c.cv.width, c.cv.height], css: [st.left, st.top, st.width, st.height].map(parseFloat), box: el("selBox").value, grid: el("selGrid").value, bg: el("selBg").value,
+    opts: el("selBox").options.map(o => o.value), line: el("musicBox").textContent, lit: music.lit.length, plan: music.plan,
+    inStage: c.wrap.parentNode === stage.el, drawer: ["selBox", "selGrid", "selBg", "rSheetB", "musicBox"].every(id => { for (let p = el(id); p; p = p.parentNode) if (p.id === "stageDrawer") return true; return false; }) }); }`;
+  const ss = () => JSON.parse(senv.run(SS));
+  const cssIs = (t, l, tp, w, h) => Math.abs(t.css[0] - l) < 0.006 && Math.abs(t.css[1] - tp) < 0.006 && Math.abs(t.css[2] - w) < 0.006 && Math.abs(t.css[3] - h) < 0.006;
+  let t = ss();
+  ok("with ?stage the box select defaults to SQUARE, as without it (grid AUTO -- the default only with the flag -- and background the mean field): the shipped 2 pi x 2 pi on 256 x 256 with 4 bands, and the window's shape is still on offer in the select",
+     t.box === "square" && t.grid === "auto" && t.bg === "field" && t.opts.join() === "window,square" && t.p.join() === [256, 256, L, L].join() && t.b0 === true && t.eq === false &&
+     t.lit === 4 && JSON.stringify(t.plan) === JSON.stringify(M.musicBandPlan(256, null, null, 32)) && /^box 6\.28 × 6\.28 on 256 × 256 \(standard, auto\), 4 bands$/.test(t.line) &&
+     realFails(senv).length === 0, t.box + " " + t.p.join(" ") + " | " + t.line);
+  ok("  ... shown whole in the stub's 1280 x 800 window: an 800 x 800 canvas in an 800 x 800 CSS box at (240, 0), bars either side",
+     t.inStage && t.cv.join() === "800,800" && cssIs(t, 240, 0, 800, 800), t.cv.join("x") + " at " + t.css.join(" "));
+  await S.input("selBox", "window");
+  await S.frame();
+  t = ss();
+  ok("box = the window's shape, chosen there: the box is the stub window's 1280 x 800, 1.6 * 2 pi x 2 pi on 256 x 256",
+     t.box === "window" && t.grid === "auto" && t.bg === "field" && t.p[0] === 256 && t.p[1] === 256 && t.p[2] === 1.6 * L && t.p[3] === L && t.b0 === true && t.eq === false &&
+     realFails(senv).length === 0, t.p.join(" "));
+  ok("  ... and the picture then FILLS #stage exactly, no bars: a 1280 x 800 canvas in a 1280 x 800 CSS box at (0, 0) -- stage.js reads the box's aspect off the solver",
+     t.inStage && t.cv.join() === "1280,800" && cssIs(t, 0, 0, 1280, 800), t.cv.join("x") + " at " + t.css.join(" "));
+  senv.getEl("selFill").value = "tile";
+  await S.frame();                                 // (paused: this frame marks the card, the next renders and copies)
+  await S.frame();
+  const one = senv.getEl("stageTile").__cx2d.__draws.map(d => d.at.join());
+  senv.getEl("selFill").value = "bars";
+  await S.frame();
+  ok("  ... so with the sides on \"repeat the picture\" there is nothing to repeat: ONE copy, the window's own 1280 x 800 at (0, 0)", one.join(" ") === "0,0,1280,800", one.join(" "));
+  ok("  ... the new controls are in the drawer with the rest", t.drawer === true);
+  senv.run("function(){ globalThis.__svm = solver; window.innerWidth = 390; window.innerHeight = 844; stageResize(true); }");
+  t = ss();
+  ok("a rotation to 390 x 844 rebuilds nothing (the same solver, the same 1.6 box): the stage shows the WHOLE landscape picture across the tall window's width -- 390 x 243.75 CSS (390 / 1.6), 300.125 px of bar above and below -- on a 390 x 244 canvas",
+     senv.run("function(){ return solver === __svm; }") === true && t.p[2] === 1.6 * L && cssIs(t, 0, (844 - 390 / 1.6) / 2, 390, 390 / 1.6) && Math.abs(t.css[1] - 300.125) < 0.006 && t.cv.join() === "390,244",
+     t.cv.join("x") + " at " + t.css.join(" "));
+  const npic = JSON.parse(senv.run("function(){ return JSON.stringify(stagePicture()); }"));
+  ok("  ... and stagePicture() answers that NON-square box, each field its own: x = 0, w = 390 (the width), y = 300.125, h = 243.75 (the height), not tiled",
+     npic.x === 0 && npic.w === 390 && npic.y === 300.125 && npic.h === 243.75 && npic.tile === false, JSON.stringify(npic));
+  await S.click("btnReset");
+  t = ss();
+  ok("  ... and Reset takes the tall window: 2 pi x 2 pi (844/390), and the picture fills it exactly again (390 x 844 CSS, no bars)",
+     senv.run("function(){ return solver === __svm; }") === false && t.p[2] === L && t.p[3] === M.musicBoxFor(390 / 844)[1] &&
+     cssIs(t, 0, 0, 390, 844) && t.cv.join() === "390,844", t.cv.join("x") + " at " + t.css.join(" "));
+  senv.run("function(){ window.innerWidth = 3000; window.innerHeight = 1000; }");
+  await S.click("btnReset");
+  t = ss();
+  ok("a window beyond the clamp (3000 x 1000): the box stops at 2.4, and the picture is shown whole, NOT cropped -- 2400 x 1000 CSS, a 300 px bar either side -- on a 1920 x 800 canvas (the cap on its long side)",
+     t.p[2] === 2.4 * L && t.p[3] === L && cssIs(t, 300, 0, 2400, 1000) && t.cv.join() === "1920,800", t.cv.join("x") + " at " + t.css.join(" "));
+  // the stage's own box wins over the browser window (100dvh: the visible viewport on a phone)
+  senv.run("function(){ stage.el.clientWidth = 1000; stage.el.clientHeight = 500; window.innerWidth = 1280; window.innerHeight = 800; }");
+  await S.click("btnReset");
+  t = ss();
+  ok("the shape is read off #stage's own box where it reports one (1000 x 500 -> 2:1), not off the browser window (1280 x 800)",
+     t.p[2] === 2 * L && t.p[3] === L && senv.run("function(){ const w = musicWindow(); return w.w + 'x' + w.h; }") === "1000x500", t.p.join(" "));
+  await S.input("selBg", "sheets");
+  t = ss();
+  ok("with ?stage the sheets build the same flags (eqsrc, no b0) on the window's box, and the page logs no failure", t.eq === true && t.b0 === false && t.p[2] === 2 * L && realFails(senv).length === 0,
+     realFails(senv).slice(0, 2).join(" | "));
+  await S.input("selBox", "square");
+  await S.input("selBg", "field");
+  t = ss();
+  ok("  ... and box = square there is the shipped square solver", t.p.join() === [256, 256, L, L].join() && t.b0 === true && t.eq === false);
+
+  // ---- the traces overlay follows a rebuild (it keys its bins off the live solver) ------------------
+  const T = await musicPage("?traces"), tenv = T.env;
+  tenv.run("function(){ window.innerWidth = 1920; window.innerHeight = 1080; }");
+  await T.input("selBox", "window");
+  await T.input("selGrid", "sharp");
+  for (let i = 0; i < 14; i++) await T.frame();
+  ok("with ?traces a rebuild onto a 16:9 box at 512 x 256 leaves the overlay running (frames pass, nothing logged as a failure)",
+     tenv.run("function(){ return solver.p.nx + 'x' + solver.p.ny + ' ' + (musicTraces.on && !!musicTraces.canvas); }") === "512x256 true" && realFails(tenv).length === 0,
+     realFails(tenv).slice(0, 2).join(" | "));
+  // the side panels' line cuts run along y: ny samples, on a grid where nx is not ny
+  await T.input("selGrid", "light");
+  tenv.getEl("cbTrSides").checked = true;
+  tenv.getEl("selTrSide").value = "cuts";
+  tenv.run(`function(){ window.__hold = []; const wrap = sv => { sv.readCutLine = iz => { const ny = sv.p.ny, a = new Float32Array(4 * ny);
+      for (let i = 0; i < ny; i++) { a[i] = i; a[ny + i] = -7; a[2 * ny + i] = 1000 + i; a[3 * ny + i] = -9; }
+      return window.__held ? new Promise(r => window.__hold.push(() => r(a))) : Promise.resolve(a); }; };
+    window.__wrapLine = wrap; wrap(solver); musicTraces.rows4 = []; stateBumped(); musicTraces.sample(solver, 1000); }`);
+  await turn();
+  const nr = JSON.parse(tenv.run("function(){ const e = musicTraces.rows4[0]; return JSON.stringify({ g: [solver.p.nx, solver.p.ny], n: musicTraces.rows4.length, len: e ? e.rows.map(r => r.length) : [], v: e ? e.rows.map(r => [r[0], r[5], r[127]]) : [] }); }"));
+  ok("on a 256 x 128 grid (the 16:9 box on light) the side panels' line cuts are rows of ny = 128, not nx: u_x = i, b_x = 1000 + i, their sum and their difference, read off the right quarters of the solver's 4 ny floats",
+     nr.g.join() === "256,128" && nr.n === 1 && nr.len.join() === "128,128,128,128" && JSON.stringify(nr.v) === JSON.stringify([[0, 5, 127], [1000, 1005, 1127], [1000, 1010, 1254], [-1000, -1000, -1000]]), JSON.stringify(nr));
+  // a line read in flight when its solver is retired pushes nothing
+  tenv.run("function(){ window.__held = true; musicTraces.rows4 = []; stateBumped(); musicTraces.sample(solver, 2000); }");
+  await turn();
+  const fl0 = tenv.run("function(){ return [window.__hold.length, musicTraces.busy4, musicTraces.rows4.length].join(); }");
+  await T.input("selGrid", "standard");
+  tenv.run("function(){ window.__held = false; window.__wrapLine(solver); window.__hold.shift()(); }");
+  await turn();
+  const fl1 = tenv.run("function(){ return [solver.p.nx + 'x' + solver.p.ny, musicTraces.busy4, musicTraces.rows4.length].join(); }");
+  tenv.run("function(){ stateBumped(); musicTraces.sample(solver, 3000); }");
+  await turn();
+  const fl2 = tenv.run("function(){ return musicTraces.rows4.map(e => e.t + ':' + e.rows[0].length).join(); }");
+  ok("  ... and a line read still in flight when its solver is retired (a rebuild onto 256 x 256) lands on nothing: not pushed, the read no longer marked busy, and the next sample reads the NEW solver's line",
+     fl0 === "1,true,0" && fl1 === "256x256,false,0" && fl2 === "3000:256" && realFails(tenv).length === 0, fl0 + " | " + fl1 + " | " + fl2);
+}
+
 const LEGS = [
   ["1. music.js is pure and self-contained", legPure],
   ["2. musicBandPlan against the offline band_plan", legPlan],
@@ -2513,7 +4823,10 @@ const LEGS = [
   ["10. live sources and the delayed speaker branch (M3 / M4)", legLive],
   ["11. the review's findings and the output-latency sync, on the page", legFix],
   ["12. the fixed colour scale", legScale],
-  ["13. the effects: the rules against the offline script, and the page with its defaults", legEffects]
+  ["13. the effects: the rules against the offline script, and the page with its defaults", legEffects],
+  ["14. the fading traces (traces.js): the pure rules, the canvas, the schedule", legTraces],
+  ["15. the stage (?stage): the rules, the structure, and nothing of it without the flag", legStage],
+  ["16. the window-shaped box and the current sheets: the rectangular rules against the offline script, and the page", legShape]
 ];
 (async () => {
   const state = {};

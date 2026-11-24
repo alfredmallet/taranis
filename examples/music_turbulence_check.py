@@ -1,12 +1,16 @@
 # Gate for the variety effects of examples/music_turbulence.py (kick types E1, stereo
 # placement E2, the camera pulse E3, the mean field and its bass-hit walk E4, the zoom-out
-# re-grid E5, the section trigger; plans-webgpu/MUSIC_EFFECTS_PLAN.md). Not a pytest module: run it as
+# re-grid E5, the section trigger; plans-webgpu/MUSIC_EFFECTS_PLAN.md) and of the stage options (the
+# rectangular box S2 and the maintained current sheets S4; plans-webgpu/MUSIC_STAGE_PLAN.md).
+# Not a pytest module: run it as
 #
 #   TARANIS_PRECISION=64 python examples/music_turbulence_check.py
 #
 # It prints one line per check and exits non-zero if any fails. That the script with every
 # switch off still produces what it produced before the effects existed is NOT checked
-# here (it needs the earlier tree): it was checked once, bitwise, when they were added.
+# here (it needs the earlier tree): it was checked once, bitwise, when they were added --
+# and again for the stage options (seven configurations against the tree before them, at
+# both precisions: fields, energy and the movie file byte for byte).
 import os
 import sys
 import tempfile
@@ -673,6 +677,515 @@ def section_gates():
               len(r2["sections"]) == 0 and np.all(np.isfinite(r2["energy"])))
 
 
+def raises(fn, exc=ValueError):
+    try:
+        fn()
+    except exc:
+        return True
+    return False
+
+
+def stage_box_gates():
+    print("the box takes the picture's shape (S2)")
+    A = 16.0 / 9.0
+    # --- the box
+    check("box_for: 1 is exactly the square 2 pi box; 16:9 is long in x, 9:16 long in y, short side 2 pi",
+          mt.box_for(1.0) == (L, L) and mt.box_for() == (L, L) and mt.box_for(A) == (L * A, L)
+          and mt.box_for(1.0 / A)[0] == L and abs(mt.box_for(1.0 / A)[1] / (L * A) - 1.0) < 1e-15
+          and raises(lambda: mt.box_for(0.0)) and raises(lambda: mt.box_for(-2.0)))
+
+    # --- band plan
+    s0, n0 = mt.band_plan(256)
+    s1, n1 = mt.band_plan((256, 256), None, None, L, L)
+    check("band_plan, square default unchanged: 4 bands at 256^2, 0.45 down to 3.7 dx, 3/5/9/15 blobs",
+          np.array_equal(s0, s1) and np.array_equal(n0, n1) and len(s0) == 4 and s0[0] == 0.45
+          and s0[-1] == 3.7 * L / 256 and list(n0) == [3, 5, 9, 15]
+          # to the last bit, as the square formula 3.7 * L / n rounds it (not 3.7 * (L / n))
+          and all(mt.band_plan(n)[0][-1] == 0.45 * ((3.7 * L / n) / 0.45) ** 1.0 for n in range(100, 400))
+          and all(len(mt.band_plan(n)[0]) == k for n, k in ((256, 4), (512, 5), (1024, 6))),
+          f"sigmas {np.round(s0, 4)}, blobs {list(n0)}")
+    rows = []
+    for (nx, ny), asp, want in (((256, 256), A, L * A / 256),       # stretched cells: dx is larger
+                                ((512, 256), A, L / 256),           # dx = 0.89 dy: dy is larger
+                                ((256, 512), 1.0 / A, L / 256),     # portrait: dx is larger
+                                ((256, 128), A, L / 128),           # the light rung
+                                ((512, 256), 2.0, L / 256)):        # square cells
+        Lx, Ly = mt.box_for(asp)
+        sg, nb = mt.band_plan((nx, ny), None, None, Lx, Ly)
+        rows.append(abs(sg[-1] / (3.7 * want) - 1.0) < 1e-14 and sg[0] == 0.45
+                    and abs(want / max(Lx / nx, Ly / ny) - 1.0) < 1e-14
+                    and np.array_equal(nb, np.rint(3 * 0.45 / sg * Lx * Ly / L**2).astype(int)))
+    check("band_plan, rectangular: narrowest = 3.7 x the LARGER spacing, widest 0.45, on 5 box/grid pairs",
+          all(rows), f"{rows}")
+    s2, n2 = mt.band_plan((512, 256), None, None, 2.0 * L, L)
+    check("   ... a 2:1 box at the square's spacing has the square's widths and twice its blobs",
+          np.allclose(s2, s0, rtol=1e-14) and list(n2) == [6, 10, 17, 30] and n2.sum() > 1.9 * n0.sum(),
+          f"blobs {list(n2)} against {list(n0)}")
+    s3, _ = mt.band_plan((256, 256), None, None, L * A, L)
+    check("   ... 16:9 on 256^2 (stretched cells) has 3 bands: the narrowest blob is 3.7 x the long cell side",
+          len(s3) == 3 and abs(s3[-1] - 3.7 * L * A / 256) < 1e-14, f"sigmas {np.round(s3, 4)}")
+
+    # --- placement
+    Lx, Ly = 3.0 * L, L
+    r1, r2 = np.random.default_rng(5), np.random.default_rng(5)
+    a1, a2 = mt.blobs_for(r1, 0.1, 9, 1.0), mt.blobs_for(r2, 0.1, 9, 1.0, None, (L, L))
+    check("blobs_for(box = the square box) draws the stream it always drew", np.array_equal(a1, a2))
+    r1, r2 = np.random.default_rng(6), np.random.default_rng(6)
+    a1, a2 = mt.blobs_for(r1, 0.1, 9, 1.0), mt.blobs_for(r2, 0.1, 9, 1.0, None, (4.0 * L, L))
+    check("   ... and in a 4:1 box the SAME uniforms, x over Lx and y over Ly",
+          np.array_equal(4.0 * a1[:, 0], a2[:, 0]) and np.array_equal(a1[:, 1:], a2[:, 1:]))
+    rng = np.random.default_rng(3)
+    b = mt.blobs_for(rng, 0.1, 20000, 1.0, None, (Lx, Ly))
+    ks = lambda v, ell: np.abs(np.sort(v) / ell - (np.arange(len(v)) + 0.5) / len(v)).max()
+    check("blobs_for in a 3:1 box: x uniform over Lx, y uniform over Ly",
+          ks(b[:, 0], Lx) < 0.02 and ks(b[:, 1], Ly) < 0.02 and b[:, 0].max() > 0.99 * Lx and b[:, 1].max() < Ly,
+          f"KS x {ks(b[:, 0], Lx):.4f}, y {ks(b[:, 1], Ly):.4f}")
+    b = mt.blobs_for(rng, 0.1, 20000, 1.0, 0.9 * Lx, (Lx, Ly))
+    dx = (b[:, 0] - 0.9 * Lx + 0.5 * Lx) % Lx - 0.5 * Lx
+    check("   ... with xc: gaussian about xc of width 0.12 Lx, wrapped into [0, Lx)",
+          abs(dx.mean()) < 0.005 * Lx and abs(dx.std() / (mt.STEREO_JITTER * Lx) - 1.0) < 0.03
+          and b[:, 0].min() >= 0.0 and b[:, 0].max() < Lx and (b[:, 0] < 0.1 * Lx).any() and ks(b[:, 1], Ly) < 0.02,
+          f"std {dx.std() / Lx:.4f} Lx")
+    bd, bm = mt.kick_blobs(rng, "dipole", 0.45, 400, 1.0, None, 4.0, 1.0, (Lx, Ly))
+    d = bd[:400, 0:2] - bd[400:, 0:2]
+    d = (d + 0.5 * np.array([Lx, Ly])) % np.array([Lx, Ly]) - 0.5 * np.array([Lx, Ly])
+    check("dipole in a 3:1 box: both blobs inside the box, 1.5 sigma apart across either edge",
+          np.allclose(np.hypot(d[:, 0], d[:, 1]), 1.5 * 0.45) and bd[:, 0].min() >= 0 and bd[:, 0].max() < Lx
+          and bd[:, 0].max() > 2.5 * L and bd[:, 1].min() >= 0 and bd[:, 1].max() < Ly and np.array_equal(bd, bm))
+    for kind in ("elsasser", "vortex", "island", "sheet", "sheet-island"):
+        bp, _ = mt.kick_blobs(np.random.default_rng(8), kind, 0.1, 300, 1.0, None, 4.0, 1.0, (Lx, Ly))
+        if not (bp[:, 0].max() > 2.5 * L and bp[:, 1].max() < Ly):
+            check(f"{kind} in a 3:1 box is placed over the whole box", False)
+            break
+    else:
+        check("every kick type in a 3:1 box is placed over the whole box", True)
+
+    # --- the kick itself on a rectangular box, square cells (128 x 64) and stretched (128 x 128)
+    Lx, Ly = 2.0 * L, L
+    sigma, amp = 0.3, 0.7
+    for nx, ny in ((128, 64), (128, 128), (256, 64)):
+        p = jr.Parameters(nx=nx, ny=ny, Lx=Lx, Ly=Ly, cfl_safety=0.4, dims=2, comm_backend="serial",
+                          eqpars={"diss": (0.0, 0.0), "hyper": 4})
+        kg = jr.setup_kgrids(p)
+        kick, observe = mt.make_kick(p, kg)
+        zero = jnp.zeros((2, 1, nx, ny // 2 + 1), dtype=jnp.complex128)
+        x0, y0 = 1.6 * L, 0.3 * L                                    # x0 is outside a 2 pi box
+        b4 = np.array([[x0, y0, sigma, amp]])
+        f = kick(zero, mt.pad(b4), mt.pad(np.zeros((0, 4))))
+        e = float(observe(f)[2])
+        want = 0.5 * np.pi * (amp * sigma) ** 2 * np.e / (Lx * Ly) / 2.0      # one channel: phi = psi = z/2
+        z = np.asarray(mt.ifft(f, p))[0, 0]
+        i, j = np.unravel_index(np.argmax(z), z.shape)
+        gx = 2.0 * np.asarray(mt.ifft(1j * kg.kx * f, p))[0, 0]
+        check(f"blob at x = 1.6 * 2 pi in a 2:1 box on {nx} x {ny}: energy per unit AREA pi P^2/(4 Lx Ly), peak |grad| = amp, centred there",
+              abs(e / want - 1.0) < 1e-9 and abs(np.abs(gx).max() / amp - 1.0) < 5e-2
+              and abs(i * Lx / nx - x0) <= 0.51 * Lx / nx and abs(j * Ly / ny - y0) <= 0.51 * Ly / ny,
+              f"E ratio - 1 = {e / want - 1.0:+.1e}, peak {np.abs(gx).max() / amp:.4f} amp")
+        b6 = np.array([[x0, y0, sigma, amp, 1.0, 0.4]])
+        g = kick(zero, mt.pad(b6), mt.pad(np.zeros((0, 6))))
+        err = float(jnp.abs(f - g).max() / jnp.abs(f).max())
+        check("   ... and the k-space (sheet) kick at ratio 1 is the same kick", err < 1e-12, f"rel {err:.1e}")
+    # a sheet's length is along theta in BOX coordinates, cells stretched or not
+    nx, ny = 128, 128
+    p = jr.Parameters(nx=nx, ny=ny, Lx=Lx, Ly=Ly, cfl_safety=0.4, dims=2, comm_backend="serial",
+                      eqpars={"diss": (0.0, 0.0), "hyper": 4})
+    kg = jr.setup_kgrids(p)
+    kick, observe = mt.make_kick(p, kg)
+    X, Y = np.meshgrid(np.arange(nx) * Lx / nx, np.arange(ny) * Ly / ny, indexing="ij")
+    theta = 0.7
+    f = kick(jnp.zeros((2, 1, nx, ny // 2 + 1), dtype=jnp.complex128), mt.pad(np.array([[6.0, 3.0, 0.2, amp, 3.0, theta]])),
+             mt.pad(np.zeros((0, 6))))
+    z = 2.0 * np.asarray(mt.ifft(f, p))[0, 0]
+    w = (z - z.min()) ** 2
+    ddx, ddy = X - 6.0, Y - 3.0
+    along, across = np.cos(theta) * ddx + np.sin(theta) * ddy, -np.sin(theta) * ddx + np.cos(theta) * ddy
+    la, lc = np.sqrt((w * along**2).sum() / w.sum()), np.sqrt((w * across**2).sum() / w.sum())
+    check("a sheet on stretched cells (2:1 box, 128^2): length/width = 3 along theta in box coordinates",
+          abs(la / lc - 3.0) < 0.15, f"ratio {la / lc:.3f}")
+
+    # --- per unit area: the square state and its own two tiles in a 2:1 box
+    n = 64
+    p1, kg1, kick1, obs1 = setup(n)
+    p2 = jr.Parameters(nx=2 * n, ny=n, Lx=2.0 * L, Ly=L, cfl_safety=0.4, dims=2, comm_backend="serial",
+                       eqpars={"diss": (0.0, 0.0), "hyper": 4})
+    kick2, obs2 = mt.make_kick(p2, jr.setup_kgrids(p2))
+    rng = np.random.default_rng(11)
+    bp, bm = mt.blobs_for(rng, 0.4, 3, 1.0), mt.blobs_for(rng, 0.3, 4, 0.6)
+    two = lambda b: np.concatenate([b, b + np.array([L, 0.0, 0.0, 0.0])])
+    fa = from_rest(kick1, n, bp, bm)
+    fb = kick2(jnp.zeros((2, 1, 2 * n, n // 2 + 1), dtype=jnp.complex128), mt.pad(two(bp)), mt.pad(two(bm)))
+    (ia, ua, ea), (ib, ub, eb) = obs1(fa), obs2(fb)
+    pa, pb = np.percentile(np.asarray(ia["speed"]), 99.5), np.percentile(np.asarray(ib["speed"]), 99.5)
+    check("per unit area: a state and its two tiles in a 2:1 box have the same energy, peak speed and "
+          "colour-scale percentile (so the walk's sqrt(2E) is an rms)",
+          abs(float(eb) / float(ea) - 1.0) < 1e-9 and abs(float(ub) / float(ua) - 1.0) < 1e-9 and abs(pb / pa - 1.0) < 1e-2
+          and np.allclose(np.asarray(ib["speed"])[:n], np.asarray(ia["speed"]), atol=1e-9),
+          f"E ratio - 1 = {float(eb) / float(ea) - 1.0:+.1e}, umax ratio - 1 = {float(ub) / float(ua) - 1.0:+.1e}, "
+          f"percentile ratio {pb / pa:.5f} (4096 against 8192 samples)")
+
+    # --- dissipation
+    ck = mt.cutoff_k
+    check("cutoff_k: n/3 exactly on the square box; the smaller of the two cutoffs otherwise",
+          all(ck(n, n) == n / 3.0 for n in (64, 128, 256, 512))
+          and abs(ck(256, 256, L * A, L) - 48.0) < 1e-12              # x: (256/3)/(16/9)
+          and abs(ck(512, 256, L * A, L) - 256 / 3.0) < 1e-12         # y: x would be 96
+          and abs(ck(256, 512, *mt.box_for(1.0 / A)) - 256 / 3.0) < 1e-12
+          and abs(ck(256, 128, L * A, L) - 128 / 3.0) < 1e-12,
+          f"16:9: 256^2 -> {ck(256, 256, L * A, L):.2f}, 512x256 -> {ck(512, 256, L * A, L):.2f}")
+    rows = []
+    for (nx, ny), asp in (((96, 96), A), ((192, 96), A), ((96, 192), 1.0 / A), ((96, 96), 1.0)):
+        Lx, Ly = mt.box_for(asp)
+        p = jr.Parameters(nx=nx, ny=ny, Lx=Lx, Ly=Ly, cfl_safety=0.4, dims=2, comm_backend="serial",
+                          eqpars={"diss": (0.0, 0.0), "hyper": 4})
+        kg = jr.setup_kgrids(p)
+        mask = np.asarray(kg.dealias).reshape(nx, ny // 2 + 1) > 0
+        kxm = np.abs(np.asarray(kg.kx).reshape(nx, -1)[:, 0])[mask[:, 0]].max()
+        kym = np.asarray(kg.ky).reshape(-1, ny // 2 + 1)[0][mask[0]].max()
+        # the solver's own mask: the last retained mode of the coarser axis is within one mode of it
+        dk = 2 * np.pi / (Lx if kxm < kym else Ly)
+        rows.append((round(float(min(kxm, kym)), 3), round(float(ck(nx, ny, Lx, Ly)), 3),
+                     -1e-9 <= ck(nx, ny, Lx, Ly) - min(kxm, kym) <= dk))
+    check("   ... it is the solver's own dealiasing edge (the last retained mode of the coarser axis, within one mode)",
+          all(r[2] for r in rows), " ".join(f"{a}/{b}" for a, b, _ in rows))
+
+    # --- the frame
+    fs = mt.frame_shape
+    check("frame_shape: the grid itself for square cells; else the box's shape at the finer spacing, even sides",
+          fs(256, 256) == (256, 256) and fs(512, 256, 2.0 * L, L) == (512, 256)
+          and fs(256, 256, L * A, L) == (456, 256) and fs(512, 256, L * A, L) == (512, 288)
+          and fs(256, 256, *mt.box_for(1.0 / A)) == (256, 456) and fs(128, 128, L * A, L) == (228, 128)
+          and fs(128, 64, L * A, L) == (128, 72),
+          f"16:9: 256^2 -> {fs(256, 256, L * A, L)}, 512x256 -> {fs(512, 256, L * A, L)}")
+    u = np.random.default_rng(0).standard_normal((64, 64))
+    fx = lambda r, c: np.cos(2 * np.pi * r + 0.3) * np.sin(4 * np.pi * c)      # r, c in [0, 1): the box
+    rr, cc = np.meshgrid((np.arange(64) + 0.5) / 64, (np.arange(96) + 0.5) / 96, indexing="ij")
+    r2, c2 = np.meshgrid((np.arange(64) + 0.5) / 64, (np.arange(170) + 0.5) / 170, indexing="ij")
+    out = mt.resample_frame(fx(rr, cc), (64, 170))
+    err = np.abs(out - fx(r2, c2)).max()
+    check("resample_frame: the same shape is the image itself; otherwise the whole box on the new pixels (bilinear, periodic)",
+          mt.resample_frame(u, (64, 64)) is u and out.shape == (64, 170) and err < (4 * np.pi / 96) ** 2 / 8 * 1.05,
+          f"max error {err:.1e}")
+
+    # --- the re-grid on nx != ny
+    # (wide blobs on 256 x 128, so that every mode with any amplitude survives the doubling,
+    # as in regrid_gates)
+    nx, ny = 256, 128
+    p = jr.Parameters(nx=nx, ny=ny, Lx=2.0 * L, Ly=L, cfl_safety=0.4, dims=2, comm_backend="serial",
+                      eqpars={"diss": (0.0, 0.0), "hyper": 4})
+    kg = jr.setup_kgrids(p)
+    kick, observe = mt.make_kick(p, kg)
+    rng = np.random.default_rng(3)
+    f = np.asarray(kick(jnp.zeros((2, 1, nx, ny // 2 + 1), dtype=jnp.complex128),
+                        mt.pad(mt.blobs_for(rng, 0.4, 3, 1.0, None, (2.0 * L, L))),
+                        mt.pad(mt.blobs_for(rng, 0.4, 3, 1.0, None, (2.0 * L, L)))))
+    g = mt.regrid(f, kg.dealias)
+    real = lambda a: np.fft.irfft2(a[:, 0], s=(nx, ny))
+    ix, jy = np.fft.fftfreq(nx, 1.0 / nx)[:, None], np.arange(ny // 2 + 1)[None, :]
+    shifted = real(f * np.exp(-1j * (np.pi * (nx - 1) / nx * ix + np.pi * (ny - 1) / ny * jy)))
+    err = np.abs(real(g) - 0.5 * shifted[:, (2 * np.arange(nx)) % nx][:, :, (2 * np.arange(ny)) % ny]).max() / np.abs(real(g)).max()
+    e0, e1 = float(observe(jnp.asarray(f))[2]), float(observe(jnp.asarray(g))[2])
+    check("regrid on 256 x 128 (2:1 box): g(x) = f(2x - x_c)/2 at every grid point, energy unchanged",
+          err < 1e-9 and abs(e1 / e0 - 1.0) < 1e-9, f"rel {err:.1e}, E ratio - 1 = {e1 / e0 - 1.0:+.1e}")
+
+    # --- the driver on a rectangular box
+    import imageio
+    sr, lr = mt.click_track(duration=4.0, stereo=True)
+    mono = lr.mean(axis=1)
+    with tempfile.TemporaryDirectory() as tmp:
+        r_sq = mt.run(sr, mono, os.path.join(tmp, "sq.mp4"), n=64, quiet=True)
+        r_1 = mt.run(sr, mono, os.path.join(tmp, "sq1.mp4"), n=32, grid=(64, 64), aspect=1.0, quiet=True)
+        same = open(os.path.join(tmp, "sq.mp4"), "rb").read() == open(os.path.join(tmp, "sq1.mp4"), "rb").read()
+        check("run(aspect=1, grid=(n, n)) IS run(n=n): fields, energy and the movie file byte for byte; diss = 48/(n/3)^8",
+              np.array_equal(r_sq["fields"], r_1["fields"]) and np.array_equal(r_sq["energy"], r_1["energy"]) and same
+              and r_sq["diss"] == 48.0 / (64 / 3.0) ** 8 and r_sq["frame"] == (64, 64) and r_sq["box"] == (L, L)
+              and r_sq["sheets"] is None)
+        seen = []
+        orig = mt.kick_blobs
+
+        def spy(rng, kind, sigma, nblob, amp, xc=None, *rest):
+            seen.append((round(float(sigma), 6), nblob, xc, rest))
+            return orig(rng, kind, sigma, nblob, amp, xc, *rest)
+        mt.kick_blobs = spy
+        try:
+            kw = dict(grid=(128, 64), aspect=2.0, nbands=4, quiet=True, kick_types="variety", stereo=lr, stereo_gain=1.0)
+            r = mt.run(sr, mono, os.path.join(tmp, "r.mp4"), **kw)
+        finally:
+            mt.kick_blobs = orig
+        Lx = 2.0 * L
+        full = lambda q: 2.0 * q / (1.0 + q * q)
+        spots = 0.5 + 0.4 * np.array([full(0.8), -full(0.8), full(-0.6)])
+        top = np.array([s[2] for s in seen if s[0] == round(float(r["sigmas"][3]), 6)])
+        counts = {s[0]: s[1] for s in seen}
+        size = imageio.get_reader(os.path.join(tmp, "r.mp4")).get_meta_data()["size"]
+        check("run on a 2:1 box, 128 x 64: stereo pan maps onto x over Lx (hats at Lx (0.5 + 0.4 pan)), the box goes to every kick",
+              len(top) >= 6 and np.abs(top[:, None] / Lx - spots[None, :]).min(axis=1).max() < 0.01
+              and top.max() > 1.5 * L and all(s[3][-1] == (Lx, L) for s in seen),
+              f"hat centres {np.round(np.unique(np.round(top / Lx, 2)), 2)} Lx")
+        check("   ... blob counts are the square's times 2, diss is pinned at the smaller cutoff, the frame is 128 x 64",
+              [counts[round(float(s), 6)] for s in r["sigmas"]] == list(r["nblobs"])
+              and np.array_equal(r["nblobs"], np.rint(2 * 3 * 0.45 / r["sigmas"]).astype(int))
+              and abs(r["diss"] / (48.0 / (64 / 3.0) ** 8) - 1.0) < 1e-14 and r["frame"] == (128, 64) and tuple(size) == (128, 64)
+              and r["fields"].shape == (2, 1, 128, 33) and np.all(np.isfinite(r["energy"])) and r["energy"].max() > 0,
+              f"blobs {list(r['nblobs'])}, diss {r['diss']:.3e}, movie {tuple(size)}")
+        # stretched cells, the pulse and the zoom-out together
+        kw = dict(n=128, aspect=A, quiet=True, duration=3.0)
+        ra = mt.run(sr, mono, os.path.join(tmp, "a.mp4"), **kw)
+        rb = mt.run(sr, mono, os.path.join(tmp, "b.mp4"), pulse=0.08, **kw)
+        rc = mt.run(sr, mono, os.path.join(tmp, "c.mp4"), pulse=0.08, zoom_out=1.0, grid=(128, 64), **kw)
+        sa = imageio.get_reader(os.path.join(tmp, "a.mp4")).get_meta_data()["size"]
+        sc = imageio.get_reader(os.path.join(tmp, "c.mp4")).get_meta_data()["size"]
+        differ = open(os.path.join(tmp, "a.mp4"), "rb").read() != open(os.path.join(tmp, "b.mp4"), "rb").read()
+        check("16:9 on 128^2 (stretched cells): the movie is 228 x 128, diss pinned at k = 24; the pulse leaves the flow alone",
+              tuple(sa) == (228, 128) and ra["frame"] == (228, 128) and abs(ra["diss"] / (48.0 / 24.0 ** 8) - 1.0) < 1e-13
+              and np.array_equal(ra["fields"], rb["fields"]) and differ and np.all(np.isfinite(ra["energy"])),
+              f"movie {tuple(sa)}, diss {ra['diss']:.3e}")
+        check("   ... and the zoom-out re-grids a 128 x 64 grid in a 16:9 box: twice, finite, each keeping most of the energy",
+              [t for t, _ in rc["regrids"]] == [1.0, 2.0] and all(0.3 < q <= 1.0 + 1e-6 for _, q in rc["regrids"])
+              and np.all(np.isfinite(rc["energy"])) and tuple(sc) == (128, 72),
+              "energy kept " + " ".join(f"{q:.3f}" for _, q in rc["regrids"]) + f", movie {tuple(sc)}")
+        # the walk in a rectangular box: |B0| = r sqrt(2 E), E per unit area
+        rw = mt.run(sr, mono, os.path.join(tmp, "w.mp4"), grid=(128, 64), aspect=2.0, nbands=4, quiet=True,
+                    field_walk=30.0, mean_field_b0=1.5, ratio_walk=2.0)
+        tr, en = rw["walk"], rw["energy"]
+        t_on = rw["onsets"][0]
+        fps = rw["fps"]
+        q = np.array([i for i in range(1, len(tr)) if not np.any((t_on > (i - 1) / fps) & (t_on <= i / fps))])
+        rel = np.abs(tr[q, 2] - tr[q, 1] * np.sqrt(2.0 * en[q - 1])) / np.maximum(tr[q, 2], 1e-30)
+        check("the walking field on a 2:1 box: runs, and |B0| = r sqrt(2 E) of the volume-averaged energy",
+              len(q) > 50 and rel.max() < 1e-12 and tr[:, 2].max() > 0.05 and np.all(np.isfinite(en)),
+              f"{len(q)} frames, rel {rel.max():.1e}")
+
+
+def stage_sheet_gates():
+    print("current sheets as a background (S4)")
+    # --- the equilibrium
+    Lx, a, amp, strength = 2.0 * L, 0.4, 0.7, 1.5
+    psi0 = mt.sheet_psi0(strength, amp, a)
+    x = np.linspace(0.0, Lx, 400001)
+    psi = np.asarray(mt.sheet_equilibrium(x, Lx, psi0, a))
+    b = np.gradient(psi, x)
+    trap = lambda v, q: float(np.sum(0.5 * (v[1:] + v[:-1]) * np.diff(q)))
+    xp = x[np.argmax(np.abs(b))]
+    check("sheet_psi0: the peak field of psi0 sech^2((x - Lx/2)/a) is strength * amp, at tanh^2 = 1/3",
+          abs(np.abs(b).max() / (strength * amp) - 1.0) < 1e-6 and abs(np.tanh((xp - 0.5 * Lx) / a) ** 2 - 1.0 / 3.0) < 1e-3
+          and abs(psi0 / (0.75 * np.sqrt(3.0) * a * strength * amp) - 1.0) < 1e-15,
+          f"peak {np.abs(b).max():.8f} vs {strength * amp}")
+    e_num = 0.5 * trap(b * b, x) / Lx
+    check("   ... its energy per unit area is 8 psi0^2/(15 a Lx); psi peaks at Lx/2; no net field; periodic",
+          abs(e_num / mt.sheet_energy_eq(psi0, a, Lx) - 1.0) < 1e-6 and abs(x[np.argmax(psi)] - 0.5 * Lx) < 1e-4
+          and abs(trap(b, x)) < 1e-12 and abs(psi[0] - psi[-1]) < 1e-15 and abs(b[1] + b[-2]) < 1e-12
+          and b[np.argmin(np.abs(x - 0.4 * Lx))] > 0 > b[np.argmin(np.abs(x - 0.6 * Lx))],
+          f"E ratio - 1 = {e_num / mt.sheet_energy_eq(psi0, a, Lx) - 1.0:+.1e}")
+
+    # --- the two halves of the source
+    n = 64
+    nu = 3e-9
+    st = mt.Stepper(n, 1.0 / 120.0, nu, 4, source=True)
+    col = np.asarray(jr.initialize(lambda x, y: jnp.stack([0.0 * x + 0.0 * y, mt.sheet_equilibrium(x, L, 1.0, 0.5) + 0.0 * y]),
+                                   st.p).fields)[1, 0, :, 0]
+    refused = raises(lambda: st.advance(None, 1.0, 1.0))
+    st.set_equilibrium(col)
+    kx = np.fft.fftfreq(n, 1.0 / n)
+    src = np.asarray(st.src)
+    want = nu * kx ** 8 * col
+    rest = src.copy()
+    rest[1, 0, :, 0] = 0.0
+    check("set_equilibrium: the source is +nu k^8 psi_eq on psi's k_y = 0 column (-L psi_eq), zero elsewhere",
+          np.abs(src[1, 0, :, 0] - want).max() <= 1e-14 * np.abs(want).max() and np.abs(want).max() > 0 and not np.any(rest)
+          and src.shape == (2, 1, n, n // 2 + 1))
+    f = np.random.default_rng(0).standard_normal((2, 1, n, n // 2 + 1)) + 0j
+    g = np.asarray(mt.drag(jnp.asarray(f), 0.9, jnp.asarray(col)))
+    g0 = np.asarray(mt.drag(jnp.asarray(f), 0.9))
+    other = g.copy(); other[1, 0, :, 0] = g0[1, 0, :, 0]
+    check("drag: without an equilibrium fields * decay; with one, psi's column relaxes TO it and nothing else changes",
+          np.array_equal(g0, f * 0.9) and np.array_equal(other, g0)
+          and np.abs(g[1, 0, :, 0] - (col + (f[1, 0, :, 0] - col) * 0.9)).max() < 1e-13
+          and np.abs(np.asarray(mt.drag(jnp.asarray(g0 * 0 + 0j).at[1, 0, :, 0].set(col), 0.5, jnp.asarray(col)))[1, 0, :, 0] - col).max() < 1e-15)
+    check("Stepper(source=True): advance before set_equilibrium, and a mean field with it, are errors; so is set_equilibrium without it",
+          refused and raises(lambda: mt.Stepper(32, 1.0 / 120.0, 0.0, 4, b0="driven", source=True))
+          and raises(lambda: mt.Stepper(32, 1.0 / 120.0, 0.0, 4, b0=mt.mean_field(0.5, 0.0, [], []), source=True))
+          and raises(lambda: mt.Stepper(32, 1.0 / 120.0, 0.0, 4).set_equilibrium(col[:32])))
+
+    # --- stationary with the drag on and no kicks; the control decays at the drag rate
+    sr = 22050
+    silent = np.zeros(6 * sr)
+    with tempfile.TemporaryDirectory() as tmp:
+        kw = dict(n=128, quiet=True, sheets=1.5)
+        r = mt.run(sr, silent, os.path.join(tmp, "s.mp4"), **kw)
+        c = mt.run(sr, silent, os.path.join(tmp, "c.mp4"), sheets_source=False, **kw)
+        e, ec, info = r["energy"], c["energy"], r["sheets"]
+        f = r["fields"]
+        colerr = np.abs(f[1, 0, :, 0] - info["psi_eq"]).max() / np.abs(info["psi_eq"]).max()
+        a_want = 2.0 * 3.7 * L / 128
+        check("run(sheets=1.5), 6 s of silence, drag on: no kick, the energy and the state do not move",
+              len(r["onsets"][0]) == 0 and len(e) == 180 and np.abs(e / e[0] - 1.0).max() < 1e-10 and colerr < 1e-10
+              and not np.any(f[0]) and not np.any(f[1][:, :, 1:]) and r["nsteps"] > 300,
+              f"max |E/E0 - 1| = {np.abs(e / e[0] - 1.0).max():.1e}, state rel {colerr:.1e}, {r['nsteps']} steps")
+        check("   ... and it IS the requested equilibrium: a = 2 x the narrowest blob, peak field 1.5 amp, energy 8 psi0^2/(15 a Lx)",
+              abs(info["a"] / a_want - 1.0) < 1e-14 and abs(info["psi0"] / mt.sheet_psi0(1.5, 1.0, a_want) - 1.0) < 1e-14
+              and abs(e[0] / info["energy"] - 1.0) < 1e-8 and abs(r["umax"][0] / 1.5 - 1.0) < 2e-3,
+              f"E0/E_eq - 1 = {e[0] / info['energy'] - 1.0:+.1e}, peak field {r['umax'][0]:.4f}")
+        # a frame is observed up to one step after its time: `late` is by how much (the
+        # events of a silent run are its frames)
+        tf = np.arange(len(ec)) / 30.0 + c["late"]
+        dev = np.abs(ec / (ec[0] * np.exp(-tf)) - 1.0)
+        check("the control, the same run WITHOUT the source: the sheets decay at the drag rate, E = E0 exp(-t/memory)",
+              dev.max() < 1e-3 and ec[-1] / ec[0] < 3e-3 and np.array_equal(c["sheets"]["psi_eq"], info["psi_eq"]),
+              f"E(3 s)/E0 = {ec[90] / ec[0]:.5f} vs {np.exp(-tf[90]):.5f}; E(6 s)/E0 = {ec[-1] / ec[0]:.2e}; "
+              f"max deviation from the exponential {dev.max():.1e}")
+        m = mt.run(sr, silent[:3 * sr], os.path.join(tmp, "m.mp4"), memory=2.0, sheets_source=False, **kw)
+        devm = np.abs(m["energy"] / (m["energy"][0] * np.exp(-(np.arange(len(m["energy"])) / 30.0 + m["late"]) / 2.0)) - 1.0)
+        check("   ... at memory = 2 the control decays half as fast (it is the drag, not the hyperviscosity)",
+              devm.max() < 1e-3 and 0.2 < m["energy"][-1] / m["energy"][0] < 0.25, f"max deviation {devm.max():.1e}")
+        nd = mt.run(sr, silent[:3 * sr], os.path.join(tmp, "n.mp4"), memory=None, **kw)
+        nc = mt.run(sr, silent[:3 * sr], os.path.join(tmp, "nc.mp4"), memory=None, sheets_source=False, **kw)
+        lost = 1.0 - nc["energy"][-1] / nc["energy"][0]
+        check("   ... and with no drag at all: maintained, stationary; not maintained, the hyperviscosity alone erodes them "
+              "(the other half of the source)",
+              np.abs(nd["energy"] / nd["energy"][0] - 1.0).max() < 1e-10 and 1e-5 < lost < 1e-3
+              and np.all(np.diff(nc["energy"]) < 0), f"unmaintained: 1 - E(3 s)/E0 = {lost:.1e}")
+
+        # --- kicked, then left alone
+        x = np.zeros(12 * sr)
+        x[sr:2 * sr] = mt.click_track(duration=1.0, sr=sr)[1]
+        k = mt.run(sr, x, os.path.join(tmp, "k.mp4"), **kw)
+        kc = mt.run(sr, x, os.path.join(tmp, "kc.mp4"), sheets_source=False, **kw)
+        ek, ekc = k["energy"] / info["energy"], kc["energy"] / info["energy"]
+        t_last = k["onsets"][0].max()
+        colk = np.abs(k["fields"][1, 0, :, 0] - info["psi_eq"]).max() / np.abs(info["psi_eq"]).max()
+        check("kicked for 1 s, then 10 s alone: the energy jumps, then relaxes back to the equilibrium's (within 5%)",
+              len(k["onsets"][0]) >= 4 and t_last < 2.0 and ek.max() > 1.5 and abs(ek[-1] - 1.0) < 0.05
+              and abs(ek[-1] - 1.0) < 0.25 * np.abs(ek[90:181] - 1.0).max() and colk < 0.1,
+              f"E/E_eq: peak {ek.max():.2f}, at 3 s {ek[90]:.3f}, 6 s {ek[180]:.3f}, 12 s {ek[-1]:.4f}; psi_eq column off by {colk:.1e}")
+        check("   ... the control without the source goes to nothing instead", ekc.max() > 1.5 and ekc[-1] < 1e-2,
+              f"E/E_eq at 12 s {ekc[-1]:.1e}")
+        check("   ... and the kicks never entered psi_eq: it is the silent run's, bit for bit, though psi's column was kicked",
+              np.array_equal(k["sheets"]["psi_eq"], info["psi_eq"])
+              and np.abs(np.fft.ifft(k["fields"][1, 0, :, 0] - info["psi_eq"])).max() > 1e-6 * np.abs(np.fft.ifft(info["psi_eq"])).max())
+
+        # --- width, strength, a rectangular box, the phase-2 look
+        w4 = mt.run(sr, silent[:sr], os.path.join(tmp, "w.mp4"), n=128, quiet=True, sheets=0.5, sheets_width=4.0, amp=2.0)
+        check("sheets=0.5, sheets_width=4, amp=2: a = 4 x the narrowest blob, peak field 0.5 * 2",
+              abs(w4["sheets"]["a"] / (4.0 * 3.7 * L / 128) - 1.0) < 1e-14 and abs(w4["umax"][0] / 1.0 - 1.0) < 2e-3
+              and abs(w4["energy"][-1] / w4["energy"][0] - 1.0) < 1e-10, f"peak field {w4['umax'][0]:.4f}")
+        rr = mt.run(sr, silent[:sr], os.path.join(tmp, "r.mp4"), grid=(256, 128), aspect=2.0, quiet=True, sheets=1.5)
+        prof = np.fft.ifft(rr["sheets"]["psi_eq"]).real
+        check("sheets in a 2:1 box (256 x 128): centred on Lx/2, vary along x only, stationary, energy 8 psi0^2/(15 a Lx)",
+              np.argmax(prof) == 128 and abs(rr["energy"][0] / mt.sheet_energy_eq(rr["sheets"]["psi0"], rr["sheets"]["a"], 2.0 * L) - 1.0) < 1e-8
+              and abs(rr["energy"][-1] / rr["energy"][0] - 1.0) < 1e-10 and not np.any(rr["fields"][1][:, :, 1:]),
+              f"E0 {rr['energy'][0]:.5f}")
+        _, lr = mt.click_track(duration=3.0, sr=sr, stereo=True)
+        v = mt.run(sr, lr.mean(axis=1), os.path.join(tmp, "v.mp4"), n=128, quiet=True,
+                   sheets=1.5, kick_types="variety", stereo=lr, stereo_gain=2.0, pulse=0.08, sheet_energy=2.0)
+        check("sheets with variety kicks, stereo placement and the pulse: runs to the end, finite, above the equilibrium's energy",
+              np.all(np.isfinite(v["energy"])) and v["energy"].max() > 1.05 * v["energy"][0]
+              and abs(v["energy"][0] / v["sheets"]["energy"] - 1.0) < 1e-8 and len(v["onsets"][0]) > 10,
+              f"E/E_eq up to {v['energy'].max() / v['sheets']['energy']:.2f}")
+
+        # --- two backgrounds are refused
+        base = dict(n=64, quiet=True, sheets=1.5)
+        go = lambda **kw2: mt.run(sr, silent[:sr], os.path.join(tmp, "x.mp4"), **{**base, **kw2})
+        check("sheets with mean_field_b0, with field_walk, with the walking field + ratio_walk, or with ratio_walk: ValueError",
+              raises(lambda: go(mean_field_b0=0.5)) and raises(lambda: go(field_walk=30.0))
+              and raises(lambda: go(mean_field_b0=1.5, field_walk=30.0, ratio_walk=2.0)) and raises(lambda: go(ratio_walk=0.3)))
+        ok = go(sheets=0.0, mean_field_b0=1.5, field_walk=30.0, ratio_walk=2.0)
+        check("   ... each of them runs without sheets, and sheets alone run; negative sheets or a zero width are errors",
+              ok["sheets"] is None and ok["walk"] is not None and go()["sheets"] is not None
+              and go(sheets=0.0, mean_field_b0=0.5)["sections"] is not None
+              and raises(lambda: go(sheets=-1.0)) and raises(lambda: go(sheets_width=0.0)))
+
+
+def stage_harris_gates():
+    print("current sheets, the harris profile (S4)")
+    # --- the profile: B_y = +d psi/dx (B = zhat x grad psi, the script's convention)
+    Lx, a, b0 = 2.0 * L, 0.3, 2.1
+    x = np.linspace(0.0, Lx, 400001)
+    psi = np.asarray(mt.sheet_harris(x, Lx, b0, a))
+    by = np.gradient(psi, x)
+    c = mt.harris_slope(a, Lx)
+    want = b0 * (np.tanh((x - 0.25 * Lx) / a) - np.tanh((x - 0.75 * Lx) / a) - c)
+    trap = lambda v, q: float(np.sum(0.5 * (v[1:] + v[:-1]) * np.diff(q)))
+    at = lambda q: by[np.argmin(np.abs(x - q * Lx))]
+    check("sheet_harris: d psi/dx = b0 [tanh((x - Lx/4)/a) - tanh((x - 3Lx/4)/a) - c], c = 1 to e^(-Lx/2a)",
+          np.abs(by - want)[1:-1].max() < 1e-7 * b0 and 0.0 < 1.0 - c < 4.0 * np.exp(-0.5 * Lx / a) and 1.0 - c > 1e-12,
+          f"max error {np.abs(by - want)[1:-1].max():.1e}, 1 - c = {1.0 - c:.1e}")
+    check("   ... the field is -b0 outside the sheets, +b0 between them, zero AT them, and b0 is its peak",
+          abs(at(0.0) + b0) < 1e-6 and abs(at(0.5) - b0) < 1e-6 and abs(at(0.999) + b0) < 1e-6
+          and abs(at(0.25)) < 1e-3 and abs(at(0.75)) < 1e-3 and abs(np.abs(by).max() / b0 - 1.0) < 1e-6,
+          f"B_y at 0, Lx/2: {at(0.0):+.6f}, {at(0.5):+.6f}; max |B| / b0 = {np.abs(by).max() / b0:.8f}")
+    e_num = 0.5 * trap(by * by, x) / Lx
+    check("   ... energy (b0^2/2)(1 - 4a/Lx); exactly periodic psi; no net flux; currents of opposite sign at the two sheets",
+          abs(e_num / mt.harris_energy_eq(b0, a, Lx) - 1.0) < 1e-6 and abs(psi[0] - psi[-1]) < 1e-13 * np.abs(psi).max()
+          and abs(trap(by, x)) < 1e-9 and np.gradient(by, x)[100000] > 0 > np.gradient(by, x)[300000]
+          and 0.9 * 0.5 * b0**2 < e_num < 0.5 * b0**2,
+          f"E ratio - 1 = {e_num / mt.harris_energy_eq(b0, a, Lx) - 1.0:+.1e}, psi(Lx) - psi(0) = {psi[-1] - psi[0]:.1e}")
+    u = np.array([-800.0, -3.0, 0.0, 0.5, 900.0])
+    check("log_cosh: ln cosh where cosh does not overflow, |u| - ln 2 where it would",
+          np.allclose(np.asarray(mt.log_cosh(u))[1:4], np.log(np.cosh(u[1:4])), rtol=0, atol=1e-15)
+          and np.allclose(np.asarray(mt.log_cosh(u))[[0, 4]], np.abs(u[[0, 4]]) - np.log(2.0), rtol=1e-15))
+
+    sr = 22050
+    silent = np.zeros(6 * sr)
+    with tempfile.TemporaryDirectory() as tmp:
+        kw = dict(n=128, quiet=True, sheets=3.0, sheets_profile="harris")
+        r = mt.run(sr, silent, os.path.join(tmp, "s.mp4"), **kw)
+        c0 = mt.run(sr, silent, os.path.join(tmp, "c.mp4"), sheets_source=False, **kw)
+        e, ec, info = r["energy"], c0["energy"], r["sheets"]
+        f = r["fields"]
+        colerr = np.abs(f[1, 0, :, 0] - info["psi_eq"]).max() / np.abs(info["psi_eq"]).max()
+        a_want = 2.0 * 3.7 * L / 128
+        prof = np.fft.ifft(info["psi_eq"]).real / 128                 # psi_eq(x): the rfft2 column is ny times it
+        byg = np.fft.ifft(1j * np.fft.fftfreq(128, 1.0 / 128) * info["psi_eq"]).real / 128
+        check("run(sheets=3, harris), 6 s of silence, drag on: no kick, the energy and the state do not move",
+              len(r["onsets"][0]) == 0 and len(e) == 180 and np.abs(e / e[0] - 1.0).max() < 1e-10 and colerr < 1e-10
+              and not np.any(f[0]) and not np.any(f[1][:, :, 1:]) and r["nsteps"] > 300,
+              f"max |E/E0 - 1| = {np.abs(e / e[0] - 1.0).max():.1e}, state rel {colerr:.1e}, {r['nsteps']} steps")
+        check("   ... and it IS the requested equilibrium: a = 2 x the narrowest blob, field +-3 amp reversing at Lx/4 and 3Lx/4, "
+              "energy (b0^2/2)(1 - 4a/Lx)",
+              info["profile"] == "harris" and info["b0"] == 3.0 and info["psi0"] is None and abs(info["a"] / a_want - 1.0) < 1e-14
+              and abs(e[0] / info["energy"] - 1.0) < 1e-3 and abs(e[0] / mt.harris_energy_eq(3.0, a_want, L) - 1.0) < 1e-3
+              and abs(byg[0] + 3.0) < 1e-2 and abs(byg[64] - 3.0) < 1e-2 and abs(byg[32]) < 1e-3 and abs(byg[96]) < 1e-3
+              and abs(r["umax"][0] / 3.0 - 1.0) < 1e-2 and e[0] > 3.0,
+              f"E0 = {e[0]:.4f} vs {info['energy']:.4f}; B_y at 0, Lx/2: {byg[0]:+.4f}, {byg[64]:+.4f}; peak field {r['umax'][0]:.4f}")
+        tf = np.arange(len(ec)) / 30.0 + c0["late"]
+        dev = np.abs(ec / (ec[0] * np.exp(-tf)) - 1.0)
+        check("the control, harris WITHOUT the source: the sheets decay at the drag rate, E = E0 exp(-t/memory)",
+              dev.max() < 1e-3 and ec[-1] / ec[0] < 3e-3 and np.array_equal(c0["sheets"]["psi_eq"], info["psi_eq"]),
+              f"E(6 s)/E0 = {ec[-1] / ec[0]:.2e}; max deviation from the exponential {dev.max():.1e}")
+        nd = mt.run(sr, silent[:3 * sr], os.path.join(tmp, "n.mp4"), memory=None, **kw)
+        nc = mt.run(sr, silent[:3 * sr], os.path.join(tmp, "nc.mp4"), memory=None, sheets_source=False, **kw)
+        lost = 1.0 - nc["energy"][-1] / nc["energy"][0]
+        check("   ... with no drag: maintained, stationary; not maintained, the hyperviscosity erodes the tanh layers",
+              np.abs(nd["energy"] / nd["energy"][0] - 1.0).max() < 1e-10 and lost > 1e-7 and np.all(np.diff(nc["energy"]) < 0),
+              f"unmaintained: 1 - E(3 s)/E0 = {lost:.1e}")
+        x = np.zeros(4 * sr)
+        x[sr:2 * sr] = mt.click_track(duration=1.0, sr=sr)[1]
+        k = mt.run(sr, x, os.path.join(tmp, "k.mp4"), **kw)
+        moved = np.abs(np.fft.ifft(k["fields"][1, 0, :, 0] - info["psi_eq"])).max() / np.abs(np.fft.ifft(info["psi_eq"])).max()
+        check("kicked: psi_eq is the silent run's bit for bit, though psi's column was kicked; the run stays finite",
+              len(k["onsets"][0]) >= 4 and np.array_equal(k["sheets"]["psi_eq"], info["psi_eq"]) and moved > 1e-6
+              and np.all(np.isfinite(k["energy"])) and k["energy"].max() > k["energy"][0],
+              f"column moved by {moved:.1e} of psi_eq, E/E_eq up to {k['energy'].max() / k['energy'][0]:.3f}")
+        rr = mt.run(sr, silent[:sr], os.path.join(tmp, "r.mp4"), grid=(256, 128), aspect=2.0, quiet=True, sheets=2.0,
+                    sheets_profile="harris")
+        byr = np.fft.ifft(1j * np.fft.fftfreq(256, 1.0 / 256) * (2 * np.pi / (2.0 * L)) * rr["sheets"]["psi_eq"]).real / 128
+        check("harris in a 2:1 box (256 x 128): reverses at Lx/4 and 3Lx/4 of the LONG side, +-2 away from them, stationary, "
+              "energy (b0^2/2)(1 - 4a/Lx)",
+              abs(byr[64]) < 1e-6 and abs(byr[192]) < 1e-6 and abs(byr[128] - 2.0) < 1e-2 and abs(byr[0] + 2.0) < 1e-2
+              and abs(rr["energy"][0] / mt.harris_energy_eq(2.0, rr["sheets"]["a"], 2.0 * L) - 1.0) < 1e-3
+              and abs(rr["energy"][-1] / rr["energy"][0] - 1.0) < 1e-10 and not np.any(rr["fields"][1][:, :, 1:]),
+              f"E0 {rr['energy'][0]:.4f} vs {mt.harris_energy_eq(2.0, rr['sheets']['a'], 2.0 * L):.4f}")
+        b1 = mt.run(sr, silent[:sr], os.path.join(tmp, "b.mp4"), n=128, quiet=True, sheets=1.5)
+        go = lambda **kw2: mt.run(sr, silent[:sr], os.path.join(tmp, "x.mp4"), n=128, quiet=True, sheets=1.5, **kw2)
+        check("run()'s default profile is still the bump; an unknown profile, harris with a mean field, or a > Lx/8 are errors",
+              b1["sheets"]["profile"] == "bump" and b1["sheets"]["psi0"] is not None
+              and raises(lambda: go(sheets_profile="tanh")) and raises(lambda: go(sheets_profile="harris", mean_field_b0=0.5))
+              and raises(lambda: go(sheets_profile="harris", field_walk=30.0))
+              and raises(lambda: go(sheets_profile="harris", sheets_width=5.0)) and go(sheets_profile="harris")["sheets"]["b0"] == 1.5)
+        stop = raises(lambda: mt.run(sr, x, os.path.join(tmp, "m.mp4"), max_steps=50, **kw), RuntimeError)
+        check("max_steps: the run aborts once it has taken more", stop and mt.run(sr, silent[:sr], os.path.join(tmp, "m2.mp4"), max_steps=10**6, **kw)["nsteps"] > 50)
+
+
 if __name__ == "__main__":
     if jr._precision.ftype != jnp.float64:
         sys.exit("run with TARANIS_PRECISION=64")
@@ -684,5 +1197,8 @@ if __name__ == "__main__":
     driven_field_gates()
     regrid_gates()
     section_gates()
+    stage_box_gates()
+    stage_sheet_gates()
+    stage_harris_gates()
     print(f"\n{'ALL PASSED' if not FAILED else f'{len(FAILED)} FAILED: ' + '; '.join(FAILED)}")
     sys.exit(1 if FAILED else 0)

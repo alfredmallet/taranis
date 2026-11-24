@@ -21,6 +21,14 @@ they return, so the gate holds the port to the reference implementation's own nu
    The signal is formula-defined (sines, exponentials and an integer LCG for the noise --
    no numpy RNG, no scipy filter), so regenerating it gives the same bytes.
 
+3. (MUSIC_STAGE_PLAN S2 / S4, key `stage`) the rectangular box and the current sheets:
+   `box_for`, `cutoff_k`, `band_plan` on the page's three grid rungs in 16:9, 2:1, 2.4:1 and
+   portrait boxes, the dissipation and stereo-placement expressions of `run()`, `blobs_for` /
+   `kick_blobs` in a rectangular box driven by a SCRIPTED generator (so the page, which has a
+   different RNG, can be fed the same uniforms and normals), and the `bump` sheet profile
+   (`sheet_psi0`, `sheet_equilibrium`, `sheet_energy_eq`). Everything recorded before this
+   key is unchanged by it: the key is appended.
+
 Deterministic: running this twice writes the same file.
 """
 import base64
@@ -104,6 +112,126 @@ CASES = [
 ]
 
 
+class ScriptRng:
+    """The three numpy Generator methods blobs_for / kick_blobs call, fed from recorded
+    streams: `u` the uniforms in [0, 1) (uniform returns lo + (hi - lo) * u, which is what
+    numpy computes), `g` the standard normals, `s` the signs. Each is consumed in call
+    order, so the fixture can say exactly which number became which coordinate."""
+
+    def __init__(self, u, g, s):
+        self.u, self.g, self.s = list(u), list(g), list(s)
+
+    def _take(self, src, n):
+        out, src[:] = src[:n], src[n:]
+        assert len(out) == n, "the scripted stream ran out"
+        return np.array(out, dtype=float)
+
+    def uniform(self, lo, hi, size=None):
+        shape = (size,) if np.ndim(size) == 0 else tuple(size)
+        v = self._take(self.u, int(np.prod(shape))).reshape(shape)
+        return np.asarray(lo, float) + (np.asarray(hi, float) - np.asarray(lo, float)) * v
+
+    def standard_normal(self, n):
+        return self._take(self.g, n)
+
+    def choice(self, opts, size):
+        return self._take(self.s, size)
+
+
+def lcg_unit(n, seed):
+    # n numbers in [0, 1) from the same integer LCG as lcg_noise
+    return [float(v) for v in 0.5 * (lcg_noise(n, seed) + 1.0)]
+
+
+RUNGS = (("light", 256, 128), ("standard", 256, 256), ("sharp", 512, 256))    # long x short
+
+
+def stage_rows():
+    st = dict(source="examples/music_turbulence.py box_for, cutoff_k, band_plan, blobs_for, kick_blobs, "
+                     "sheet_psi0, sheet_equilibrium, sheet_energy_eq; the diss and stereo expressions of run()",
+              lbox=float(mt.LBOX), hyper=4)
+    st["boxes"] = [dict(aspect=a, box=[float(v) for v in mt.box_for(a)])
+                   for a in (1.0, 16.0 / 9.0, 2.0, 2.4, 1.6, 9.0 / 16.0, 0.5, 1.0 / 2.4, 390.0 / 844.0)]
+
+    def plan(tag, aspect, rung, nx, ny, nbands=None, sigma_min=None):
+        Lx, Ly = mt.box_for(aspect)
+        row = dict(tag=tag, aspect=aspect, rung=rung, grid=[nx, ny], box=[float(Lx), float(Ly)],
+                   nbands=nbands, sigmaMin=sigma_min, cutoff_k=float(mt.cutoff_k(nx, ny, Lx, Ly)))
+        # run()'s default dissipation, at hyper 4: 48 amp / cutoff_k^(2 hyper)
+        row["diss"] = [[amp, float(48.0 * amp / mt.cutoff_k(nx, ny, Lx, Ly) ** (2 * 4))] for amp in (1.0, 0.3, 2.5)]
+        try:
+            sig, nbl = mt.band_plan((nx, ny), nbands, sigma_min, Lx, Ly)
+            row.update(sigmas=[float(v) for v in sig], nblobs=[int(v) for v in nbl])
+        except ValueError as e:
+            row["error"] = str(e)
+        return row
+
+    plans = []
+    for tag, aspect in (("16:9", 16.0 / 9.0), ("2:1", 2.0), ("2.4:1", 2.4), ("9:16", 9.0 / 16.0), ("1:2.4", 1.0 / 2.4)):
+        for rung, nl, ns in RUNGS:
+            nx, ny = (nl, ns) if aspect >= 1.0 else (ns, nl)
+            plans.append(plan(tag, aspect, rung, nx, ny))
+    # the square box's rungs (sharp is standard there), and the rule with explicit arguments
+    plans.append(plan("square", 1.0, "light", 128, 128))
+    plans.append(plan("square", 1.0, "standard", 256, 256))
+    plans.append(plan("16:9, 3 bands", 16.0 / 9.0, "light", 256, 128, 3))
+    plans.append(plan("2:1, sigma_min 0.2", 2.0, "sharp", 512, 256, None, 0.2))
+    plans.append(plan("9:16, 2 bands, sigma_min 0.3", 9.0 / 16.0, "standard", 256, 256, 2, 0.3))
+    st["plans"] = plans
+
+    # stereo placement: run()'s xcs = Lx (0.5 + STEREO_SPAN clip(gain pan))
+    st["panx"] = [dict(aspect=a, pan=p, gain=g,
+                       xc=float(mt.box_for(a)[0] * (0.5 + mt.STEREO_SPAN * np.clip(g * p, -1.0, 1.0))))
+                  for a in (16.0 / 9.0, 9.0 / 16.0, 1.0) for p, g in ((-1.0, 1.0), (-0.3, 2.0), (0.0, 2.0), (0.45, 1.0), (0.8, 2.0))]
+
+    # placement: blobs_for / kick_blobs in a rectangular box, from scripted streams. `u`,
+    # `g`, `s` are what the generator handed out, in order; `zp` / `zm` the two channel
+    # lists, rows (x, y, sigma, amp[, ratio, theta]).
+    place, seed = [], 4242
+    for tag, aspect in (("16:9", 16.0 / 9.0), ("9:16", 9.0 / 16.0)):
+        box = mt.box_for(aspect)
+        for kind in mt.KICK_TYPES:
+            for xc in (None, 0.31 * box[0]):
+                n = 4
+                seed += 1
+                u, g = lcg_unit(8 * n, seed), [float(v) for v in 1.7 * lcg_noise(4 * n, seed + 1000)]
+                sg = [1.0 if v >= 0.5 else -1.0 for v in lcg_unit(4 * n, seed + 2000)]
+                rng = ScriptRng(u, g, sg)
+                zp, zm = mt.kick_blobs(rng, kind, 0.3, n, 0.7, xc, 3.0, 2.0, box)
+                place.append(dict(tag=tag, aspect=aspect, box=[float(v) for v in box], kind=kind, xc=xc, sigma=0.3,
+                                  nblob=n, amp=0.7, ratio=3.0, sheetEnergy=2.0,
+                                  used=[len(u) - len(rng.u), len(g) - len(rng.g), len(sg) - len(rng.s)],
+                                  u=u, g=g, s=sg, zp=[[float(v) for v in r] for r in zp], zm=[[float(v) for v in r] for r in zm]))
+    st["placement"] = place
+
+    # the maintained current sheets (the bump profile): a = width * the narrowest blob,
+    # psi0 from the peak field, psi_eq on the grid (every `stride`-th point, x = i Lx/nx),
+    # the closed-form energy, and the energy and peak field of the sampled profile itself
+    # (spectral derivative on the full grid) for a check that does not use the closed forms
+    sheets = []
+    for tag, aspect, nx, ny, strength, amp, width in (
+            ("16:9 standard, the page's defaults", 16.0 / 9.0, 256, 256, 5.0, 1.0, 2.0),
+            ("16:9 sharp, strength 8, width 1", 16.0 / 9.0, 512, 256, 8.0, 1.0, 1.0),
+            ("9:16 light, strength 1.5, amp 0.7, width 4", 9.0 / 16.0, 128, 256, 1.5, 0.7, 4.0),
+            ("square standard, strength 5", 1.0, 256, 256, 5.0, 2.0, 2.0),
+            ("2.4:1 standard, strength 3, width 3", 2.4, 256, 256, 3.0, 1.0, 3.0)):
+        Lx, Ly = mt.box_for(aspect)
+        sig, _ = mt.band_plan((nx, ny), None, None, Lx, Ly)
+        a = width * float(sig[-1])
+        psi0 = float(mt.sheet_psi0(strength, amp, a))
+        x = np.arange(nx) * (Lx / nx)
+        psi = np.asarray(mt.sheet_equilibrium(x, Lx, psi0, a))
+        assert psi.dtype == np.float64, psi.dtype
+        dpsi = np.fft.irfft(1j * (2.0 * np.pi / Lx) * np.arange(nx // 2 + 1) * np.fft.rfft(psi), nx)
+        stride = nx // 64
+        sheets.append(dict(tag=tag, aspect=aspect, grid=[nx, ny], box=[float(Lx), float(Ly)], strength=strength, amp=amp,
+                           width=width, a=a, psi0=psi0, stride=stride, psi=[float(v) for v in psi[::stride]],
+                           energy=float(mt.sheet_energy_eq(psi0, a, Lx)),
+                           energy_grid=float(0.5 * np.mean(dpsi ** 2)), peak_grid=float(np.max(np.abs(dpsi)))))
+    st["sheets"] = sheets
+    return st
+
+
 def main():
     out = dict(source="examples/music_turbulence.py band_plan and CausalOnsetDetector")
     plans = []
@@ -174,6 +302,7 @@ def main():
         pans.append([p_amp, float(mt.onset_pans(sr, lr, np.array([0.1]), np.array([0]), [500.0, 2000.0])[0])])
     fx["pans"] = pans
     out["effects"] = fx
+    out["stage"] = stage_rows()
     dst = os.path.join(HERE, "devtools", "fixtures", "music_ref.json")
     with open(dst, "w") as fh:
         json.dump(out, fh)

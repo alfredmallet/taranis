@@ -845,9 +845,31 @@ leave untracked or commit — they are dev-only, nothing in the apps loads them.
   given, so legs 7–12 are the standing proof that effects-off is the phase-1 page.
   **Not mutation-tested** — MUSIC_EFFECTS_PLAN keeps one adversarial review for the end of
   the phase.
+- `checkmusic.js` legs 14–16 and `checkkick.js`'s rectangular rows (MUSIC_STAGE_PLAN,
+  2026-11-23) — the STAGE. Leg 14 (`legTraces`): `traces.js`'s pure helpers (fade weight,
+  history, the log map, labels, layout, the row gather, the lanes, the side panels'
+  geometry, the signed cut-line fields), then `music.html?traces` under the stub — the
+  controls, which readbacks are started and when (the card's spectrum reused, never a
+  second one), stroke coordinates of both bands, the cut following a picture hook and its
+  repeats, the side panels in both second-side modes and every case where they must not
+  draw. Leg 15 (`legStage`): `stage.js`'s pure parts (`stageFit` cover and contain over a
+  sweep, `stageTiles`, the idle-fade state machine and the swallowed waking press, the
+  status placement, the Fullscreen wrapper), that without `?stage` nothing is built, then
+  `music.html?stage` — what moves where, canvas sizes per window and pixel ratio, the
+  resize debounce, the repeated picture on rendered and on paused frames, the zoom. Leg 16
+  (`legShape`): the box / grid / background rules against `music_ref.json`'s `stage` key
+  (recorded from `examples/music_turbulence.py` by `../gen_musicfixture.py`), scripted
+  placement in the page's own draw order, the sheet profile, the auto rung, the page's
+  rebuild rules, the sheets' flags (`eqsrc` + `eqsrcDrag`, never with `b0`), the default
+  field and the colour scale's reference on the sheets, and that the no-flag page at
+  defaults builds the shipped parameter set key for key. `checkkick.js` leg 3 (c): the kick
+  kernels on nx ≠ ny boxes against `kick_offline.json`'s `rect` key and the gate's own DFT;
+  leg 6: the `eqsrcDrag` opt-in. Mutation-tested in the build (the page port's leg 16,
+  four rounds, no survivors) and once more by the phase's adversarial review.
 - `checkmusic.js [dir]` — the MUSIC PAGE gate (MUSIC_PLAN M2): `music.js`'s pure logic
   against numbers recorded from the offline reference implementation, and `music.html`
-  booted and DRIVEN under the stub. 226 rows in ten legs. (1) `music.js` evaluates in a
+  booted and DRIVEN under the stub. 226 rows in ten legs when this entry was written (821 in
+  nineteen legs by 2026-11-24; the later legs have their own entries above). (1) `music.js` evaluates in a
   bare `vm` context — no DOM, no Web Audio, none of the shared scripts — and every
   top-level name is in its own namespace; (2) `musicBandPlan` equals the offline
   `band_plan` at eleven argument sets (`fixtures/music_ref.json`, written by

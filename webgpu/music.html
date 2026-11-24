@@ -5,19 +5,20 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>plasma turbulence in your browser &mdash; driven by music</title>
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="stage.css"><!-- STAGE: inert without ?stage (MUSIC_STAGE_PLAN S1) -->
 <link rel="icon" href="favicon-32.png" sizes="32x32">
 <link rel="icon" href="favicon-16.png" sizes="16x16">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
-<!-- NO analytics beacon and NO link to or from the other pages: this page is a development
-     build of plans-webgpu/MUSIC_PLAN.md (phase M2), not yet a public one. The audio never
+<!-- NO analytics beacon, and no other page links here yet (plans-webgpu/MUSIC_PLAN.md;
+     the stage layout of MUSIC_STAGE_PLAN.md is behind ?stage). The audio never
      leaves the browser: it is analysed in this page and nothing derived from it is sent
      anywhere. -->
 </head>
 <body>
 <h1>plasma turbulence, driven by music</h1>
-<div class="sub">2D RMHD &middot; 256&sup2; &middot; every onset in a frequency band is an
+<div class="sub">2D RMHD &middot; every onset in a frequency band is an
   impulsive kick of gaussian blobs &middot; bass &rarr; wide blobs, treble &rarr; narrow &middot;
-  the audio clock sets the simulation time &middot; the bass pulses the picture and turns a
+  the audio clock sets the simulation time &middot; the bass pulses the picture and, on the default background, turns a
   mean magnetic field</div>
 
 <!-- the sticky bar and the control panel are BUILT from a spec (common.js controlsBuild) -->
@@ -49,6 +50,8 @@
 <script src="physics.js"></script>
 <script src="solver2d.js"></script>
 <script src="music.js"></script>
+<script src="stage.js"></script><!-- STAGE: defines functions only; live with ?stage -->
+<script src="traces.js"></script>
 <script>
 "use strict";
 // ===========================================================================
@@ -70,7 +73,9 @@
 // ===========================================================================
 
 // ---- what this page fixes (MUSIC_PLAN decisions) ---------------------------
-const MUSIC_N = 256;               // the grid: live music is a 256^2 feature (M0.c)
+const MUSIC_N = 256;               // the SQUARE default grid (M0.c); since MUSIC_STAGE_PLAN S2 the
+                                   // grid in force is music.shape's (musicGridFor), which is this
+                                   // one for the square box on the standard rung
 const MUSIC_HYPER = 4;             // k^8, with the offline dissipation rule below
 const MUSIC_FPS = 60;              // the detector's nominal frame rate
 const MUSIC_NFFT = 2048;           // the analyser's window: 46 ms at 44.1 kHz
@@ -138,7 +143,8 @@ controlsBuild({
            + "fading flow stays at full brightness." },
        { k: "lab", t: "scale max (× amp)" },
        { k: "rng", id: "rScale", min: -2, max: 2, step: 0.01, v: 0.585,
-         ti: "full scale = this multiple of amp (0.25 to 4, logarithmic), for whatever field the "
+         ti: "full scale = this multiple of amp (0.25 to 4, logarithmic; on the current sheets, "
+           + "of the sheets' peak field / 1.5 instead, so the default shows the whole sheet), for whatever field the "
            + "card shows: 0..max for a magnitude, ±max for a signed field, anything beyond it "
            + "saturates. amp is a VELOCITY: for |u|, |b| and the Elsasser magnitudes the multiple "
            + "is dimensionless, for the potentials and for vorticity / current it is only a "
@@ -180,6 +186,28 @@ controlsBuild({
          ti: "the picture zooms in by this fraction on a full-strength bass onset and relaxes "
            + "back (display only; 0 = off)" },
        { k: "val", id: "vPulse" }],
+      [{ k: "lab", t: "background", for: "selBg" },
+       { k: "sel", id: "selBg", o: [["field", "walking mean field"], ["sheets", "current sheets"], ["none", "none"]],
+         v: "field",
+         ti: "what the kicks land on. walking mean field: the uniform field of the row below. "
+           + "current sheets: a vertical current sheet through the centre (psi = psi0 "
+           + "sech^2((x - Lx/2)/a): the field reverses across it, with weaker return currents "
+           + "either side and no net flux) that is restored against the drag and the "
+           + "dissipation while the kicks tear at it. With the k^8 hyperviscosity of this page "
+           + "there is no resistive layer, so this is NOT the tearing instability: it is a "
+           + "restored sheet broken up by kicks -- rmhd2d.html has the real one. none: "
+           + "neither. Changing it rebuilds the simulation, as Reset does." },
+       { k: "lab", t: "sheet field (× amp)" },
+       { k: "rng", id: "rSheetB", min: 0, max: 8, step: 0.5, v: 5,
+         ti: "the sheets' peak magnetic field, as a multiple of the amp slider. Fixed when the "
+           + "sheets are laid down: a change here, or of amp, takes effect at the next Reset. "
+           + "Strong sheets shorten the timestep (about 1.3-1.5 times the steps at 5, twice at 8)." },
+       { k: "val", id: "vSheetB" },
+       { k: "lab", t: "sheet width" },
+       { k: "rng", id: "rSheetW", min: 1, max: 4, step: 0.25, v: 2,
+         ti: "the sheets' width a, as a multiple of the narrowest blob's width. Takes effect at "
+           + "the next Reset." },
+       { k: "val", id: "vSheetW" }],
       [{ k: "lab", t: "mean field (× rms)" },
        { k: "rng", id: "rField", min: 0, max: 3, step: 0.1, v: 1.5,
          ti: "a uniform in-plane magnetic field, along which z+ and z- stream in opposite "
@@ -196,10 +224,41 @@ controlsBuild({
            + "slider. OFF: it stays at the slider." }]
     ] },
     // the two CFL knobs the shared loop reads (rCflEvery) and the solver takes (rCfl)
-    { id: "grpSim", summary: "simulation", rows: [CTRL_CFL] },
+    // ... and the box and the grid (MUSIC_STAGE_PLAN S2): square by default with and without
+    // ?stage, the window's shape on offer
+    { id: "grpSim", summary: "simulation", rows: [CTRL_CFL,
+      [{ k: "lab", t: "box", for: "selBox" },
+       { k: "sel", id: "selBox", o: [["window", "the window's shape"], ["square", "square"]],
+         v: "square",
+         ti: "the shape of the periodic box. window: the browser window's, read when Start or "
+           + "Reset is pressed -- the short side is 2 pi, the long side up to 2.4 times that, and "
+           + "a tall window gets a tall box. Resizing or rotating mid-run changes nothing until "
+           + "the next Start or Reset. square: 2 pi by 2 pi." },
+       { k: "lab", t: "grid", for: "selGrid" },
+       { k: "sel", id: "selGrid", o: [["auto", "auto"], ["light", "light: 256 × 128"],
+                                      ["standard", "standard: 256 × 256"], ["sharp", "sharp: 512 × 256"]],
+         // without ?stage the page is the shipped one, which never changed its grid: standard
+         v: STAGE_ON ? "auto" : "standard",
+         ti: "grid points, long side by short side. auto starts on standard and, if the "
+           + "simulation keeps falling behind the audio in the first seconds of a run, drops to "
+           + "light at the next Start or Reset (or change of box, grid or background); it "
+           + "never goes back up and never picks sharp. "
+           + "sharp is twice the work of standard. On a SQUARE box the grids are square: light "
+           + "is 128 × 128, and sharp is the same 256 × 256 as standard." }],
+      // STAGE: what the window shows beside a box of another shape (the plain layout's card
+      // is the box's shape and has no sides)
+      ...(STAGE_ON ? [[{ k: "lab", t: "sides", for: "selFill" },
+       { k: "sel", id: "selFill", o: [["bars", "black"], ["tile", "repeat the picture"]], v: "bars",
+         ti: "the whole box is always shown, centred. Where the window is another shape, the "
+           + "two sides left over are black, or show the picture again -- the box is periodic, "
+           + "so the copies join without a seam." }]] : []),
+      { k: "hintdiv", id: "musicBox", t: "" }] },
     ctrlGrpDisp()
+    // TRACES: the fading-trace overlays' group, grpTraces ([] without ?traces / ?stage)
+    , ...musicTraces.groups()
   ]
 });
+stageBuild();   // STAGE: with ?stage, the bar and the drawer take the controls just built (else a no-op)
 
 // ---- what the controls say ----------------------------------------------------
 const musicNum = (id, dflt) => { const v = parseFloat(el(id).value); return isFinite(v) ? v : dflt; };
@@ -215,8 +274,14 @@ function musicUi() {
            // the effects
            kick: el("selKick").value, sheetE: Math.max(0.01, musicNum("rSheetE", 2)),
            stereo: !!el("cbStereo").checked, panGain: Math.max(0, musicNum("rPanGain", 2)),
-           pulse: Math.max(0, musicNum("rPulse", 0.08)), field: Math.max(0, musicNum("rField", 1.5)),
-           fieldDeg: Math.max(0, musicNum("rFieldDeg", 30)), fieldWalk: !!el("cbFieldWalk").checked };
+           pulse: Math.max(0, musicNum("rPulse", 0.08)),
+           // the background: the mean field counts only while it is the one selected
+           bg: el("selBg").value,
+           field: el("selBg").value === "field" ? Math.max(0, musicNum("rField", 1.5)) : 0,
+           fieldDeg: Math.max(0, musicNum("rFieldDeg", 30)), fieldWalk: !!el("cbFieldWalk").checked,
+           sheetB: Math.min(8, Math.max(0, musicNum("rSheetB", 5))), sheetW: Math.min(4, Math.max(1, musicNum("rSheetW", 2))),
+           // the box and the grid
+           box: el("selBox").value, grid: el("selGrid").value };
 }
 // the drag's energy e-folding RATE, in simulation time: the flow forgets over `memory`
 // seconds of AUDIO, which is memory * rate simulation time units
@@ -227,27 +292,122 @@ const musicMu = u => 1 / (u.memory * u.rate);
 // At hyper 4 (k^8) the rate falls to 3*amp at k = n/4.2 (60 at 256^2) where hyper 2 (k^4,
 // the rule's first form, 3*amp/(n/6)^4 -- the same number) reached it at n/6 (43): a
 // sharper cutoff and ~1.4x more undamped range.
-const musicDiss = u => 48 * Math.max(u.amp, 0.1) / Math.pow(MUSIC_N / 3, 2 * MUSIC_HYPER);
+// In a rectangular box or grid the cutoff is the SMALLER of the two axes' (musicCutoffK,
+// which is n/3 for the square 2 pi box): the coarser direction is the one that is resolved.
+const musicDiss = u => 48 * Math.max(u.amp, 0.1)
+  / Math.pow(musicCutoffK(music.shape.nx, music.shape.ny, music.shape.Lx, music.shape.Ly), 2 * MUSIC_HYPER);
+
+// ---- the box, the grid and the background (MUSIC_STAGE_PLAN S2 / S4) ----------------
+// The window this page shapes its box on: the full-window element of the stage layout where
+// there is one (100dvh, the VISIBLE viewport on a phone), else the browser window.
+function musicWindow() {
+  const S = (typeof stage !== "undefined" && stage.el) || null, w = typeof window !== "undefined" ? window : {};
+  return { w: (S && S.clientWidth) || w.innerWidth || 1, h: (S && S.clientHeight) || w.innerHeight || 1 };
+}
+// What the controls and the window ask for NOW: the box, the grid on it and the background.
+// Read at boot, at Start and at Reset (musicShapeApply) and when one of the three selects
+// moves -- never on a resize.
+function musicShapeWanted() {
+  const u = musicUi(), w = musicWindow();
+  const aspect = musicWindowAspect(w.w, w.h, u.box), box = musicBoxFor(aspect);
+  const rung = musicRungFor(u.grid, music.auto.rung), g = musicGridFor(rung, box[0], box[1]);
+  return { aspect: aspect, Lx: box[0], Ly: box[1], nx: g[0], ny: g[1], rung: rung,
+           bg: u.bg === "sheets" || u.bg === "none" ? u.bg : "field" };
+}
+const musicShapeSame = (a, b) => !!a && !!b && a.Lx === b.Lx && a.Ly === b.Ly && a.nx === b.nx && a.ny === b.ny && a.bg === b.bg;
+// Make `music.shape` the one asked for, with everything that hangs off the grid: the band
+// plan (widths and counts under the solver's KICK_MAX, one kick() each), the strip's lamps,
+// and -- if a session is running and the NUMBER of bands changed -- a fresh detector.
+function musicShapeTake() {
+  const sh = music.shape = musicShapeWanted();
+  music.plan = musicBandPlan([sh.nx, sh.ny], null, null, KICK_MAX, sh.Lx, sh.Ly);
+  const nb = music.plan.sigmas.length;
+  if (music.lit.length !== nb) music.lit = music.plan.sigmas.map(() => -1e9);
+  if (music.det && music.det.nbands !== nb) {
+    music.det = new MusicDetector({ sr: music.det.sr, nfft: MUSIC_NFFT, nbands: nb, fps: MUSIC_FPS,
+                                    threshold: musicUi().thr, fluxFloor: MUSIC_FLUX_FLOOR, peakDecayS: MUSIC_PEAK_DECAY });
+  }
+}
+// Start and Reset (and the three selects): first let `auto` drop its rung if the run it
+// has just watched kept falling behind, then rebuild if the shape asked for is not the live
+// solver's. Returns { rebuilt, note }: `note` is the sentence for the status line when auto
+// has just dropped.
+function musicShapeApply() {
+  let note = "";
+  // (only while the select says auto: a visitor who has just chosen a rung is not told that
+  // auto dropped, and auto's own rung is not moved behind their back)
+  const r = musicUi().grid === "auto" ? musicAutoRung(music.auto.rung, music.auto.n) : music.auto.rung;
+  if (r !== music.auto.rung) {
+    note = "grid: auto dropped to light -- the simulation fell behind the audio " + music.auto.n
+         + " times in the first " + MUSIC_AUTO_WINDOW + " s (choose standard to override)";
+    music.auto.rung = r;
+    music.auto.note = note;
+  }
+  music.auto.n = 0;
+  if (!solver || musicShapeSame(musicShapeWanted(), music.shape)) return { rebuilt: false, note: note };
+  rebuild();
+  return { rebuilt: true, note: note };
+}
+// the maintained sheets' initial condition, from the sliders as they stand: psi_eq on the
+// grid, and what was laid down (music.sheet) for the line below the selects
+function musicSheetIC() {
+  const u = musicUi(), sh = music.shape, a = u.sheetW * music.plan.sigmas[music.plan.sigmas.length - 1];
+  const psi0 = musicSheetPsi0(u.sheetB, u.amp, a);
+  music.sheet = { psi0: psi0, a: a, b: u.sheetB * u.amp, strength: u.sheetB, energy: musicSheetEnergy(psi0, a, sh.Lx) };
+  return musicSheetField(sh.nx, sh.ny, sh.Lx, psi0, a);
+}
+// one line: the box, the grid, and what the background costs
+function musicBoxLine() {
+  const sh = music.shape, u = musicUi();
+  let t = "box " + sh.Lx.toFixed(2) + " × " + sh.Ly.toFixed(2) + " on " + sh.nx + " × " + sh.ny
+        + " (" + sh.rung + (u.grid === "auto" ? ", auto" : "") + "), " + music.plan.sigmas.length + " bands";
+  if (!musicShapeSame(musicShapeWanted(), sh)) t += " -- the window or a select has changed: the new shape is taken at the next Start or Reset";
+  if (sh.bg === "sheets" && music.sheet)
+    t += " | current sheets: peak field " + music.sheet.b.toFixed(2) + ", width a = " + music.sheet.a.toFixed(3)
+       + ", energy " + music.sheet.energy.toPrecision(3)
+       + (music.sheet.strength >= 3 ? " -- sheets this strong shorten the timestep (about 1.3-1.5 times the steps at 5, twice at 8)" : "");
+  if (music.auto.note && u.grid === "auto") t += " | " + music.auto.note;
+  el("musicBox").textContent = t;
+}
 
 function uiParams() {
-  const u = musicUi();
-  return {
-    nx: MUSIC_N, ny: MUSIC_N, Lx: MUSIC_LBOX, Ly: MUSIC_LBOX,
-    hyper: MUSIC_HYPER, diss: musicDiss(u), pm: 1, eqsrc: false,
+  const u = musicUi(), sh = music.shape, sheets = sh.bg === "sheets";
+  const q = {
+    nx: sh.nx, ny: sh.ny, Lx: sh.Lx, Ly: sh.Ly,
+    // the two backgrounds are exclusive, and each is a compile-time kernel flag: the mean
+    // field's stage kernel (b0), or the maintained-equilibrium source (eqsrc) -- never both
+    hyper: MUSIC_HYPER, diss: musicDiss(u), pm: 1, eqsrc: sheets,
     // no OU forcing at all: the Solver's own defaults are epsP = epsM = 0.15, and left
     // alone the shell forcing would run underneath the kicks
     epsP: 0, epsM: 0, tau: 1, fshell: [1, 3], smax: 1e4,
     cfl: musicNum("rCfl", 0.4), seed: 7,
     kick: true, mu: musicMu(u),
-    // the mean field's stage kernel, always: at B0 = 0 it gives the plain kernel's values
-    b0: true
+    // the mean field's stage kernel, also for `none`: at B0 = 0 it gives the plain kernel's
+    // values, and the shipped page's graph is this one
+    b0: !sheets
   };
+  // the sheets are held up against the drag as well as the dissipation: the opt-in that
+  // lifts the solver's refusal of mu != 0 with eqsrc, for this page only
+  if (sheets) q.eqsrcDrag = true;
+  return q;
 }
-function cardAspect() { return { w: 512, h: 512 }; }
+// the card of the plain layout takes the box's shape: 512 px on its long side (512 x 512 for
+// the square box, the shipped card)
+function musicCardSize() {
+  const r = music.shape.Lx / music.shape.Ly;
+  return r >= 1 ? { w: 512, h: Math.max(64, 2 * Math.round(256 / r)) } : { w: Math.max(64, 2 * Math.round(256 * r)), h: 512 };
+}
+function cardAspect() { return stageAspect() || musicCardSize(); }   // STAGE: the window-sized canvas with ?stage (else null)
 
 // ---- the page's state -------------------------------------------------------
 const music = {
-  plan: musicBandPlan(MUSIC_N, null, null, KICK_MAX),   // widths and counts, one kick() each
+  // the box, the grid and the background in force ({ aspect, Lx, Ly, nx, ny, rung, bg }) and
+  // the band plan on them: both set by musicShapeTake, below and at every rebuild
+  shape: null, plan: null,
+  // the grid select's `auto`: the rung it stands on, the fall-behind rebases counted in the
+  // first MUSIC_AUTO_WINDOW seconds of this run, and what it last said
+  auto: { rung: "standard", n: 0, note: "" },
+  sheet: null,              // the current sheets as last laid down (musicSheetIC)
   rng: musicRng(MUSIC_SEED),
   det: null,                // the onset detector (built at Start, at the context's rate)
   audio: null,              // the live source (musicStart): { ctx, an, node, delay, t0, kind,
@@ -270,7 +430,7 @@ const music = {
   // placed: a mono source reads pan 0 everywhere and would pile into the centre column
   stereoSeen: false
 };
-for (let b = 0; b < music.plan.sigmas.length; b++) music.lit.push(-1e9);
+musicShapeTake();
 
 function syncLabels() {
   const u = musicUi();
@@ -288,6 +448,12 @@ function syncLabels() {
   el("vPulse").textContent = u.pulse > 0 ? u.pulse.toFixed(2) : "off";
   el("vField").textContent = u.field > 0 ? u.field.toFixed(1) : "off";
   el("vFieldDeg").textContent = u.fieldDeg.toFixed(0);
+  el("vSheetB").textContent = u.sheetB.toFixed(1);
+  el("vSheetW").textContent = u.sheetW.toFixed(2);
+  // each background's own controls are live only while it is the one selected
+  for (const id of ["rSheetB", "rSheetW"]) el(id).disabled = u.bg !== "sheets";
+  for (const id of ["rField", "rFieldDeg", "cbFieldWalk"]) el(id).disabled = u.bg !== "field";
+  musicBoxLine();
   el("rPanGain").disabled = !u.stereo;
   el("rowFile").style.display = u.src === "file" ? "" : "none";
   el("rowDev").style.display = u.src === "input" ? "" : "none";
@@ -333,7 +499,11 @@ function musicStrip() {
 //     render is the shared one, dispatch for dispatch.
 // Values beyond the range saturate: dispX clamps a signed field to +-1 and cmap clamps a
 // magnitude to [0, 1] (physics.js), neither wraps.
-const musicScaleMax = u => Math.max(1e-6, u.scaleM * u.amp);
+// On the current sheets the reference is the SHEET's peak field, not the kicks' amp: at the
+// slider's default (1.5) the scale tops out exactly at that peak, so the sheet shows its
+// structure instead of saturating and the turbulence keeps the lower part of the colormap.
+const musicScaleRef = u => (music.shape && music.shape.bg === "sheets" && music.sheet && music.sheet.b > 0 ? music.sheet.b / 1.5 : u.amp);
+const musicScaleMax = u => Math.max(1e-6, u.scaleM * musicScaleRef(u));
 function musicScaleInstall(sv) {
   const render = sv.render.bind(sv);              // the class's own method
   sv.render = function (ctx, ci) { musicScaleApply(sv, ci || 0); return render(ctx, ci); };
@@ -377,7 +547,7 @@ function musicScaleRecord() {
 }
 function musicScaleReadout() {
   const u = musicUi();
-  return u.fix ? "colour scale fixed at " + musicScaleMax(u).toPrecision(3) + " (" + u.scaleM.toFixed(2) + " × amp)"
+  return u.fix ? "colour scale fixed at " + musicScaleMax(u).toPrecision(3) + " (" + u.scaleM.toFixed(2) + (musicScaleRef(u) === u.amp ? " × amp)" : " × the sheets' peak field / 1.5)")
                  + (isFinite(music.autoMax) ? "; the autoscale would be " + music.autoMax.toPrecision(3) : "")
                : "colour scale: autoscale";
 }
@@ -409,18 +579,21 @@ function musicFxReset() {
 function musicZoomApply(z) {
   if (z === music.zoom) return;
   music.zoom = z;
+  const t = z === 1 ? "" : "scale(" + z.toFixed(4) + ")";
   for (const c of cards.disp) {
     if (!c.wrap || !c.cv) continue;
     c.wrap.style.overflow = "hidden";
-    const t = z === 1 ? "" : "scale(" + z.toFixed(4) + ")";
     c.cv.style.transform = t;
     if (c.cvVec) c.cvVec.style.transform = t;
   }
+  if (typeof stage !== "undefined" && stage.tile) stage.tile.style.transform = t;   // STAGE: the repeated picture zooms as one
 }
 // the mean field this frame: ease the walk toward where the bass has sent it and hand the
 // solver r * sqrt(2E) (cos, sin). `e` is the newest energy readback (NaN: none yet, the
 // field in force stands). Field off: zero, and the walk is forgotten.
 function musicFieldApply(sv, u, tA, e) {
+  // (a solver built for the current sheets has no mean-field uniform at all)
+  if (!sv.p.b0) { music.walk = null; return; }
   if (!(u.field > 0)) { music.walk = null; sv.setMeanField(0, 0); return; }
   if (!music.walk) music.walk = musicWalkInit(music.rngFx, u.field, u.fieldWalk);
   const w = music.walk;
@@ -430,10 +603,13 @@ function musicFieldApply(sv, u, tA, e) {
   if (isFinite(e)) { const b = musicWalkField(w, e); sv.setMeanField(b[0], b[1]); }
 }
 
-// the initial condition is always rest: the music makes the flow
+// the initial condition is rest -- the music makes the flow -- or, with the current sheets
+// as the background, the sheets: the upload is also when the solver takes its maintained
+// equilibrium (the k_y = 0 column of this psi), so Reset restores them, never a blank state
 function applyIC() {
   if (!solver) return;
-  solver.setIC(true);
+  if (solver.p.eqsrc) solver.setICFromReal(null, musicSheetIC());
+  else solver.setIC(true);
   musicFxReset();
   music.clock.init = false;         // the simulation time jumped back to 0: re-anchor
   music.queue.length = 0;           // ... and nothing detected before it belongs to the new run
@@ -444,11 +620,41 @@ function rebuild() {
   // never destroy in an event handler: the frame loop may be awaiting a readback on the
   // old solver's buffers. Retire it and free it at the top of a later frame.
   if (solver) { graveyard.push(solver); solver = null; }
+  musicShapeTake();                 // the box, the grid, the background: as asked for NOW
   solver = new Solver(device, uiParams());
   musicScaleInstall(solver);
   cardsSync();
   stepsPerFrame = 1;
   applyIC();
+  syncLabels();
+}
+// Reset: back to the initial condition, on the shape asked for now (a rebuild if that is
+// not the live solver's -- the window was resized, or auto has a rung to drop)
+function musicReset() {
+  const r = musicShapeApply();
+  if (!r.rebuilt) applyIC();
+  if (r.note) showStatus(r.note, "info");
+  syncLabels();
+  musicScaleChanged();              // the sheets' peak (the sliders, taken at Reset) is the scale's reference
+}
+// The field the card shows BY DEFAULT on a background: the magnetic field itself, |b|
+// (display field 5), on the current sheets -- they are a magnetic structure, and |u| shows
+// only what the kicks add -- and |u| (4), the page's own default, otherwise. (The current j
+// was tried in the browser, 2026-11-23: saturated everywhere on the fixed scale, a flat
+// midtone on autoscale. |b| with the scale on the sheet's peak, musicScaleRef, shows both.)
+const musicBgField = bg => (bg === "sheets" ? 5 : 4);
+// one of the box / grid / background selects moved: a rebuild, as a Reset. A change of
+// background that goes TO the sheets puts |b| on the card, and one that LEAVES them puts
+// the page's default back. Only that change sets it: nothing re-applies it per frame, at
+// Reset or at any other rebuild, so a field the visitor picks afterwards stays.
+function musicShapeChanged() {
+  const u = musicUi(), c = cards.disp[0], was = music.shape.bg;
+  // (the rebuild below re-applies every card, so the new field reaches the new solver)
+  if (c && musicBgField(u.bg) !== musicBgField(was)) c.selField.value = String(musicBgField(u.bg));
+  const r = musicShapeApply();
+  if (r.note) showStatus(r.note, "info");
+  syncLabels();
+  musicScaleChanged();              // the fixed scale's reference follows the background (musicScaleRef)
 }
 
 // ---- audio -------------------------------------------------------------------
@@ -594,6 +800,9 @@ async function musicStart() {
     // a Stop, or a change of source, while the picker, the decode or the resume was open:
     // give the capture back. Checked AFTER the last await -- nothing below yields.
     if (gen !== music.gen || music.audio) { musicStopStream(S.stream); S = null; return; }
+    // the box takes the window's shape as it is at Start (a rebuild only if it differs
+    // from the live solver's; with the square box only when auto has a rung to drop)
+    const shaped = musicShapeApply();
     const route = musicRouting(kind, S.suppressed, S.surface);
     const an = ctx.createAnalyser();
     an.fftSize = MUSIC_NFFT;
@@ -656,7 +865,8 @@ async function musicStart() {
     if (MUSIC_DEBUG) musicDebugInit();
     musicRunning(true);
     showStatus(kind === "tab" && route.play === false && A.surface !== "browser"
-               ? "that capture is not a browser tab: it is analysed, not played -- pick a Chrome TAB for a synced picture" : "", "info");
+               ? "that capture is not a browser tab: it is analysed, not played -- pick a Chrome TAB for a synced picture"
+               : shaped.note, "info");
     syncLabels();
     if (kind === "input") musicDevices();          // the labels exist now
   } catch (e) {
@@ -751,10 +961,11 @@ async function musicStep(sv) {
     // ONE kick per onset: KICK_MAX holds one band's blobs, and two onsets merged into
     // one list could need twice that and would lose the overflow
     // the bass is exempt from placement: it sits in the centre of nearly every mix
+    // (x runs over the box's own Lx: the long side in landscape, the short one in portrait)
     const xc = q.pan !== null && q.pan !== undefined && u.stereo && o.band !== MUSIC_PULSE_BAND
-      ? musicPanX(q.pan, u.panGain) : null;
+      ? musicPanX(q.pan, u.panGain, music.shape.Lx) : null;
     const r = sv.kick(musicKickList(music.rng, music.plan, o.band, u.amp, o.strength,
-                                    { types: types, xc: xc, sheetEnergy: u.sheetE }));
+                                    { types: types, xc: xc, sheetEnergy: u.sheetE, box: [music.shape.Lx, music.shape.Ly] }));
     nk++;
     // a bass onset pulses the camera and turns the mean field, as it kicks
     if (o.band === MUSIC_PULSE_BAND) {
@@ -781,11 +992,15 @@ async function musicStep(sv) {
     }
   }
   let c = { n: 0, target: NaN, lag: NaN, rebased: false, behind: music.behind };
-  if (fresh)
+  if (fresh) {
+    const heldTo = music.clock.behindUntil;
     c = musicClock(music.clock, { running: true, audioT: tA, simT: s[1], dt: s[0], rate: u.rate,
                                   maxSteps: MUSIC_MAX_STEPS, lagMax: MUSIC_LAG_MAX,
                                   maxAhead: u.rate / MUSIC_FPS, kicked: nk > 0, resumed: resumed });
-  else if (resumed) music.hidden = true;           // no readback to re-anchor on yet: next frame
+    // the grid's `auto`: count the rebases FORCED BY FALLING BEHIND (the clock moves its
+    // BEHIND hold on exactly those) in the first seconds of the run; musicShapeApply reads it
+    if (music.clock.behindUntil !== heldTo && tA < MUSIC_AUTO_WINDOW && u.grid === "auto") music.auto.n++;
+  } else if (resumed) music.hidden = true;         // no readback to re-anchor on yet: next frame
   music.behind = c.behind;
   musicZoomApply(u.pulse > 0 ? musicPulseZoom(music.pulse, tA, MUSIC_PULSE_TAU) : 1);
   musicStrip();
@@ -896,7 +1111,9 @@ async function boot() {
   });
   el("btnRun").onclick = () => { if (running) musicStop(); else musicStart(); };
   el("btnRun").textContent = "Start";
-  el("btnReset").onclick = () => applyIC();
+  el("btnReset").onclick = musicReset;
+  for (const id of ["selBox", "selGrid", "selBg"]) el(id).onchange = musicShapeChanged;
+  for (const id of ["rSheetB", "rSheetW"]) el(id).oninput = syncLabels;
   el("selSrc").onchange = () => { if (running || music.starting) musicStop(); syncLabels();
                                   if (el("selSrc").value === "input") musicDevices(); };
   el("selDev").onchange = () => { if (running && music.audio && music.audio.kind === "input") musicStop(); };
@@ -905,6 +1122,9 @@ async function boot() {
   el("cbFixScale").onchange = () => { syncLabels(); musicScaleChanged(); };
   frameHook = async sv => { if (sv === solver) await musicScaleProbe(sv); };
   readoutExtra = musicScaleReadout;
+  // TRACES: one synchronous call per frame, ahead of whatever the hook already does (it starts
+  // its own readbacks and awaits none). Without ?traces / ?stage the hook is left as it was.
+  if (musicTraces.on) { const fh = frameHook; frameHook = async sv => { if (sv === solver) musicTraces.frame(sv, performance.now()); await fh(sv); }; }
   // back from a hidden tab: the next frame re-anchors quietly instead of calling the
   // absence "behind". (An ASSIGNED handler: devtools' stub document has no addEventListener.)
   if (typeof document !== "undefined")
@@ -927,12 +1147,29 @@ async function boot() {
              memory: u.memory, amp: u.amp, rate: u.rate, mu: solver ? solver.p.mu : null,
              bands: music.plan.sigmas.length, sigmas: music.plan.sigmas, nblobs: music.plan.nblobs,
              seed: MUSIC_SEED,
+             box: [music.shape.Lx, music.shape.Ly], grid: [music.shape.nx, music.shape.ny], rung: music.shape.rung,
+             background: music.shape.bg,
+             sheets: music.shape.bg === "sheets" && music.sheet
+               ? { psi0: music.sheet.psi0, a: music.sheet.a, peakField: music.sheet.b, energy: music.sheet.energy } : null,
              effects: { kicks: u.kick, sheetEnergy: u.sheetE, stereo: u.stereo, panGain: u.panGain,
                         pulse: u.pulse, meanField: u.field, fieldTurnDeg: u.fieldDeg, fieldWalk: u.fieldWalk } };
   };
   rebuild();
   // |u| is where a kick shows (7-13x the baseline frame change against 1.5x in vorticity)
-  cardsLayout({ disp: [{ sel: 4, cmap: MUSIC_CMAP_DEFAULT, arrows: false }], charts: ["energy", "spectrum"] });
+  // (... or |b| where the page starts on the current sheets: musicBgField)
+  cardsLayout({ disp: [{ sel: musicBgField(music.shape.bg), cmap: MUSIC_CMAP_DEFAULT, arrows: false }], charts: ["energy", "spectrum"] });
+  stageAdopt();   // STAGE: with ?stage, the card just laid out becomes the full-window picture (else a no-op)
+  // TRACES: over #stage where the stage shell has made one, else over the display card
+  // (attach does nothing without ?traces / ?stage)
+  musicTraces.attach(document.querySelector("#stage") || cards.disp[0].wrap);
+  // STAGE: the picture need not span the window (black or repeated sides): the cut follows it,
+  // and the repeats are copied in the same task as the render, the only time a WebGPU canvas
+  // can be read -- so renderCards itself is wrapped, on this page only
+  if (STAGE_ON) {
+    musicTraces.picture = stagePicture;   // STAGE: where the picture is, for the line cut
+    const rc = renderCards;
+    renderCards = function (a) { const r = rc(a); stageFrame(r > 0); return r; };   // STAGE: the repeats, drawn with the render
+  }
   loop();
 }
 boot();

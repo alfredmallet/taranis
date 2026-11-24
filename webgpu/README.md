@@ -262,6 +262,11 @@ else running, plugged in.
   page's inline script is the audio and DOM glue. **Deployed since 2026-11-21** (`pages.yml` requires it in the staged
   site and cache-busts `music.js` with the rest), but linked from nowhere yet and carrying
   no analytics beacon.
+- `stage.js`, `stage.css`, `traces.js` — the music page's STAGE layout and its fading-trace
+  overlays (plans-webgpu/MUSIC_STAGE_PLAN.md; see "The music page: the stage"). Loaded by
+  `music.html` only and live only with `?stage` (the traces also with `?traces`): without a
+  flag every entry point returns at its first line and no CSS rule matches. Deployed and
+  cache-busted by `pages.yml` with the rest.
 - `gen_musicfixture.py` — records `devtools/fixtures/music_ref.json`, the offline
   `band_plan`'s and `CausalOnsetDetector`'s own output for `devtools/checkmusic.js`.
   Pruned from the deployed site with the other `*.py`.
@@ -1658,7 +1663,8 @@ rebuild (`makeGrid` itself is unchanged).
 - **Refused, loudly, instead of being silently wrong:** `mu ≠ 0` with `pm ≠ 1` (`_dissLin`
   multiplies the φ half's exponent by Pm, which would scale the drag on φ too) and
   `mu ≠ 0` with `eqsrc` (the maintained-flux source is `−gridB.y·ψ_eq`, which would then
-  hold the equilibrium up against the drag as well). Also a negative, non-finite or
+  hold the equilibrium up against the drag as well -- unless the page asks for exactly
+  that with `eqsrcDrag: true`, as the music page's current sheets do). Also a negative, non-finite or
   non-number `mu`. A refused `setDrag` leaves `p.mu` and both copies of the column as
   they were.
 - It damps **every** mode, k = 0 and the modes past the cut included (the latter are zero
@@ -1712,7 +1718,8 @@ WebGPU or the three shared scripts, so node evaluates it on its own — that is 
 `devtools/checkmusic.js` runs it. Every top-level name starts `music` / `Music` /
 `MUSIC_`.
 
-- `musicBandPlan(n, nbands?, sigmaMin?, nblobMax?)` is the offline `band_plan`: widths
+- `musicBandPlan(n, nbands?, sigmaMin?, nblobMax?, Lx?, Ly?)` (`n` a number or `[nx, ny]`;
+  the box defaults to the square 2π one) is the offline `band_plan`: widths
   log-spaced from 0.45 down to 3.7 grid spacings, as many as fit with a factor 1.8 between
   neighbours (4 at 256²), blob count ∝ 1/σ from 3 in the bass band — 3, 5, 9, 15 at 256².
   The page passes `KICK_MAX` as `nblobMax`, so a plan one `kick()` cannot hold is refused
@@ -2007,6 +2014,54 @@ context). **In a real browser** (Chrome, M1, 2026-11-21, click track, defaults):
 steps/s, 6.3 steps a frame (max 15, never at the cap of 64), no rebase, the simulation
 1.5 ms ahead of the audio on average; `rmhd2d.html` at 609 steps/s. Not tried: a stereo
 FILE or a tab capture in a browser, and any device but the M1.
+
+
+### The music page: the stage (`?stage`; MUSIC_STAGE_PLAN)
+
+`music.html?stage` is the same page laid out to be watched: the picture fills the window,
+the controls sit in a bar and a drawer that fade after 3 s without activity, and the charts
+are gone. Without the flag the page is the card layout above. What is where:
+
+- **`stage.js`** (pure parts first: `stageFlag`, `stageFit`, `stageTiles`, `stageIdleNew` /
+  `stageIdleEvent`, `stageStatusPlace`, `stageFullscreen`; then the page side). `stageBuild`
+  runs after `controlsBuild` and moves `#topbar` and `#controls` into `#stageBar` /
+  `#stageDrawer`; `stageAdopt` runs after `cardsLayout`, closes the chart cards and moves the
+  display card's `.cvwrap` into `#stage`. `cardAspect()` in `music.html` answers
+  `stageAspect()`, so the shared card code sizes the canvas for the window (times
+  devicePixelRatio, long side capped at `STAGE_CAP` = 1920). A resize re-fits the canvas
+  only; the solver is never rebuilt by one.
+- **The whole box is always shown** (`stageFit(..., contain = true)`), centred. Where the
+  window is another shape the `sides` select (`selFill`) leaves the two strips black or
+  repeats the picture: `stageFrame(drawn)` copies the card's canvas onto `#stageTile`, a 2D
+  canvas over the picture, at `stageTiles`' positions. A WebGPU canvas can only be read in
+  the task that rendered it, so `music.html` wraps `renderCards` (this page, `?stage` only)
+  and passes whether a card drew; on a frame with no render nothing is copied, and stale
+  copies mark the card dirty so the next frame renders. The camera pulse scales
+  `#stageTile` with the card's canvas. A saved PNG or a recording is the single picture.
+- **The box, the grid, the background** (`grpSim` / `grpFx`, with and without the flag):
+  `selBox` square (default) or the window's shape (short side 2π, long side up to 2.4×,
+  read at boot, Start, Reset and on a select change, never on a resize); `selGrid` auto /
+  light 256×128 / standard 256×256 / sharp 512×256 (auto starts on standard, drops to light
+  after more than 3 falling-behind rebases in a run's first 10 s, never picks sharp);
+  `selBg` walking mean field / current sheets / none. The rules are pure, in `music.js`
+  (`musicWindowAspect`, `musicBoxFor`, `musicGridFor`, `musicRungFor`, `musicAutoRung`,
+  `musicCutoffK`, the box-aware `musicBandPlan`, `musicSheet*`), and match
+  `examples/music_turbulence.py --aspect / --grid / --sheets`.
+- **Current sheets** are the solver's maintained equilibrium (`eqsrc`, with the
+  `eqsrcDrag: true` opt-in that lets the uniform drag coexist with it) and exclude the mean
+  field (`b0`). The profile is a flux bump, strength and width from `rSheetB` / `rSheetW`,
+  uploaded at Reset. Choosing them puts `magnetic |b|` on the picture, and the fixed colour
+  scale's reference becomes the sheet's peak field / 1.5 (`musicScaleRef`).
+- **`traces.js`** (`musicTraces`; pure helpers `traces*`) draws on one `<canvas
+  class="traces">` over `#stage` (or over the display card with `?traces` alone): the total
+  energy spectrum along the bottom and the displayed field's middle-row cut along the top,
+  as lines that fade with age in the picture's colormap; tick labels behind a toggle. The
+  cut follows `musicTraces.picture()` (the stage's `stagePicture`) and its repeats. **Side
+  panels** (`cbTrSides`, off by default) use the two black strips instead: four spectra
+  (E_u, E_b, E+, E−) and, per `selTrSide`, the same energies against time (from the loop's
+  own stats readback) or four signed cuts u_x, b_x, z+_x, z−_x along x = Lx/2 (the solver's
+  `readCutLine`). Readbacks: the spectrum (shared with the spectrum card where one exists,
+  else its own, every 6th frame), nx + 1 four-byte copies for the top cut, one cut line.
 
 ## Alfvén-wave collision: directions, placement, χ
 

@@ -23,6 +23,13 @@ disagree, the file is right.
 
 ## Live
 
+- **MUSIC_STAGE_PLAN.md** — phase 3 of the music project, drafted, accepted and built
+  behind `?stage` 2026-11-23 (its "Build record" says what changed while Alfred watched: a
+  square box by default with black or repeated sides, side panels); the stage is not yet the
+  page's only layout. The plan as drafted: the page as a full-window stage with controls in a drawer, the box
+  taking the window's shape (a three-rung grid ladder, 256 × 128 to 512 × 256), the spectrum
+  and line cut as fading trace overlays, and a maintained current-sheet pair as an
+  alternative background to the walking mean field. No kernel changes; its four decisions are settled as proposed.
 - **MUSIC_EFFECTS_PLAN.md** — phase 2 of the music project, drafted 2026-11-21: kick types
   per band (vortex, island, dipole, sheet), stereo placement, a display zoom pulse, an
   in-plane mean field. All four were built offline, judged by Alfred, and ported to
@@ -30,7 +37,7 @@ disagree, the file is right.
   as a random walk on bass onsets, carried in the solver's exact linear step. The zoom-out
   re-gridding is built offline only (Alfred: the repetition is jarring on the page);
   sustained-sound kicks are not being built. The one adversarial review ran 2026-11-22 and
-  its findings are fixed. Left: merge and publish at Alfred's word.
+  its findings are fixed; merged to `main` and published 2026-11-22.
 - **MUSIC_PLAN.md** — live music drives the 2D demo: per-band onsets become impulsive
   gaussian-blob kicks, with the audio clock as the master of simulation time. Drafted
   2026-11-21. The offline reference is `examples/music_turbulence.py` (JAX). Committed:

@@ -75,7 +75,8 @@ jobs:
           rm -f  _site/webgpu/game.html
           # Fail loudly if the pruning ever eats the site itself.
           for f in index.html rmhd2d.html rmhd3d.html music.html docs.html reading.html \
-                   common.js physics.js solver2d.js music.js style.css; do
+                   common.js physics.js solver2d.js music.js stage.js traces.js \
+                   style.css stage.css; do
             test -s "_site/webgpu/$f" || { echo "MISSING from staged site: $f"; exit 1; }
           done
           # Cache-bust the intra-site js/css references with the deploying commit, so a
@@ -89,6 +90,9 @@ jobs:
                  -e "s|src=\"physics.js\"|src=\"physics.js?v=$v\"|" \
                  -e "s|src=\"solver2d.js\"|src=\"solver2d.js?v=$v\"|" \
                  -e "s|src=\"music.js\"|src=\"music.js?v=$v\"|" \
+                 -e "s|src=\"stage.js\"|src=\"stage.js?v=$v\"|" \
+                 -e "s|src=\"traces.js\"|src=\"traces.js?v=$v\"|" \
+                 -e "s|href=\"stage.css\"|href=\"stage.css?v=$v\"|" \
                  -e "s|href=\"style.css\"|href=\"style.css?v=$v\"|" \
                  -e "s|<span class=\"buildid\">dev</span>|<span class=\"buildid\">$v ($d)</span>|" \
                  _site/webgpu/index.html _site/webgpu/rmhd2d.html _site/webgpu/rmhd3d.html \
