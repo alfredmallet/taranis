@@ -1039,16 +1039,25 @@ async function legBoot(state) {
   ok("it loads common.js, physics.js, solver2d.js, music.js -- in that order -- then only the phase-3 files (" + PHASE3.join(", ") + ")",
      srcs.slice(0, 4).join(",") === "common.js,physics.js,solver2d.js,music.js" &&
      srcs.slice(4).every((f, i, a) => PHASE3.indexOf(f) >= 0 && a.indexOf(f) === i), srcs.join(","));
-  ok("  ... carries no analytics beacon, and no other page links to it",
+  // (linked since 2026-11-24: the 2D and the 3D page each carry ONE href to it in their header
+  // line, beside "further reading"; the shared scripts and the other pages still do not
+  // name it, so nothing else can build a link to it)
+  ok("  ... carries no analytics beacon; the 2D and 3D pages link to it once each, in their header line, and no shared script or other page does",
      !/goatcounter|gc\.zgo\.at/.test(html.replace(/<!--[\s\S]*?-->/g, "")) &&
-     ["rmhd2d.html", "rmhd3d.html", "index.html", "docs.html", "reading.html", "common.js", "physics.js", "solver2d.js"]
+     ["rmhd2d.html", "rmhd3d.html"].every(f => {
+       const t = fs.readFileSync(path.join(dir, f), "utf8");
+       return (t.match(/music\.html/g) || []).length === 1 &&
+              /<a href="reading\.html">further reading<\/a>\n  &middot; <a href="music\.html">driven by music<\/a>/.test(t);
+     }) &&
+     ["index.html", "docs.html", "reading.html", "common.js", "physics.js", "solver2d.js"]
        .every(f => {
          const t = fs.readFileSync(path.join(dir, f), "utf8");
          // a link is an href, or the name in a string literal a page could build one from;
          // a COMMENT naming the page (common.js explains its hook) is not a link
          const code = t.split("\n").filter(l => !/^\s*(\/\/|\*|<!--)/.test(l)).join("\n");
          return !/href\s*=\s*["']?music\.html/.test(t) && !/["'`][^"'`\n]*music\.html/.test(code);
-       }));
+       }) &&
+     /mkdir -p _site\/music\n[\s\S]*url=\.\.\/webgpu\/music\.html/.test(fs.readFileSync(path.join(dir, "..", ".github", "workflows", "pages.yml"), "utf8")));
   const yml = fs.readFileSync(path.join(dir, "..", ".github", "workflows", "pages.yml"), "utf8");
   // published 2026-11-21 (Alfred): the page deploys -- not pruned, required in the staged
   // site, and cache-busted with the other pages (music.js stamped like common.js)

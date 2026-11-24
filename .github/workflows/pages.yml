@@ -106,6 +106,16 @@ jobs:
           <title>taranis</title>
           <a href="webgpu/">webgpu demos</a>
           EOF
+          # A short address for the music page (typed from a video description):
+          # <site>/music -> webgpu/music.html
+          mkdir -p _site/music
+          cat > _site/music/index.html <<'EOF'
+          <!DOCTYPE html>
+          <meta charset="utf-8">
+          <meta http-equiv="refresh" content="0; url=../webgpu/music.html">
+          <title>plasma turbulence, driven by music</title>
+          <a href="../webgpu/music.html">plasma turbulence, driven by music</a>
+          EOF
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
