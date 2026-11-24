@@ -2055,7 +2055,9 @@ and means nothing). What is where:
   `eqsrcDrag: true` opt-in that lets the uniform drag coexist with it) and exclude the mean
   field (`b0`). The profile is a flux bump, strength and width from `rSheetB` / `rSheetW`,
   uploaded at Reset. Choosing them puts `magnetic |b|` on the picture, and the fixed colour
-  scale's reference becomes the sheet's peak field / 1.5 (`musicScaleRef`).
+  scale's reference follows the field shown (`musicScaleRef(u, mode)`): the sheet's own peak
+  / 1.5 in a field the sheet is part of (the peak field for |b| and z±, ψ0 for ψ, 2ψ0/a² for
+  the current), and amp, as everywhere else, for the velocity, φ and the vorticity.
 - **`traces.js`** (`musicTraces`; pure helpers `traces*`) draws on one `<canvas
   class="traces">` over `#stage` (or over the display card with `?plain&traces`): the total
   energy spectrum along the bottom and the displayed field's middle-row cut along the top,

@@ -4522,15 +4522,54 @@ async function legShape(state) {
   ok("  ... the card switches to a magnetic field, |b| (field 5), the sheet sliders come alive and the mean-field ones go dead, and the line states the cost: the peak field, a, the energy, and that sheets this strong shorten the timestep",
      q.sel === "5" && q.dis.join() === "false,false,true,true,true" && /current sheets: peak field 5\.00, width a = 0\.323, energy /.test(q.box) &&
      /shorten the timestep \(about 1\.3-1\.5 times the steps at 5, twice at 8\)/.test(q.box) && env.run("function(){ return solver.modeOf(0); }") === 5, q.box.slice(40));
-  // the fixed colour scale: on the sheets its reference is the sheet's peak field / 1.5, not amp
+  // the fixed colour scale: on the sheets its reference is the sheet's own peak IN THE FIELD SHOWN,
+  // over 1.5 -- and still amp for a field the sheet is not part of (2026-11-24)
   const sc = () => JSON.parse(env.run(`function(){ const u = musicUi(), c = cards.disp[0]; return JSON.stringify({ m: u.scaleM, amp: u.amp, ref: musicScaleRef(u), max: musicScaleMax(u),
-    bar: c.barMax, dirty: c.dirty, v: el("vScale").textContent, read: musicScaleReadout(), rec: musicScaleRecord().max, b: music.sheet ? music.sheet.b : null }); }`));
+    bar: c.barMax, dirty: c.dirty, v: el("vScale").textContent, read: musicScaleReadout(), rec: musicScaleRecord().max, b: music.sheet ? music.sheet.b : null, sh: music.sheet, mode: solver.modeOf(c.ci),
+    all: Array.from({ length: 12 }, (_, m) => musicScaleRef({ amp: 0.7, scaleM: 2 }, m)), all2: Array.from({ length: 12 }, (_, m) => musicScaleMax({ amp: 0.7, scaleM: 2 }, m)) }); }`));
   const sc5 = sc();
-  ok("  ... and the fixed colour scale changes its reference: on the sheets it is the sheet's PEAK FIELD / 1.5 (5 / 1.5 here), not amp, so the slider's default 1.5 puts the top of the scale on the peak itself -- 5.00, to the slider's own rounding of 1.5 (2^0.585)",
+  ok("  ... and the fixed colour scale changes its reference: on the sheets, for the field the card shows there (|b|), it is the sheet's PEAK FIELD / 1.5 (5 / 1.5 here), not amp, so the slider's default 1.5 puts the top of the scale on the peak itself -- 5.00, to the slider's own rounding of 1.5 (2^0.585)",
      sc5.b === 5 && sc5.amp === 1 && sc5.ref === 5 / 1.5 && sc5.max === sc5.m * (5 / 1.5) && Math.abs(sc5.m - Math.pow(2, 0.585)) < 1e-12 && Math.abs(sc5.max / 5 - 1) < 1e-4 && sc5.rec === sc5.max,
      JSON.stringify([sc5.ref, sc5.max]));
-  ok("  ... the slider's label and the readout say so: \"1.50 → 5.00\", \"colour scale fixed at 5.00 (1.50 × the sheets' peak field / 1.5)\"",
-     sc5.v === "1.50 → 5.00" && /^colour scale fixed at 5\.00 \(1\.50 × the sheets' peak field \/ 1\.5\)/.test(sc5.read) && !/× amp/.test(sc5.read), sc5.v + " | " + sc5.read);
+  ok("  ... the slider's label and the readout say so: \"1.50 → 5.00\", \"colour scale fixed at 5.00 (1.50 × the sheets' peak in this field / 1.5)\"",
+     sc5.v === "1.50 → 5.00" && /^colour scale fixed at 5\.00 \(1\.50 × the sheets' peak in this field \/ 1\.5\)/.test(sc5.read) && !/× amp/.test(sc5.read), sc5.v + " | " + sc5.read);
+  // the reference per displayed field, from the sheet as laid (psi = psi0 sech^2((x - Lx/2) / a), peak field b):
+  // this file's own arithmetic on the offline fixture's psi0 and a, with an amp (0.7) no peak could be mistaken for
+  const refWant = (m, sh, amp) => (m === 5 || m === 6 || m === 7) ? sh.b / 1.5 : m === 3 ? Math.abs(sh.psi0) / 1.5 : (m === 1 || m === 10 || m === 11) ? 2 * Math.abs(sh.psi0) / (sh.a * sh.a) / 1.5 : amp;
+  const fxSheet = { b: 5, psi0: fs169.psi0, a: fs169.a };
+  const NAMES = ["vorticity", "j", "phi", "psi", "|u|", "|b|", "|z+|", "|z-|", "sigma_c", "sigma_r", "omega+", "omega-"];
+  const refBad = sc5.all.map((v, m) => (rel(v, refWant(m, fxSheet, 0.7)) < 1e-13 && v === refWant(m, sc5.sh, 0.7) && sc5.all2[m] === 2 * v ? "" : NAMES[m] + " " + v)).filter(x => x);
+  ok("on the sheets the reference depends on the FIELD SHOWN, all twelve display modes: |b|, |z+|, |z-| take the peak field / 1.5 (" + (5 / 1.5).toFixed(3) + "); psi takes psi0 / 1.5 (" + (fs169.psi0 / 1.5).toFixed(3) +
+     "); j, omega+, omega- take the current at the centre, 2 psi0 / a^2, / 1.5 (" + (2 * fs169.psi0 / (fs169.a * fs169.a) / 1.5).toFixed(2) + "); the vorticity, phi, |u| and the sigma modes -- fields the sheet is not in -- keep amp",
+     refBad.length === 0 && sc5.all.length === 12 && sc5.all[4] === 0.7 && sc5.all[0] === 0.7 && sc5.all[2] === 0.7 && sc5.all[8] === 0.7 && sc5.all[9] === 0.7 &&
+     new Set([sc5.all[5], sc5.all[3], sc5.all[1], 0.7]).size === 4 && sc5.all[1] > 5 * sc5.all[5], refBad.join("; ") || sc5.all.map(v => v.toPrecision(4)).join(" "));
+  ok("  ... with no mode handed in it is the field the first card is showing (musicScaleMode: the live chain's): |b| here, so musicScaleRef(u) is the |b| entry of that table",
+     sc5.mode === 5 && sc5.ref === refWant(5, sc5.sh, 1) && env.run("function(){ return musicScaleMode() === solver.modeOf(cards.disp[0].ci) && musicScaleRef(musicUi()) === musicScaleRef(musicUi(), 5); }") === true);
+  // switching the card's FIELD, and nothing else: the next render writes that field's range to maxVal,
+  // the colour bar takes it and the slider's label follows
+  env.run(`function(){ window.__mw = []; window.__bars = []; const q = device.queue, wb = q.writeBuffer.bind(q); window.__wb0 = q.writeBuffer;
+    q.writeBuffer = (b, off, data) => { if (solver && solver.disp[0] && b === solver.disp[0].buf.maxVal) window.__mw.push(Array.from(new Float32Array(data.buffer || data))[0]); return wb(b, off, data); };
+    const c = cards.disp[0], sb = c.setBarRange; window.__sb0 = sb; c.setBarRange = function(v){ window.__bars.push(v); return sb.call(this, v); }; }`);
+  const pickF = async v => { env.run(`function(v){ window.__mw.length = 0; window.__bars.length = 0; const c = cards.disp[0]; c.selField.value = v; c.selField.onchange({}); }`, String(v));
+    await P.frame();
+    return JSON.parse(env.run(`function(){ const u = musicUi(); return JSON.stringify({ mode: solver.modeOf(0), w: window.__mw, bars: window.__bars, v: el("vScale").textContent, m: u.scaleM, read: musicScaleReadout(),
+      fixed: solver.disp[0].musicFixed, auto: solver.disp[0].bg.maxFinal === solver.disp[0].musicBg.auto }); }`)); };
+  const swBad = [], swLog = [];
+  for (const m of [4, 1, 3, 6, 2, 10, 5]) {
+    const r = await pickF(m), want = r.m * refWant(m, sc5.sh, 1);
+    swLog.push(NAMES[m] + " " + r.v);
+    if (!(r.mode === m && r.w.length >= 1 && r.w[r.w.length - 1] === Math.fround(want) && r.bars.indexOf(want) >= 0 && r.v === "1.50 → " + want.toPrecision(3) && r.fixed === true &&
+          (refWant(m, sc5.sh, 1) === 1 ? /× amp\)/ : /× the sheets' peak in this field \/ 1\.5\)/).test(r.read) && r.read.indexOf("fixed at " + want.toPrecision(3)) >= 0)) swBad.push(NAMES[m] + ": " + JSON.stringify(r));
+  }
+  ok("switching the card's field on the sheets, and touching nothing else (|b| -> |u| -> j -> psi -> |z+| -> phi -> omega+ -> back to |b|): the next render writes THAT field's range to maxVal, the colour bar is set to it, and the slider's label and the readout follow -- |u| and phi on amp (\"1.50 → 1.50\", \"× amp\"), the rest on the sheet's peak in that field",
+     swBad.length === 0 && swLog[0] === "|u| 1.50 → 1.50" && swLog[6] === "|b| 1.50 → 5.00" && swLog[1] === "j 1.50 → " + (sc5.m * 2 * fs169.psi0 / (fs169.a * fs169.a) / 1.5).toPrecision(3), swBad.join(" ; ") || swLog.join(" | "));
+  const sgm = JSON.parse(env.run(`function(){ const D = solver.disp[0], c = cards.disp[0], u = musicUi(), out = [];
+    for (const m of [8, 9]) { window.__mw.length = 0; window.__bars.length = 0; D.mode = m; solver.render(c.ctx, 0);
+      out.push([dispIsSigma(m), window.__mw.length, window.__bars.length, D.musicFixed, D.bg.maxFinal === D.musicBg.auto, musicScaleRef(u, m) === u.amp]); }
+    window.__mw.length = 0; D.mode = 5; solver.render(c.ctx, 0); out.push(window.__mw.slice());
+    device.queue.writeBuffer = window.__wb0; c.setBarRange = window.__sb0; return JSON.stringify(out); }`));
+  ok("  ... and the sigma modes are still left alone on the sheets: sigma_c and sigma_r write nothing to maxVal, set no bar range and render through the autoscale's own bind group (their fixed -1..+1); back on |b| the sheet's range is written again",
+     sgm.slice(0, 2).every(r => r.join() === "true,0,0,false,true,true") && sgm[2].length === 1 && sgm[2][0] === Math.fround(sc5.max) && realFails(env).length === 0, JSON.stringify(sgm));
   const tip = env.getEl("selBg").title;
   ok("  ... the tooltip is honest about it: ONE current sheet through the centre with weaker return currents (not a pair), hyper 4 has no resistive layer, this is NOT the tearing instability but a restored sheet broken up by kicks, and rmhd2d.html has the real one; the sliders' say a change waits for the next Reset",
      /no resistive layer/.test(tip) && /NOT the tearing instability/.test(tip) && /it is a restored sheet broken up by kicks/.test(tip) && /with weaker return currents/.test(tip) && !/\bpair\b/.test(tip) && /rmhd2d\.html/.test(tip) &&
@@ -4546,10 +4585,11 @@ async function legShape(state) {
   await P.click("btnReset");
   const sc16 = sc();                               // (read before any frame: the stub's readbacks return zeros)
   ic = ics();
-  ok("the scale's reference is the sheet AS LAID DOWN: with the sliders at 8 and amp 2 but no Reset yet it is still 5 / 1.5 (the amp slider does not move it here), and Reset, which lays a peak field of 16, makes it 16 / 1.5 -- the label, the readout and the card's colour bar at once (\"1.50 → 16.0\")",
+  ok("the scale's reference is the sheet AS LAID DOWN: with the sliders at 8 and amp 2 but no Reset yet it is still 5 / 1.5 for |b| (the amp slider does not move it here), and Reset, which lays a peak field of 16, makes it 16 / 1.5 -- the label, the readout and the card's colour bar at once (\"1.50 → 16.0\")",
      scQ.b === 5 && scQ.amp === 2 && scQ.ref === 5 / 1.5 && scQ.max === sc5.max && scQ.v === "1.50 → 5.00" &&
      sc16.b === 16 && sc16.ref === 16 / 1.5 && sc16.max === sc16.m * (16 / 1.5) && sc16.v === "1.50 → 16.0" && sc16.bar === sc16.max && sc16.dirty === true &&
-     /^colour scale fixed at 16\.0 \(1\.50 × the sheets' peak field \/ 1\.5\)/.test(sc16.read), JSON.stringify([scQ.max, sc16.max, sc16.bar, sc16.v]));
+     /^colour scale fixed at 16\.0 \(1\.50 × the sheets' peak in this field \/ 1\.5\)/.test(sc16.read) &&
+     scQ.all[4] === 0.7 && scQ.all[5] === 5 / 1.5 && sc16.all[5] === 16 / 1.5 && sc16.all[3] === Math.abs(sc16.sh.psi0) / 1.5 && sc16.all[1] === 2 * Math.abs(sc16.sh.psi0) / (sc16.sh.a * sc16.sh.a) / 1.5 && sc16.all[4] === 0.7, JSON.stringify([scQ.max, sc16.max, sc16.bar, sc16.v]));
   const s8 = sheet(), a8 = last(q.plan.sigmas), want8 = M.musicSheetPsi0(8, 2, a8);
   ok("sheet field 8, width 1, amp 2: moving the sliders uploads NOTHING (" + quiet.length + " initial conditions); they take effect at Reset",
      quiet.length === 0 && rel(sheet().psi0, want8) < 1e-14 && rel(s8.a, a8) < 1e-14 && s8.b === 16);
@@ -4568,8 +4608,8 @@ async function legShape(state) {
   ok("sheet field 0: still the sheets' solver (eqsrc), an all-zero psi, and the line drops the cost note",
      ic.length === 1 && ic[0].k === "real" && ic[0].col.every(v => v === 0) && snap(env).p.eqsrc === true && !/shorten the timestep/.test(snap(env).box) && sheet().energy === 0);
   const sc0 = sc();
-  ok("  ... and with no sheet to refer to (peak field 0) the colour scale falls back to amp: 1.50 × amp, and the readout says amp again",
-     sc0.b === 0 && sc0.amp === 1 && sc0.ref === 1 && sc0.max === sc0.m && sc0.v === "1.50 → 1.50" && /^colour scale fixed at 1\.50 \(1\.50 × amp\)/.test(sc0.read), sc0.v + " | " + sc0.read);
+  ok("  ... and with no sheet to refer to (peak field 0) the colour scale falls back to amp, for EVERY displayed field: 1.50 × amp, and the readout says amp again",
+     sc0.b === 0 && sc0.amp === 1 && sc0.ref === 1 && sc0.max === sc0.m && sc0.v === "1.50 → 1.50" && /^colour scale fixed at 1\.50 \(1\.50 × amp\)/.test(sc0.read) && sc0.all.every(v => v === 0.7) && sc0.all2.every(v => v === 1.4), sc0.v + " | " + sc0.read);
   await P.input("rSheetB", 5);
   await P.click("btnReset");
   ics();
@@ -4632,12 +4672,16 @@ async function legShape(state) {
   await P.input("selBg", "sheets");
   const scS = sc();
   seq.push(fld());                                 // -> sheets: |b|
-  ok("the colour scale's reference follows the BACKGROUND select at once, the card's colour bar with it: leaving the sheets it is amp again (1.50 × amp = 1.50), choosing them it is the new sheet's peak / 1.5 (top of the scale 5.00)",
-     scF.ref === scF.amp && scF.amp === 1 && scF.max === scF.m && scF.bar === scF.max && /× amp\)/.test(scF.read) &&
-     scS.b === 5 && scS.ref === 5 / 1.5 && scS.max === scS.m * (5 / 1.5) && scS.bar === scS.max && /× the sheets' peak field \/ 1\.5\)/.test(scS.read),
+  ok("the colour scale's reference follows the BACKGROUND select at once, the card's colour bar with it: leaving the sheets it is amp again (1.50 × amp = 1.50) -- for all twelve display modes, as it is off the sheets -- and choosing them it is the new sheet's peak in the field shown / 1.5 (|b|: top of the scale 5.00)",
+     scF.ref === scF.amp && scF.amp === 1 && scF.max === scF.m && scF.bar === scF.max && /× amp\)/.test(scF.read) && scF.all.every(v => v === 0.7) && scF.all2.every(v => v === 1.4) &&
+     scS.b === 5 && scS.mode === 5 && scS.ref === 5 / 1.5 && scS.max === scS.m * (5 / 1.5) && scS.bar === scS.max && /× the sheets' peak in this field \/ 1\.5\)/.test(scS.read) && scS.all[4] === 0.7,
      JSON.stringify([scF.max, scF.bar, scS.max, scS.bar]));
   pick("1");                                       // the visitor picks the current
   await P.click("btnReset");
+  const scJ = sc();                                // (before any frame)
+  ok("a field the visitor picks on the sheets keeps ITS reference through Reset: the current, then Reset -- the scale is 1.50 × (2 psi0 / a^2) / 1.5 of the sheet just laid, on the colour bar and the label at once, and the readout says the sheets' peak in this field",
+     scJ.mode === 1 && scJ.ref === 2 * Math.abs(scJ.sh.psi0) / (scJ.sh.a * scJ.sh.a) / 1.5 && rel(scJ.ref, 2 * fs169.psi0 / (fs169.a * fs169.a) / 1.5) < 1e-13 && scJ.max === scJ.m * scJ.ref &&
+     scJ.bar === scJ.max && scJ.v === "1.50 → " + scJ.max.toPrecision(3) && /× the sheets' peak in this field \/ 1\.5\)/.test(scJ.read) && scJ.max > 5 * scS.max, JSON.stringify([scJ.ref, scJ.bar, scJ.v]));
   seq.push(fld());                                 // ... which survives Reset
   await P.input("selGrid", "light");
   await P.input("selGrid", "auto");

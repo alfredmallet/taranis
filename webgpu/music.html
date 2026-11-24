@@ -145,7 +145,9 @@ controlsBuild({
        { k: "lab", t: "scale max (× amp)" },
        { k: "rng", id: "rScale", min: -2, max: 2, step: 0.01, v: 0.585,
          ti: "full scale = this multiple of amp (0.25 to 4, logarithmic; on the current sheets, "
-           + "of the sheets' peak field / 1.5 instead, so the default shows the whole sheet), for whatever field the "
+           + "of the sheets' own peak in the field shown / 1.5 where the sheets are part of that field "
+           + "-- |b|, the Elsasser fields, psi, the current -- so the default shows the whole sheet; "
+           + "the velocity, phi and the vorticity keep amp), for whatever field the "
            + "card shows: 0..max for a magnitude, ±max for a signed field, anything beyond it "
            + "saturates. amp is a VELOCITY: for |u|, |b| and the Elsasser magnitudes the multiple "
            + "is dimensionless, for the potentials and for vorticity / current it is only a "
@@ -500,11 +502,32 @@ function musicStrip() {
 //     render is the shared one, dispatch for dispatch.
 // Values beyond the range saturate: dispX clamps a signed field to +-1 and cmap clamps a
 // magnitude to [0, 1] (physics.js), neither wraps.
-// On the current sheets the reference is the SHEET's peak field, not the kicks' amp: at the
-// slider's default (1.5) the scale tops out exactly at that peak, so the sheet shows its
-// structure instead of saturating and the turbulence keeps the lower part of the colormap.
-const musicScaleRef = u => (music.shape && music.shape.bg === "sheets" && music.sheet && music.sheet.b > 0 ? music.sheet.b / 1.5 : u.amp);
-const musicScaleMax = u => Math.max(1e-6, u.scaleM * musicScaleRef(u));
+// On the current sheets the reference depends on WHAT IS SHOWN (Alfred, 2026-11-24): a field
+// the sheet is part of is scaled to the sheet's own peak in that field, so the sheet shows
+// its structure instead of saturating and the turbulence keeps the lower part of the
+// colormap; a field the sheet is NOT part of -- the velocity, phi, the vorticity -- keeps
+// the kicks' amp, exactly as on the other backgrounds, so it is not washed out by a field
+// that is not in it. The peaks, for psi = psi0 sech^2((x - Lx/2)/a):
+//   |b|, |z+|, |z-|      the peak field, sheetB * amp           (music.sheet.b)
+//   psi                  psi0
+//   j, omega+, omega-    the current at the centre, 2 psi0 / a^2
+// each over 1.5, so that the slider's default (1.5) tops out exactly at the peak.
+function musicScaleRef(u, mode) {
+  const sh = music.shape && music.shape.bg === "sheets" ? music.sheet : null;
+  if (!sh || !(sh.b > 0)) return u.amp;
+  const m = mode === undefined ? musicScaleMode() : mode;
+  if (m === DISP_BVEC || m === DISP_BVEC + 1 || m === DISP_ZMINUS) return sh.b / 1.5;
+  if (m === DISP_PSI) return Math.abs(sh.psi0) / 1.5;
+  if (m === 1 || m === DISP_OMEGA_P || m === DISP_OMEGA_M) return 2 * Math.abs(sh.psi0) / (sh.a * sh.a) / 1.5;
+  return u.amp;
+}
+// the field the (first) picture shows: the live chain's mode, else what its select says
+function musicScaleMode() {
+  const c = typeof cards !== "undefined" && cards.disp ? cards.disp[0] : null;
+  if (c && solver && solver.modeOf) return solver.modeOf(c.ci);
+  return c && c.selField ? parseInt(c.selField.value, 10) : DISP_VEC0;
+}
+const musicScaleMax = (u, mode) => Math.max(1e-6, u.scaleM * musicScaleRef(u, mode));
 function musicScaleInstall(sv) {
   const render = sv.render.bind(sv);              // the class's own method
   sv.render = function (ctx, ci) { musicScaleApply(sv, ci || 0); return render(ctx, ci); };
@@ -520,7 +543,15 @@ function musicScaleApply(sv, ci) {
   }
   D.bg.maxFinal = fixed ? D.musicBg.fixed : D.musicBg.auto;
   D.musicFixed = fixed;
-  if (fixed) sv.device.queue.writeBuffer(D.buf.maxVal, 0, new Float32Array([musicScaleMax(u)]));
+  if (fixed) sv.device.queue.writeBuffer(D.buf.maxVal, 0, new Float32Array([musicScaleMax(u, D.mode)]));
+  // another field on this chain: its range may be another one (musicScaleRef), so the colour
+  // bar and the slider's label follow at once
+  if (D.musicMode !== D.mode) {
+    D.musicMode = D.mode;
+    const c = cards.disp.find(x => x.ci === ci);
+    if (c) { c.barAt = 0; if (fixed) c.setBarRange(musicScaleMax(u, D.mode)); }
+    syncLabels();
+  }
 }
 // the box or either slider moved: redraw every card now (a paused or silent page takes no
 // step that would), and put the new range on the colour bars without waiting for a readback
@@ -529,7 +560,7 @@ function musicScaleChanged() {
   for (const c of cards.disp) {
     c.dirty = true;
     c.barAt = 0;
-    if (u.fix && solver && !dispIsSigma(solver.modeOf(c.ci))) c.setBarRange(musicScaleMax(u));
+    if (u.fix && solver && !dispIsSigma(solver.modeOf(c.ci))) c.setBarRange(musicScaleMax(u, solver.modeOf(c.ci)));
     else if (!u.fix) c.setBarRange(NaN);          // the autoscale's own value arrives with the next readback
   }
 }
@@ -548,7 +579,7 @@ function musicScaleRecord() {
 }
 function musicScaleReadout() {
   const u = musicUi();
-  return u.fix ? "colour scale fixed at " + musicScaleMax(u).toPrecision(3) + " (" + u.scaleM.toFixed(2) + (musicScaleRef(u) === u.amp ? " × amp)" : " × the sheets' peak field / 1.5)")
+  return u.fix ? "colour scale fixed at " + musicScaleMax(u).toPrecision(3) + " (" + u.scaleM.toFixed(2) + (musicScaleRef(u) === u.amp ? " × amp)" : " × the sheets' peak in this field / 1.5)")
                  + (isFinite(music.autoMax) ? "; the autoscale would be " + music.autoMax.toPrecision(3) : "")
                : "colour scale: autoscale";
 }
