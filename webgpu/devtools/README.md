@@ -868,8 +868,9 @@ leave untracked or commit — they are dev-only, nothing in the apps loads them.
   four rounds, no survivors) and once more by the phase's adversarial review.
 - `checkmusic.js [dir]` — the MUSIC PAGE gate (MUSIC_PLAN M2): `music.js`'s pure logic
   against numbers recorded from the offline reference implementation, and `music.html`
-  booted and DRIVEN under the stub. 226 rows in ten legs when this entry was written (821 in
-  nineteen legs by 2026-11-24; the later legs have their own entries above). (1) `music.js` evaluates in a
+  booted and DRIVEN under the stub. 226 rows in ten legs when this entry was written (853 in
+  nineteen legs by 2026-11-24, when the stage became the page's default layout and the
+  card-layout legs moved to `?plain`; the later legs have their own entries above). (1) `music.js` evaluates in a
   bare `vm` context — no DOM, no Web Audio, none of the shared scripts — and every
   top-level name is in its own namespace; (2) `musicBandPlan` equals the offline
   `band_plan` at eleven argument sets (`fixtures/music_ref.json`, written by
