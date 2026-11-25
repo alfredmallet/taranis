@@ -2068,6 +2068,9 @@ and means nothing). What is where:
   energies against time (from the loop's own stats readback), or four signed cuts u_x, b_x,
   z+_x, z−_x along x = Lx/2 (the solver's `readCutLine`). Readbacks: the spectrum (shared with the spectrum card where one exists,
   else its own, every 6th frame), nx + 1 four-byte copies for the top cut, one cut line.
+  A spectrum's vertical range is fixed against the amp slider (top 0.3 amp²) and its span
+  grows with the grid (`tracesSpecDecades`): four decades at 256² and below, then
+  (5/3) log10 of the extra k range more, rounded up -- 5 at 512², 6 at 1024².
 
 ## Alfvén-wave collision: directions, placement, χ
 

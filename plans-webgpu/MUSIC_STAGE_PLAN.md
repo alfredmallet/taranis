@@ -402,7 +402,7 @@ real Chrome on the M1. Changes from the text above, all Alfred's decisions the s
 - **Traces**: the line cut runs across the top and the total-energy spectrum across the
   bottom, full width, no dashed lines; tick labels (no drawn axes) behind a toggle; the cut
   shows the field the picture shows, fades four times faster, and follows the picture's x
-  extent (and its repeats). The spectrum spans four decades. A left margin exists only
+  extent (and its repeats). The spectrum spans four decades (more above 256², since 2026-11-24). A left margin exists only
   while tick labels are shown.
 - **Side panels** (`cbTrSides`, off by default): in the two black strips, four spectra
   (E_u, E_b, E+, E−) on one side and on the other either the same four energies against
