@@ -23,7 +23,7 @@
 # gates are marked).
 # pytest: `pytest tests/test_flrmhd_operators.py`. Script: `python tests/test_flrmhd_operators.py`
 # -- never under mpirun (dims=2 and z_spectral are single-process only).
-from _rmhd_testing import (bootstrap, checks, fit_order, fresh_params, managed_manager,
+from _rmhd_testing import (bootstrap, checks, fit_order, managed_manager,
                            snap_dir)
 
 bootstrap()
@@ -82,7 +82,7 @@ def _raises(exc, fn):
         fn()
     except exc as e:
         return str(e) or type(e).__name__
-    except Exception as e:                      # the wrong exception type is a failure
+    except Exception:                      # the wrong exception type is a failure
         return ""
     return ""
 

@@ -42,7 +42,7 @@ from taranis.run import block_of_steps
 from taranis.timestepping import get_scheme
 
 from _flrmhd_testing import (broadband_ic, flr_ref, invariants, kgrid_ksq, norm,
-                             one_minus_gamma0_ref, rates, weights, yfac)
+                             one_minus_gamma0_ref, rates, weights)
 
 FP64 = _precision.precision == "64"
 TWO_PI = 2.0*np.pi

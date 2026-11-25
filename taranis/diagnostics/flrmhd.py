@@ -19,7 +19,7 @@
 import jax.numpy as jnp
 import numpy as np
 
-from ..physics import construct_rhs, equation_registry, flrmhd, gdi, rmhd
+from ..physics import construct_rhs, equation_registry, flrmhd, rmhd
 from ..physics.shared_physics import perp_reduce
 from .core import _binned, _perp_bins
 

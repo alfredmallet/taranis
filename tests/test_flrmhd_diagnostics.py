@@ -50,7 +50,7 @@ from taranis.run import block_of_steps
 from taranis.timestepping import get_scheme
 
 from _flrmhd_testing import (broadband_ic, elsasser_modal, elsasser_rates, flr_ref,
-                             invariants, kgrid_ksq, norm, weights, yfac)
+                             invariants, kgrid_ksq, norm, weights)
 
 FP64 = _precision.precision == "64"
 TWO_PI = 2.0*np.pi
@@ -576,7 +576,7 @@ def test_dissipation_against_exact_decay():
                 kz = np.fft.fftfreq(params.nz)*params.nz*TWO_PI/params.Lz
                 kz[params.nz//2] = 0.0
                 d = d - nuz*(kz**(2*hz))[:, None, None]
-            E0, H0 = (Ep + Em).sum(), Hk.sum()
+            E0 = (Ep + Em).sum()
             dEdt, dHdt = (2*d*(Ep + Em)).sum(), (2*d*Hk).sum()
             dis = {k: float(v) for k, v in dgf.dissipation(state, kgrid, params).items()}
             eE = abs(-(dis["eps_perp"] + dis["eps_z"])/dEdt - 1)
